@@ -290,8 +290,8 @@ fun PlayerScreen(
   val exoPlayer = remember(resolvedPlaybackUri, useSoftwareDecoderFallback, retryTrigger) {
     val httpDataSourceFactory = DefaultHttpDataSource.Factory()
       .setAllowCrossProtocolRedirects(true)
-      .setConnectTimeoutMs(15000)
-      .setReadTimeoutMs(20000)
+      .setConnectTimeoutMs(45000)
+      .setReadTimeoutMs(45000)
       .setUserAgent("VidVoraPlayer/1.0 (Android)")
     val dataSourceFactory = DefaultDataSource.Factory(context, httpDataSourceFactory)
 
@@ -543,6 +543,9 @@ fun PlayerScreen(
     }
 
     exoPlayer.addListener(listener)
+    isPlaying = exoPlayer.isPlaying
+    isBuffering = exoPlayer.playbackState == Player.STATE_BUFFERING ||
+      (exoPlayer.playbackState == Player.STATE_IDLE && resolvedPlaybackUri.isNotBlank() && playbackError == null)
 
     onDispose {
       exoPlayer.removeListener(listener)
@@ -1019,13 +1022,16 @@ fun PlayerScreen(
               )
             }
 
-            // Play / Pause / Replay
+            // Play / Pause / Replay (shows active spinner while buffering so user sees loading state)
             IconButton(
               onClick = {
                 when {
                   isPlaybackEnded || exoPlayer.playbackState == Player.STATE_ENDED -> replayVideo()
                   isPlaying -> exoPlayer.pause()
-                  else -> exoPlayer.play()
+                  else -> {
+                    exoPlayer.playWhenReady = true
+                    exoPlayer.play()
+                  }
                 }
               },
               modifier = Modifier
@@ -1034,20 +1040,28 @@ fun PlayerScreen(
                 .background(MasalaRedPrimary)
                 .testTag("player_play_pause_button")
             ) {
-              Icon(
-                imageVector = when {
-                  isPlaybackEnded -> Icons.Default.Replay
-                  isPlaying -> Icons.Default.Pause
-                  else -> Icons.Default.PlayArrow
-                },
-                contentDescription = when {
-                  isPlaybackEnded -> "Replay Video"
-                  isPlaying -> "Pause"
-                  else -> "Play"
-                },
-                tint = Color.White,
-                modifier = Modifier.size(38.dp)
-              )
+              if (isBuffering && !isPlaying && !isPlaybackEnded && playbackError == null) {
+                CircularProgressIndicator(
+                  color = Color.White,
+                  strokeWidth = 3.5.dp,
+                  modifier = Modifier.size(34.dp)
+                )
+              } else {
+                Icon(
+                  imageVector = when {
+                    isPlaybackEnded -> Icons.Default.Replay
+                    isPlaying -> Icons.Default.Pause
+                    else -> Icons.Default.PlayArrow
+                  },
+                  contentDescription = when {
+                    isPlaybackEnded -> "Replay Video"
+                    isPlaying -> "Pause"
+                    else -> "Play"
+                  },
+                  tint = Color.White,
+                  modifier = Modifier.size(38.dp)
+                )
+              }
             }
 
             // 10s Forward

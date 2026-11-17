@@ -473,6 +473,7 @@ class FirestoreVideoRepository(
       // 1c. Look up by matching storagePath when a direct HTTP(S) URL is pasted
       if (resolvedVideoDoc == null && isDirectHttpUrl) {
         val urlMatches = db.collection("videos")
+          .whereEqualTo("isActive", true)
           .whereEqualTo("storagePath", trimmedInput)
           .limit(1)
           .get()
@@ -663,6 +664,7 @@ class FirestoreVideoRepository(
     if (cleanUrl.isBlank()) return null
     return try {
       val matches = db.collection("videos")
+        .whereEqualTo("isActive", true)
         .whereEqualTo("storagePath", cleanUrl)
         .limit(1)
         .get()

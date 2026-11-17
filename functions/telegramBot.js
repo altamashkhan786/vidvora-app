@@ -1105,10 +1105,180 @@ async function handleTelegramUpdate({ update, db, storage, functionBaseUrl, play
   }
 }
 
-async function handleStreamPublicVideo({ videoId, kind, sig, rangeHeader, res, db, storage, playbackSecret }) {
+const STREAM_CACHE_DIR = path.join(os.tmpdir(), "vidvora-stream-cache");
+const MAX_STREAM_CACHE_FILES = 8;
+const inflightTelegramDownloads = new Map();
+
+function parseHttpByteRange(rangeHeader, fileSize) {
+  if (!rangeHeader || !Number.isFinite(fileSize) || fileSize <= 0) return null;
+  const match = String(rangeHeader).trim().match(/^bytes=(\d*)-(\d*)$/i);
+  if (!match) return { invalid: true };
+
+  const startStr = match[1];
+  const endStr = match[2];
+  let start = 0;
+  let end = fileSize - 1;
+
+  if (startStr === "" && endStr === "") {
+    return { invalid: true };
+  } else if (startStr === "") {
+    const suffixLen = parseInt(endStr, 10);
+    if (Number.isNaN(suffixLen) || suffixLen <= 0) return { invalid: true };
+    start = Math.max(0, fileSize - suffixLen);
+    end = fileSize - 1;
+  } else {
+    start = parseInt(startStr, 10);
+    end = endStr ? Math.min(parseInt(endStr, 10), fileSize - 1) : fileSize - 1;
+  }
+
+  if (Number.isNaN(start) || Number.isNaN(end) || start < 0 || start >= fileSize || end < start) {
+    return { invalid: true };
+  }
+  return { start, end, chunkSize: end - start + 1 };
+}
+
+async function pruneStreamCacheIfNeeded() {
+  try {
+    const entries = await fs.promises.readdir(STREAM_CACHE_DIR, { withFileTypes: true });
+    const files = entries.filter((e) => e.isFile() && !e.name.includes(".part."));
+    if (files.length <= MAX_STREAM_CACHE_FILES) return;
+    const stats = await Promise.all(
+      files.map(async (f) => {
+        const fullPath = path.join(STREAM_CACHE_DIR, f.name);
+        const st = await fs.promises.stat(fullPath).catch(() => null);
+        return st ? { fullPath, mtimeMs: st.mtimeMs } : null;
+      })
+    );
+    const sorted = stats.filter(Boolean).sort((a, b) => a.mtimeMs - b.mtimeMs);
+    const excess = sorted.length - MAX_STREAM_CACHE_FILES;
+    for (let i = 0; i < excess; i += 1) {
+      await fs.promises.unlink(sorted[i].fullPath).catch(() => {});
+    }
+  } catch (_) {
+    // Non-fatal cache cleanup
+  }
+}
+
+async function ensureTelegramVideoCached({ videoId, tgFileId, db }) {
+  const safeId = String(videoId).replace(/[^a-zA-Z0-9_-]/g, "_");
+  const cachedPath = path.join(STREAM_CACHE_DIR, `${safeId}.mp4`);
+
+  try {
+    const existing = await fs.promises.stat(cachedPath);
+    if (existing.isFile() && existing.size > 0) {
+      return cachedPath;
+    }
+  } catch (_) {
+    // Cache miss — fetch below
+  }
+
+  if (inflightTelegramDownloads.has(safeId)) {
+    return inflightTelegramDownloads.get(safeId);
+  }
+
+  const downloadPromise = (async () => {
+    await fs.promises.mkdir(STREAM_CACHE_DIR, { recursive: true });
+    const { botToken, apiBase } = await resolveBotRuntimeConfig(db);
+    if (!botToken) {
+      const err = new Error("Bot token unavailable for stream.");
+      err.statusCode = 500;
+      throw err;
+    }
+
+    const fileInfo = await telegramApiJson(apiBase, botToken, "getFile", { file_id: tgFileId });
+    const downloadUrl = String(fileInfo.file_path || "").startsWith("http")
+      ? fileInfo.file_path
+      : `${apiBase}/file/bot${botToken}/${fileInfo.file_path}`;
+
+    const upstream = await fetch(downloadUrl);
+    if (!upstream.ok) {
+      const err = new Error("Unable to stream video from Telegram.");
+      err.statusCode = 502;
+      throw err;
+    }
+
+    const tmpPart = `${cachedPath}.part.${crypto.randomBytes(4).toString("hex")}`;
+    const bytes = Buffer.from(await upstream.arrayBuffer());
+    if (!bytes.length) {
+      const err = new Error("Empty video file from Telegram.");
+      err.statusCode = 502;
+      throw err;
+    }
+    await fs.promises.writeFile(tmpPart, bytes);
+    await fs.promises.rename(tmpPart, cachedPath);
+    pruneStreamCacheIfNeeded();
+    return cachedPath;
+  })();
+
+  inflightTelegramDownloads.set(safeId, downloadPromise);
+  try {
+    return await downloadPromise;
+  } finally {
+    inflightTelegramDownloads.delete(safeId);
+  }
+}
+
+async function serveLocalFileWithRange({ filePath, contentType, method, rangeHeader, cacheControl, res }) {
+  const stat = await fs.promises.stat(filePath);
+  const fileSize = stat.size;
+  const isHead = String(method || "GET").toUpperCase() === "HEAD";
+
+  if (rangeHeader) {
+    const parsed = parseHttpByteRange(rangeHeader, fileSize);
+    if (parsed && parsed.invalid) {
+      res.writeHead(416, { "Content-Range": `bytes */${fileSize}` });
+      res.end();
+      return;
+    }
+    if (parsed) {
+      res.writeHead(206, {
+        "Content-Range": `bytes ${parsed.start}-${parsed.end}/${fileSize}`,
+        "Accept-Ranges": "bytes",
+        "Content-Length": parsed.chunkSize,
+        "Content-Type": contentType,
+        "Cache-Control": cacheControl,
+      });
+      if (isHead) {
+        res.end();
+        return;
+      }
+      const stream = fs.createReadStream(filePath, { start: parsed.start, end: parsed.end });
+      if (typeof res.on === "function") {
+        res.on("close", () => stream.destroy());
+      }
+      stream.on("error", () => {
+        if (!res.writableEnded) res.end();
+      });
+      stream.pipe(res);
+      return;
+    }
+  }
+
+  res.writeHead(200, {
+    "Content-Length": fileSize,
+    "Content-Type": contentType,
+    "Accept-Ranges": "bytes",
+    "Cache-Control": cacheControl,
+  });
+  if (isHead) {
+    res.end();
+    return;
+  }
+  const stream = fs.createReadStream(filePath);
+  if (typeof res.on === "function") {
+    res.on("close", () => stream.destroy());
+  }
+  stream.on("error", () => {
+    if (!res.writableEnded) res.end();
+  });
+  stream.pipe(res);
+}
+
+async function handleStreamPublicVideo({ videoId, kind, sig, method = "GET", rangeHeader, res, db, storage, playbackSecret }) {
   const cleanVideoId = String(videoId || "").trim();
   const cleanKind = kind === "thumb" ? "thumb" : "video";
   const cleanSig = String(sig || "").trim();
+  const isHead = String(method || "GET").toUpperCase() === "HEAD";
 
   if (!cleanVideoId || !verifyStreamTarget(cleanVideoId, cleanKind, cleanSig, playbackSecret)) {
     res.writeHead(403, { "Content-Type": "text/plain" });
@@ -1139,27 +1309,40 @@ async function handleStreamPublicVideo({ videoId, kind, sig, rangeHeader, res, d
       if (exists) {
         const [metadata] = await file.getMetadata();
         const fileSize = parseInt(metadata.size, 10);
-        const contentType = metadata.contentType || (cleanKind === "thumb" ? "image/jpeg" : "video/mp4");
+        const rawType = String(metadata.contentType || "").toLowerCase();
+        const contentType =
+          !rawType || rawType === "application/octet-stream"
+            ? cleanKind === "thumb"
+              ? "image/jpeg"
+              : "video/mp4"
+            : metadata.contentType;
 
         if (rangeHeader && cleanKind === "video") {
-          const parts = String(rangeHeader).replace(/bytes=/, "").split("-");
-          const start = parseInt(parts[0], 10);
-          const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-          if (start >= fileSize || end >= fileSize || Number.isNaN(start)) {
+          const parsed = parseHttpByteRange(rangeHeader, fileSize);
+          if (parsed && parsed.invalid) {
             res.writeHead(416, { "Content-Range": `bytes */${fileSize}` });
             res.end();
             return;
           }
-          const chunkSize = end - start + 1;
-          res.writeHead(206, {
-            "Content-Range": `bytes ${start}-${end}/${fileSize}`,
-            "Accept-Ranges": "bytes",
-            "Content-Length": chunkSize,
-            "Content-Type": contentType,
-            "Cache-Control": "private, no-cache",
-          });
-          file.createReadStream({ start, end }).pipe(res);
-          return;
+          if (parsed) {
+            res.writeHead(206, {
+              "Content-Range": `bytes ${parsed.start}-${parsed.end}/${fileSize}`,
+              "Accept-Ranges": "bytes",
+              "Content-Length": parsed.chunkSize,
+              "Content-Type": contentType,
+              "Cache-Control": "private, no-cache",
+            });
+            if (isHead) {
+              res.end();
+              return;
+            }
+            const stream = file.createReadStream({ start: parsed.start, end: parsed.end });
+            if (typeof res.on === "function") {
+              res.on("close", () => stream.destroy());
+            }
+            stream.pipe(res);
+            return;
+          }
         }
 
         res.writeHead(200, {
@@ -1168,7 +1351,15 @@ async function handleStreamPublicVideo({ videoId, kind, sig, rangeHeader, res, d
           "Accept-Ranges": "bytes",
           "Cache-Control": cleanKind === "thumb" ? "public, max-age=3600" : "private, no-cache",
         });
-        file.createReadStream().pipe(res);
+        if (isHead) {
+          res.end();
+          return;
+        }
+        const stream = file.createReadStream();
+        if (typeof res.on === "function") {
+          res.on("close", () => stream.destroy());
+        }
+        stream.pipe(res);
         return;
       }
     } catch (storageErr) {
@@ -1176,49 +1367,29 @@ async function handleStreamPublicVideo({ videoId, kind, sig, rangeHeader, res, d
     }
   }
 
-  // 2. Fallback: Stream directly via Telegram file_id (works on free Spark plan without Storage!)
+  // 2. Fallback: Cache Telegram file locally in /tmp & serve true HTTP 206 byte ranges for ExoPlayer
   if (cleanKind === "video" && videoData.tgFileId) {
-    const { botToken, apiBase } = await resolveBotRuntimeConfig(db);
-    if (!botToken) {
-      res.writeHead(500, { "Content-Type": "text/plain" });
-      res.end("Bot token unavailable for stream.");
+    try {
+      const cachedPath = await ensureTelegramVideoCached({
+        videoId: cleanVideoId,
+        tgFileId: videoData.tgFileId,
+        db,
+      });
+      await serveLocalFileWithRange({
+        filePath: cachedPath,
+        contentType: "video/mp4",
+        method,
+        rangeHeader,
+        cacheControl: "private, no-cache",
+        res,
+      });
+      return;
+    } catch (tgStreamErr) {
+      const status = tgStreamErr.statusCode || 502;
+      res.writeHead(status, { "Content-Type": "text/plain" });
+      res.end(tgStreamErr.message || "Unable to stream video from Telegram.");
       return;
     }
-    const fileInfo = await telegramApiJson(apiBase, botToken, "getFile", { file_id: videoData.tgFileId });
-    const downloadUrl = String(fileInfo.file_path || "").startsWith("http")
-      ? fileInfo.file_path
-      : `${apiBase}/file/bot${botToken}/${fileInfo.file_path}`;
-
-    const upstreamHeaders = {};
-    if (rangeHeader) {
-      upstreamHeaders.Range = rangeHeader;
-    }
-    const upstream = await fetch(downloadUrl, { headers: upstreamHeaders });
-    if (!upstream.ok && upstream.status !== 206) {
-      res.writeHead(502, { "Content-Type": "text/plain" });
-      res.end("Unable to stream video from Telegram.");
-      return;
-    }
-
-    const respHeaders = {
-      "Content-Type": upstream.headers.get("content-type") || "video/mp4",
-      "Accept-Ranges": "bytes",
-      "Cache-Control": "private, no-cache",
-    };
-    const contentLen = upstream.headers.get("content-length");
-    if (contentLen) respHeaders["Content-Length"] = contentLen;
-    const contentRange = upstream.headers.get("content-range");
-    if (contentRange) respHeaders["Content-Range"] = contentRange;
-
-    res.writeHead(upstream.status, respHeaders);
-    const { Readable } = require("stream");
-    if (upstream.body) {
-      Readable.fromWeb(upstream.body).pipe(res);
-    } else {
-      const buf = Buffer.from(await upstream.arrayBuffer());
-      res.end(buf);
-    }
-    return;
   }
 
   res.writeHead(404, { "Content-Type": "text/plain" });

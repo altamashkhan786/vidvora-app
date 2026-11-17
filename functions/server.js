@@ -180,12 +180,13 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === "GET" && pathname === "/streamPublicVideo") {
+  if ((req.method === "GET" || req.method === "HEAD") && pathname === "/streamPublicVideo") {
     try {
       await handleStreamPublicVideo({
         videoId: urlObj.searchParams.get("videoId"),
         kind: urlObj.searchParams.get("kind"),
         sig: urlObj.searchParams.get("sig"),
+        method: req.method,
         rangeHeader: req.headers.range,
         res,
         db,

@@ -620,3 +620,152 @@ test("handleTelegramUpdate converts Creator A's VidVora link into Creator B's ow
     global.fetch = origFetch;
   }
 });
+
+test("handleStreamPublicVideo caches Telegram tgFileId and serves HTTP 206 byte ranges with video/mp4", async () => {
+  const { PassThrough } = require("stream");
+  const { handleStreamPublicVideo, signStreamTarget } = require("./telegramBot");
+
+  const fakeVideoId = `vid_range_${Date.now()}`;
+  const fakePayload = Buffer.from("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ");
+  const secret = "test-secret";
+  const sig = signStreamTarget(fakeVideoId, "video", secret);
+
+  const mockDb = {
+    collection: (name) => {
+      if (name === "appConfig") {
+        return {
+          doc: () => ({
+            get: async () => ({ exists: true, data: () => ({ botToken: "123:TESTTOKEN" }) }),
+          }),
+        };
+      }
+      if (name === "videos") {
+        return {
+          doc: (id) => ({
+            get: async () =>
+              id === fakeVideoId
+                ? {
+                    exists: true,
+                    data: () => ({
+                      videoId: fakeVideoId,
+                      isActive: true,
+                      tgFileId: "tg_file_range_test",
+                    }),
+                  }
+                : { exists: false },
+          }),
+        };
+      }
+      return { doc: () => ({ get: async () => ({ exists: false }) }) };
+    },
+  };
+
+  let downloadCalls = 0;
+  const origFetch = global.fetch;
+  global.fetch = async (url) => {
+    if (String(url).includes("/getFile")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, result: { file_path: "videos/file_0.mp4" } }),
+      };
+    }
+    if (String(url).includes("/file/bot")) {
+      downloadCalls += 1;
+      return {
+        ok: true,
+        status: 200,
+        headers: new Map([["content-type", "application/octet-stream"]]),
+        arrayBuffer: async () => fakePayload,
+      };
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  const makeMockStreamRes = () => {
+    const stream = new PassThrough();
+    const chunks = [];
+    let statusCode = 0;
+    let headers = {};
+    const done = new Promise((resolve) => {
+      stream.on("data", (c) => chunks.push(c));
+      stream.on("end", () => resolve({ statusCode, headers, body: Buffer.concat(chunks) }));
+      stream.on("finish", () => {
+        if (!stream.readableEnded) stream.end();
+      });
+    });
+    stream.writeHead = (code, hdrs) => {
+      statusCode = code;
+      headers = hdrs || {};
+    };
+    const origEnd = stream.end.bind(stream);
+    stream.end = (chunk, ...rest) => {
+      if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      return origEnd(...rest);
+    };
+    return { res: stream, done };
+  };
+
+  try {
+    // 1. Byte range request (tail moov-atom probe)
+    const rangeReq = makeMockStreamRes();
+    await handleStreamPublicVideo({
+      videoId: fakeVideoId,
+      kind: "video",
+      sig,
+      method: "GET",
+      rangeHeader: "bytes=10-19",
+      res: rangeReq.res,
+      db: mockDb,
+      storage: null,
+      playbackSecret: secret,
+    });
+    const r1 = await rangeReq.done;
+    assert.equal(r1.statusCode, 206);
+    assert.equal(r1.headers["Content-Type"], "video/mp4");
+    assert.equal(r1.headers["Accept-Ranges"], "bytes");
+    assert.equal(r1.headers["Content-Range"], `bytes 10-19/${fakePayload.length}`);
+    assert.equal(r1.headers["Content-Length"], 10);
+    assert.equal(r1.body.toString(), "ABCDEFGHIJ");
+
+    // 2. Second range request hits cache without re-fetching from Telegram
+    const rangeReq2 = makeMockStreamRes();
+    await handleStreamPublicVideo({
+      videoId: fakeVideoId,
+      kind: "video",
+      sig,
+      method: "GET",
+      rangeHeader: "bytes=0-3",
+      res: rangeReq2.res,
+      db: mockDb,
+      storage: null,
+      playbackSecret: secret,
+    });
+    const r2 = await rangeReq2.done;
+    assert.equal(r2.statusCode, 206);
+    assert.equal(r2.body.toString(), "0123");
+    assert.equal(downloadCalls, 1);
+
+    // 3. HEAD request returns headers with empty body
+    const headReq = makeMockStreamRes();
+    await handleStreamPublicVideo({
+      videoId: fakeVideoId,
+      kind: "video",
+      sig,
+      method: "HEAD",
+      rangeHeader: null,
+      res: headReq.res,
+      db: mockDb,
+      storage: null,
+      playbackSecret: secret,
+    });
+    const r3 = await headReq.done;
+    assert.equal(r3.statusCode, 200);
+    assert.equal(r3.headers["Content-Type"], "video/mp4");
+    assert.equal(r3.headers["Content-Length"], fakePayload.length);
+    assert.equal(r3.body.length, 0);
+  } finally {
+    global.fetch = origFetch;
+    await fs.promises.unlink(path.join(os.tmpdir(), "vidvora-stream-cache", `${fakeVideoId}.mp4`)).catch(() => {});
+  }
+});

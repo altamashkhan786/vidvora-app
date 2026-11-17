@@ -107,9 +107,9 @@ service cloud.firestore {
     }
 
     // Videos Collection:
-    // Public/unauthenticated can read active videos for streaming; admins can read all
+    // Public/unauthenticated can read active videos (or safely check missing IDs); admins can read all
     match /videos/{videoId} {
-      allow read: if resource.data.isActive == true || isAdmin();
+      allow read: if resource == null || resource.data.isActive == true || isAdmin();
       allow create: if (isAdmin() || true) && isValidVideo(request.resource.data);
       allow update: if isAdmin() || isValidVideo(request.resource.data) ||
                        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['totalViews', 'isActive', 'title', 'description']);
@@ -117,9 +117,10 @@ service cloud.firestore {
     }
 
     // AccessLinks Collection:
-    // Anyone can read active links; validated creation and updates allowed for Master Key / Member sessions
+    // Stores only SHA-256 tokenHash + videoId + isActive (never plaintext tokens or media URLs);
+    // public read lets clients validate tokens & distinguish deactivated links without Firebase Auth
     match /accessLinks/{linkId} {
-      allow read: if resource.data.isActive == true || isAdmin();
+      allow read: if true;
       allow create: if (isAdmin() || true) && isValidAccessLink(request.resource.data);
       allow update: if isAdmin() || isValidAccessLink(request.resource.data) ||
                        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isActive']);

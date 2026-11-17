@@ -343,6 +343,7 @@ exports.streamPublicVideo = onRequest({ cors: true }, async (req, res) => {
       videoId: req.query.videoId,
       kind: req.query.kind,
       sig: req.query.sig,
+      method: req.method,
       rangeHeader: req.headers.range,
       res,
       db,
