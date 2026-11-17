@@ -396,3 +396,227 @@ test("authenticateCreatorMember verifies custom adminSecurity.adminMasterKeyHash
   assert.equal(customAdmin?.memberId, "admin");
   assert.equal(customAdmin?.role, "admin");
 });
+
+test("extractVidVoraShareTarget detects share links, CloudFront links, deep links, /convert, and raw tokens", () => {
+  const { extractVidVoraShareTarget } = require("./telegramBot");
+
+  const shareUrl = extractVidVoraShareTarget("https://vidvora-share-bot.onrender.com/share?link=GM-AAA123");
+  assert.deepEqual(shareUrl, { code: "GM-AAA123", customTitle: "" });
+
+  const cfUrl = extractVidVoraShareTarget("https://d1mn8mrvlzisg5.cloudfront.net/index.html?link=GM-CF999\nMera Naya Title");
+  assert.deepEqual(cfUrl, { code: "GM-CF999", customTitle: "Mera Naya Title" });
+
+  const deepLink = extractVidVoraShareTarget("vidvora://watch?link=GM-APP77");
+  assert.deepEqual(deepLink, { code: "GM-APP77", customTitle: "" });
+
+  const convertCmd = extractVidVoraShareTarget("/convert GM-CMD55 Custom Title");
+  assert.deepEqual(convertCmd, { code: "GM-CMD55", customTitle: "Custom Title" });
+
+  const rawCode = extractVidVoraShareTarget("GM-RAW8888");
+  assert.deepEqual(rawCode, { code: "GM-RAW8888", customTitle: "" });
+
+  const forwardedBtn = extractVidVoraShareTarget("Forwarded post", {
+    reply_markup: {
+      inline_keyboard: [[{ text: "Watch", url: "https://vidvora-share-bot.onrender.com/share?link=GM-BTN11" }]],
+    },
+  });
+  assert.deepEqual(forwardedBtn, { code: "GM-BTN11", customTitle: "Forwarded post" });
+
+  // Normal .mp4 URL must NOT be treated as a VidVora share link
+  assert.equal(extractVidVoraShareTarget("https://cdn.example.com/movies/action.mp4\nAction Film"), null);
+});
+
+test("handleTelegramUpdate converts Creator A's VidVora link into Creator B's own tracked link", async () => {
+  const { handleTelegramUpdate, hashToken } = require("./telegramBot");
+
+  const sourceToken = "GM-CREATORA1";
+  const sourceTokenHash = hashToken(sourceToken);
+
+  const videosStore = new Map([
+    [
+      "vid_creator_a",
+      {
+        videoId: "vid_creator_a",
+        title: "Creator A Original Reel",
+        description: "Original description",
+        storagePath: "http://127.0.0.1:9/streamPublicVideo?videoId=vid_creator_a&sig=abc",
+        thumbnailPath: "https://cdn.example.com/thumb_a.jpg",
+        tgFileId: "tg_file_a_123",
+        isActive: true,
+        totalViews: 42,
+        uploadedBy: "creator_a",
+        uploaderName: "Creator A",
+      },
+    ],
+  ]);
+
+  const accessLinksStore = new Map([
+    [
+      "link_creator_a",
+      {
+        linkId: "link_creator_a",
+        videoId: "vid_creator_a",
+        tokenHash: sourceTokenHash,
+        isActive: true,
+        expiresAt: null,
+      },
+    ],
+  ]);
+
+  const sessionsStore = new Map([
+    [
+      "tg_user_b",
+      {
+        telegramUserId: "tg_user_b",
+        chatId: "999001",
+        memberId: "creator_b",
+        memberName: "Creator B",
+        role: "member",
+        uploadCount: 2,
+      },
+    ],
+  ]);
+
+  const mockDb = {
+    collection: (name) => {
+      if (name === "appConfig") {
+        return {
+          doc: (id) => ({
+            get: async () =>
+              id === "telegramBot"
+                ? { exists: true, data: () => ({ botToken: "123:TEST_BOT_TOKEN" }) }
+                : { exists: false, data: () => ({}) },
+          }),
+        };
+      }
+      if (name === "members") {
+        return {
+          doc: (id) => ({
+            get: async () =>
+              id === "creator_b"
+                ? {
+                    exists: true,
+                    data: () => ({
+                      memberId: "creator_b",
+                      name: "Creator B",
+                      isActive: true,
+                      allowedOptions: ["UPLOAD_VIDEOS"],
+                    }),
+                  }
+                : { exists: false },
+          }),
+        };
+      }
+      if (name === "telegramBotSessions") {
+        return {
+          doc: (id) => ({
+            get: async () => {
+              const row = sessionsStore.get(id);
+              return row ? { exists: true, data: () => row } : { exists: false };
+            },
+            set: async (payload, opts) => {
+              const prev = opts?.merge ? sessionsStore.get(id) || {} : {};
+              sessionsStore.set(id, { ...prev, ...payload });
+            },
+          }),
+        };
+      }
+      if (name === "accessLinks") {
+        return {
+          where: (field, _op, val) => ({
+            limit: () => ({
+              get: async () => {
+                const matches = [];
+                for (const [id, row] of accessLinksStore.entries()) {
+                  if (row[field] === val) matches.push({ id, exists: true, data: () => row });
+                }
+                return { empty: matches.length === 0, docs: matches };
+              },
+            }),
+          }),
+          doc: (id) => ({
+            get: async () => {
+              const row = accessLinksStore.get(id);
+              return row ? { id, exists: true, data: () => row } : { exists: false };
+            },
+            set: async (payload) => {
+              accessLinksStore.set(id, payload);
+            },
+          }),
+        };
+      }
+      if (name === "videos") {
+        return {
+          doc: (id) => ({
+            get: async () => {
+              const row = videosStore.get(id);
+              return row ? { id, exists: true, data: () => row } : { exists: false };
+            },
+            set: async (payload) => {
+              videosStore.set(id, payload);
+            },
+          }),
+        };
+      }
+      return { doc: () => ({ get: async () => ({ exists: false }) }) };
+    },
+  };
+
+  const sentTelegramCalls = [];
+  const origFetch = global.fetch;
+  global.fetch = async (url, init = {}) => {
+    const method = String(url).split("/").pop();
+    const parsedBody = typeof init.body === "string" ? JSON.parse(init.body) : {};
+    sentTelegramCalls.push({ method, body: parsedBody });
+    return {
+      ok: true,
+      json: async () => ({ ok: true, result: { message_id: 777 } }),
+    };
+  };
+
+  try {
+    const result = await handleTelegramUpdate({
+      update: {
+        message: {
+          message_id: 55,
+          chat: { id: 999001 },
+          from: { id: "tg_user_b" },
+          text: `https://vidvora-share-bot.onrender.com/share?link=${sourceToken}`,
+        },
+      },
+      db: mockDb,
+      storage: null,
+      functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+      playbackSecret: "test-secret",
+    });
+
+    assert.equal(result.ok, true);
+    assert.ok(result.rawToken.startsWith("GM-"));
+    assert.notEqual(result.rawToken, sourceToken);
+
+    const newVideo = videosStore.get(result.videoId);
+    assert.ok(newVideo);
+    assert.equal(newVideo.uploadedBy, "creator_b");
+    assert.equal(newVideo.uploaderName, "Creator B");
+    assert.equal(newVideo.totalViews, 0);
+    assert.equal(newVideo.storagePath, "http://127.0.0.1:9/streamPublicVideo?videoId=vid_creator_a&sig=abc");
+    assert.equal(newVideo.thumbnailPath, "https://cdn.example.com/thumb_a.jpg");
+    assert.equal(newVideo.tgFileId, "tg_file_a_123");
+
+    // Source Creator A video remains completely untouched
+    assert.equal(videosStore.get("vid_creator_a").uploadedBy, "creator_a");
+    assert.equal(videosStore.get("vid_creator_a").totalViews, 42);
+
+    // Creator B's session uploadCount incremented
+    assert.equal(sessionsStore.get("tg_user_b").uploadCount, 3);
+
+    // Bot replied with thumbnail photo + Creator B's new watch link button
+    const photoCall = sentTelegramCalls.find((c) => c.method === "sendPhoto");
+    assert.ok(photoCall);
+    assert.equal(photoCall.body.photo, "https://cdn.example.com/thumb_a.jpg");
+    assert.ok(photoCall.body.caption.includes(result.rawToken));
+    assert.ok(photoCall.body.reply_markup.inline_keyboard[0][0].url.includes(result.rawToken));
+  } finally {
+    global.fetch = origFetch;
+  }
+});

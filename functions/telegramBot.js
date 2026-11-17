@@ -104,6 +104,213 @@ function extractDirectVideoUrlMessage(text) {
   return { url, caption: remainder };
 }
 
+function extractCodeFromVidVoraUrl(rawUrl) {
+  const urlText = String(rawUrl || "").trim();
+  if (!urlText) return "";
+
+  try {
+    const parsed = new URL(urlText);
+    const paramCode =
+      parsed.searchParams.get("link") ||
+      parsed.searchParams.get("v") ||
+      parsed.searchParams.get("video") ||
+      parsed.searchParams.get("token") ||
+      "";
+    if (paramCode.trim()) return paramCode.trim();
+
+    const pathMatch = parsed.pathname.match(/^\/(?:share|watch)\/([A-Za-z0-9_-]{4,})/i);
+    if (pathMatch && pathMatch[1]) {
+      return pathMatch[1].trim();
+    }
+  } catch (_) {
+    // Fallback regex parsing for custom scheme / partial URLs
+  }
+
+  const queryMatch = urlText.match(/[?&](?:link|v|video|token)=([A-Za-z0-9_-]{4,})/i);
+  if (queryMatch && queryMatch[1]) {
+    return queryMatch[1].trim();
+  }
+  return "";
+}
+
+function extractVidVoraShareTarget(text, message = null) {
+  const raw = String(text || "").trim();
+  const candidateUrls = [];
+
+  if (raw) {
+    const urlMatches = raw.match(/(?:https?|vidvora):\/\/[^\s<>"{}|\\^`[\]]+/gi);
+    if (urlMatches) {
+      candidateUrls.push(...urlMatches);
+    }
+  }
+
+  const collectEntityUrls = (entities = []) => {
+    if (!Array.isArray(entities)) return;
+    for (const entity of entities) {
+      if (entity && typeof entity.url === "string" && entity.url.trim()) {
+        candidateUrls.push(entity.url.trim());
+      }
+    }
+  };
+
+  if (message) {
+    collectEntityUrls(message.entities);
+    collectEntityUrls(message.caption_entities);
+    const rows = message.reply_markup?.inline_keyboard;
+    if (Array.isArray(rows)) {
+      for (const row of rows) {
+        if (!Array.isArray(row)) continue;
+        for (const btn of row) {
+          if (btn && typeof btn.url === "string" && btn.url.trim()) {
+            candidateUrls.push(btn.url.trim());
+          }
+        }
+      }
+    }
+  }
+
+  let matchedCode = "";
+  let matchedUrl = "";
+
+  for (const url of candidateUrls) {
+    const code = extractCodeFromVidVoraUrl(url);
+    if (code) {
+      matchedCode = code;
+      matchedUrl = url;
+      break;
+    }
+  }
+
+  if (!matchedCode && raw) {
+    const convertCmdMatch = raw.match(/^\/convert(?:@[A-Za-z0-9_]+)?\s+(\S+)(?:\s+([\s\S]+))?$/i);
+    if (convertCmdMatch && convertCmdMatch[1]) {
+      const arg = convertCmdMatch[1].trim();
+      const fromUrl = extractCodeFromVidVoraUrl(arg);
+      matchedCode = fromUrl || arg;
+      matchedUrl = arg;
+    }
+  }
+
+  if (!matchedCode && raw) {
+    const standaloneMatch = raw.match(/\b(GM-[A-Za-z0-9-]{4,}|link_[A-Za-z0-9]{4,}|vid_[A-Za-z0-9]{4,})\b/i);
+    if (standaloneMatch && standaloneMatch[1]) {
+      matchedCode = standaloneMatch[1].trim();
+    }
+  }
+
+  if (!matchedCode) return null;
+
+  let cleanTitle = raw
+    .replace(/^\/convert(?:@[A-Za-z0-9_]+)?\s*/i, "")
+    .replace(matchedUrl || "", "")
+    .replace(/(?:https?|vidvora):\/\/[^\s<>"{}|\\^`[\]]+/gi, "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => {
+      if (!line) return false;
+      if (/^(?:🎬\s*)?VidVora\s*[—-]\s*Watch Video/i.test(line)) return false;
+      if (/^✅\s*Uploaded to VidVora/i.test(line)) return false;
+      if (/^🎞️\s*Preview Clip:/i.test(line)) return false;
+      if (/^🔗\s*\*?Watch Full Video/i.test(line)) return false;
+      if (/^🔑\s*\*?Access Code/i.test(line)) return false;
+      if (/^📲\s*\*?App Link/i.test(line)) return false;
+      if (/^_?Forward this preview clip/i.test(line)) return false;
+      if (line.toUpperCase() === matchedCode.toUpperCase()) return false;
+      return true;
+    })
+    .join(" ")
+    .trim()
+    .slice(0, 200);
+
+  return {
+    code: matchedCode,
+    customTitle: cleanTitle || "",
+  };
+}
+
+async function resolveVidVoraSourceVideo(db, rawCode) {
+  const cleanCode = String(rawCode || "").trim();
+  if (!cleanCode || !db || typeof db.collection !== "function") {
+    return { found: false, isActive: false };
+  }
+
+  let linkDoc = null;
+  let sourceVideoId = "";
+  let linkActive = true;
+
+  try {
+    const linksCol = db.collection("accessLinks");
+    const tokenHash = hashToken(cleanCode);
+    if (typeof linksCol.where === "function") {
+      const snap = await linksCol.where("tokenHash", "==", tokenHash).limit(1).get();
+      if (snap && !snap.empty && snap.docs && snap.docs.length > 0) {
+        linkDoc = snap.docs[0];
+      }
+    }
+    if (!linkDoc && typeof linksCol.doc === "function") {
+      const exactDoc = await linksCol.doc(cleanCode).get();
+      if (exactDoc && exactDoc.exists) {
+        linkDoc = exactDoc;
+      } else {
+        const upperDoc = await linksCol.doc(cleanCode.toUpperCase()).get();
+        if (upperDoc && upperDoc.exists) {
+          linkDoc = upperDoc;
+        }
+      }
+    }
+  } catch (_) {
+    // Fallback to direct video lookup below
+  }
+
+  if (linkDoc && linkDoc.exists) {
+    const lData = linkDoc.data() || {};
+    sourceVideoId = String(lData.videoId || "").trim();
+    linkActive = lData.isActive === true;
+    if (lData.expiresAt) {
+      const expMs =
+        typeof lData.expiresAt.toDate === "function"
+          ? lData.expiresAt.toDate().getTime()
+          : new Date(lData.expiresAt).getTime();
+      if (Number.isFinite(expMs) && Date.now() > expMs) {
+        linkActive = false;
+      }
+    }
+    if (!linkActive) {
+      return { found: true, isActive: false, reason: "link_inactive" };
+    }
+  } else {
+    sourceVideoId = cleanCode;
+  }
+
+  if (!sourceVideoId) {
+    return { found: false, isActive: false };
+  }
+
+  try {
+    const videosCol = db.collection("videos");
+    const vidRef = typeof videosCol.doc === "function" ? videosCol.doc(sourceVideoId) : videosCol.document(sourceVideoId);
+    const vidDoc = await vidRef.get();
+    if (!vidDoc || !vidDoc.exists) {
+      return { found: false, isActive: false };
+    }
+    const vData = vidDoc.data() || {};
+    if (vData.isActive !== true) {
+      return { found: true, isActive: false, reason: "video_inactive" };
+    }
+    if (!vData.storagePath) {
+      return { found: false, isActive: false };
+    }
+    return {
+      found: true,
+      isActive: true,
+      videoId: vidDoc.id || vData.videoId || sourceVideoId,
+      video: vData,
+    };
+  } catch (_) {
+    return { found: false, isActive: false };
+  }
+}
+
 function isAllowedTelegramVideoMessage(message) {
   if (!message) return false;
   if (message.video && message.video.file_id) return true;
@@ -305,6 +512,53 @@ async function sendTelegramVideoClip(apiBase, botToken, { chatId, clipPath, capt
   return data.result;
 }
 
+async function sendTelegramPhoto(apiBase, botToken, { chatId, imagePathOrUri, caption, watchUrl, replyToMessageId }) {
+  const cleanImg = String(imagePathOrUri || "").trim();
+  if (!cleanImg) {
+    throw new Error("Missing thumbnail image");
+  }
+  const replyMarkup = JSON.stringify({
+    inline_keyboard: [[{ text: "▶️ Watch Full Video on VidVora", url: watchUrl }]],
+  });
+
+  const dataUriMatch = cleanImg.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)$/i);
+  if (dataUriMatch) {
+    const form = new FormData();
+    form.append("chat_id", String(chatId));
+    form.append("caption", caption);
+    form.append("parse_mode", "Markdown");
+    if (replyToMessageId) {
+      form.append("reply_to_message_id", String(replyToMessageId));
+    }
+    form.append("reply_markup", replyMarkup);
+    const mime = dataUriMatch[1].toLowerCase() === "image/jpg" ? "image/jpeg" : dataUriMatch[1].toLowerCase();
+    const imgBuffer = Buffer.from(dataUriMatch[2].replace(/\s+/g, ""), "base64");
+    const ext = mime.includes("png") ? "png" : "jpg";
+    form.append("photo", new Blob([imgBuffer], { type: mime }), `vidvora_thumb.${ext}`);
+
+    const res = await fetch(`${apiBase}/bot${botToken}/sendPhoto`, {
+      method: "POST",
+      body: form,
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      throw new Error(data.description || "Telegram sendPhoto failed");
+    }
+    return data.result;
+  }
+
+  return telegramApiJson(apiBase, botToken, "sendPhoto", {
+    chat_id: chatId,
+    photo: cleanImg,
+    caption,
+    parse_mode: "Markdown",
+    ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {}),
+    reply_markup: {
+      inline_keyboard: [[{ text: "▶️ Watch Full Video on VidVora", url: watchUrl }]],
+    },
+  });
+}
+
 async function downloadFileToPath(url, destPath) {
   const res = await fetch(url);
   if (!res.ok) {
@@ -438,17 +692,16 @@ async function handleTelegramUpdate({ update, db, storage, functionBaseUrl, play
   if (/^\/start(?:@\w+)?/i.test(textBody) || /^\/help(?:@\w+)?/i.test(textBody)) {
     await replyText(
       [
-        "🎬 *VidVora Creator Auto-Upload Bot*",
+        "🎬 *VidVora Creator Auto-Upload & Link Converter Bot*",
         "",
         "1️⃣ Link your VidVora Creator / Admin account:",
         "`/login YOUR_MASTER_KEY`",
-        "_(or `/login your@email.com YOUR_MASTER_KEY`)_",
+        "_(or just send your Master Key directly)_",
         "",
-        "2️⃣ Send any *Video* (or direct `.mp4` stream link) with a caption for Title.",
+        "2️⃣ *Upload Video:* Send any Video file (or direct `.mp4` link) with a caption for Title.",
+        "3️⃣ *Convert VidVora Link:* Paste or forward any VidVora Share Link (or `/convert GM-XXXX`) to generate *your own personal link & views*!",
         "",
-        "3️⃣ Bot automatically uploads it to VidVora, creates a *5-second preview clip*, and sends the clip + VidVora watch link right back here!",
-        "",
-        "Commands: `/status` • `/logout`",
+        "Commands: `/status` • `/logout` • `/convert`",
       ].join("\n"),
       { parse_mode: "Markdown" }
     );
@@ -507,12 +760,46 @@ async function handleTelegramUpdate({ update, db, storage, functionBaseUrl, play
     return { ok: true, action: "login_success" };
   }
 
-  // 2. Check upload session before handling video or direct URL
+  // 2. Check upload session before handling VidVora link conversion, video, or direct URL
+  const combinedText = String(message.text || message.caption || "").trim();
   const isVideoMsg = isAllowedTelegramVideoMessage(message);
-  const directUrlMsg = !isVideoMsg ? extractDirectVideoUrlMessage(textBody) : null;
-  if (!isVideoMsg && !directUrlMsg) {
+  const vidvoraConvertTarget = extractVidVoraShareTarget(combinedText, message);
+  const directUrlMsg = !isVideoMsg && !vidvoraConvertTarget ? extractDirectVideoUrlMessage(textBody) : null;
+
+  if (!vidvoraConvertTarget && !isVideoMsg && !directUrlMsg) {
+    // Allow beginners who send their Master Key directly without /login when unlinked
+    if (textBody && !textBody.startsWith("/") && !/\s/.test(textBody) && textBody.length >= 4 && textBody.length <= 80) {
+      const existingSession = await db.collection("telegramBotSessions").doc(telegramUserId).get();
+      if (!existingSession.exists) {
+        const directCreator = await authenticateCreatorMember(db, null, textBody);
+        if (directCreator) {
+          if (!directCreator.canUpload) {
+            await replyText("⛔ Your account does not have Upload Videos permission enabled.");
+            return { ok: true, action: "login_forbidden" };
+          }
+          await db.collection("telegramBotSessions").doc(telegramUserId).set(
+            {
+              telegramUserId,
+              chatId: String(chatId),
+              memberId: directCreator.memberId,
+              memberName: directCreator.name,
+              role: directCreator.role || "member",
+              linkedAt: new Date(),
+              uploadCount: 0,
+            },
+            { merge: true }
+          );
+          await replyText(
+            `✅ Welcome *${escapeMarkdown(directCreator.name)}*!\n\nYour VidVora account is now linked. Send any *Video* or paste any *VidVora Share Link* to convert into your own link!`,
+            { parse_mode: "Markdown" }
+          );
+          return { ok: true, action: "login_success" };
+        }
+      }
+    }
+
     await replyText(
-      "📹 Send a *Video file* (or a direct HTTPS `.mp4` link with Title) to upload to VidVora.\nNeed to link first? Send `/login YOUR_MASTER_KEY`.",
+      "📹 Send a *Video file*, a direct `.mp4` link, or any *VidVora Share Link* to convert into your own link.\nNeed to link first? Send `/login YOUR_MASTER_KEY`.",
       { parse_mode: "Markdown" }
     );
     return { ok: true, action: "unsupported_message" };
@@ -538,7 +825,11 @@ async function handleTelegramUpdate({ update, db, storage, functionBaseUrl, play
     }
   }
 
-  const statusMsg = await replyText("⏳ Uploading to VidVora & generating 5-sec preview clip...");
+  const statusMsg = await replyText(
+    vidvoraConvertTarget
+      ? "🔄 Converting VidVora link to your Creator link..."
+      : "⏳ Uploading to VidVora & generating 5-sec preview clip..."
+  );
   const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "vidvora-bot-"));
 
   try {
@@ -553,9 +844,43 @@ async function handleTelegramUpdate({ update, db, storage, functionBaseUrl, play
     let description = "Uploaded via VidVora Telegram Bot";
     let finalStoragePath = "";
     let finalThumbPath = null;
-    const bucket = storage.bucket();
+    const bucket = storage && typeof storage.bucket === "function" ? storage.bucket() : null;
 
-    if (isVideoMsg) {
+    if (vidvoraConvertTarget) {
+      const source = await resolveVidVoraSourceVideo(db, vidvoraConvertTarget.code);
+      if (!source.found || !source.isActive) {
+        await telegramApiJson(apiBase, botToken, "editMessageText", {
+          chat_id: chatId,
+          message_id: statusMsg.message_id,
+          text: "❌ Yeh VidVora video link invalid ya deactivated hai, isko convert nahi kiya ja sakta.",
+        });
+        return { ok: false, reason: "source_link_unavailable" };
+      }
+
+      title = vidvoraConvertTarget.customTitle || source.video.title || "Creator Video";
+      description = source.video.description || "Converted via VidVora Link Converter Bot";
+      finalStoragePath = source.video.storagePath;
+      finalThumbPath = source.video.thumbnailPath || null;
+      var tgFileIdForDoc = source.video.tgFileId ? String(source.video.tgFileId) : null;
+
+      if (finalStoragePath && /^https?:\/\//i.test(finalStoragePath)) {
+        try {
+          const clipPromise = createFiveSecondPreviewAndThumbnail({
+            inputPathOrUrl: finalStoragePath,
+            outputClipPath: clipPath,
+            outputThumbPath: thumbPath,
+            durationSeconds: 0,
+            previewSeconds: DEFAULT_PREVIEW_SECONDS,
+          }).catch(() => ({}));
+          await Promise.race([
+            clipPromise,
+            new Promise((resolve) => setTimeout(resolve, 10_000)),
+          ]);
+        } catch (_) {
+          // Preview clip optional for instant link conversion
+        }
+      }
+    } else if (isVideoMsg) {
       const mediaObj = message.video || message.document;
       const fallbackName = mediaObj.file_name || "Creator Video";
       const parsedMeta = parseTitleAndDescription(message.caption, fallbackName);
@@ -736,6 +1061,27 @@ async function handleTelegramUpdate({ update, db, storage, functionBaseUrl, play
         chat_id: chatId,
         message_id: statusMsg.message_id,
       }).catch(() => {});
+    } else if (finalThumbPath) {
+      try {
+        await sendTelegramPhoto(apiBase, botToken, {
+          chatId,
+          imagePathOrUri: finalThumbPath,
+          caption,
+          watchUrl,
+          replyToMessageId: message.message_id,
+        });
+        await telegramApiJson(apiBase, botToken, "deleteMessage", {
+          chat_id: chatId,
+          message_id: statusMsg.message_id,
+        }).catch(() => {});
+      } catch (_) {
+        await telegramApiJson(apiBase, botToken, "editMessageText", {
+          chat_id: chatId,
+          message_id: statusMsg.message_id,
+          text: caption,
+          parse_mode: "Markdown",
+        });
+      }
     } else {
       await telegramApiJson(apiBase, botToken, "editMessageText", {
         chat_id: chatId,
@@ -889,6 +1235,8 @@ module.exports = {
   parseLoginCommand,
   parseTitleAndDescription,
   extractDirectVideoUrlMessage,
+  extractVidVoraShareTarget,
+  resolveVidVoraSourceVideo,
   isAllowedTelegramVideoMessage,
   buildShareMessageCaption,
   createFiveSecondPreviewAndThumbnail,
