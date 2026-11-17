@@ -324,27 +324,16 @@ function isAllowedTelegramVideoMessage(message) {
 }
 
 function buildShareMessageCaption({
-  title,
-  uploaderName,
   rawToken,
-  previewSeconds = DEFAULT_PREVIEW_SECONDS,
   shareLinkBaseUrl = SHARE_LINK_BASE_URL,
 }) {
   const effectiveBase = shareLinkBaseUrl || SHARE_LINK_BASE_URL;
   const watchUrl = `${effectiveBase}${rawToken}`;
-  const deepLink = `vidvora://watch?link=${rawToken}`;
   const lines = [
     "🎬 *VidVora — Watch Video*",
-    `✅ Uploaded to VidVora by *${escapeMarkdown(uploaderName)}*`,
-    `🎞️ Preview Clip: *${previewSeconds}s*`,
     "",
     `🔗 *Watch Full Video:*`,
     watchUrl,
-    "",
-    `🔑 *Access Code:* \`${rawToken}\``,
-    `📲 *App Link:* \`${deepLink}\``,
-    "",
-    "_Forward this preview clip + link directly to your Telegram channel!_",
   ];
   return lines.join("\n");
 }
@@ -953,6 +942,15 @@ async function handleTelegramUpdate({ update, db, storage, functionBaseUrl, play
 
       if (!storageUploadSucceeded && thumbExists) {
         finalThumbPath = await encodeCrispThumbDataUri(thumbPath);
+      }
+      if (!storageUploadSucceeded) {
+        try {
+          await fs.promises.mkdir(STREAM_CACHE_DIR, { recursive: true });
+          await fs.promises.copyFile(localVideoPath, path.join(STREAM_CACHE_DIR, `${videoId}.mp4`));
+          pruneStreamCacheIfNeeded();
+        } catch (_) {
+          // Cache pre-warm optional
+        }
       }
 
       var tgFileIdForDoc = storageUploadSucceeded ? null : String(mediaObj.file_id || "");

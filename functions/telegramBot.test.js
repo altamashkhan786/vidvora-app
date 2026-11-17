@@ -83,9 +83,13 @@ test("token generation, stream HMAC signing, and share caption match VidVora for
   });
   assert.ok(!caption.includes("1794916938185"));
   assert.ok(caption.includes("VidVora — Watch Video"));
+  assert.ok(caption.includes("Watch Full Video:"));
   assert.ok(caption.includes(`${SHARE_LINK_BASE_URL}${token}`));
-  assert.ok(caption.includes(`vidvora://watch?link=${token}`));
-  assert.ok(caption.includes("5s"));
+  assert.ok(!caption.includes("Uploaded to VidVora"));
+  assert.ok(!caption.includes("Preview Clip"));
+  assert.ok(!caption.includes("Access Code"));
+  assert.ok(!caption.includes("App Link"));
+  assert.ok(!caption.includes("Forward this preview"));
 });
 
 test("createFiveSecondPreviewAndThumbnail cuts a real 10s sample video down to <= 5s clip + jpg thumbnail", async () => {
