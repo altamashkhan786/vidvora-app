@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      GOOGLE ADMOB CONFIGURATION FOR VIDVORA
+
+      DEVELOPMENT / TESTING:
+      The values below are official Google AdMob test IDs provided by Google:
+      https://developers.google.com/admob/android/test-ads
+
+      PRODUCTION DEPLOYMENT INSTRUCTIONS:
+      Replace the test IDs below with your real AdMob credentials from https://admob.google.com:
+      1. admob_app_id: Your AdMob App ID (Format: ca-app-pub-XXXXXXXXXXXXXXXX~YYYYYYYYYY)
+      2. admob_banner_ad_unit_id: Your Adaptive Banner Ad Unit ID (Format: ca-app-pub-XXXXXXXXXXXXXXXX/ZZZZZZZZZZ)
+      3. admob_interstitial_ad_unit_id: Your Interstitial Ad Unit ID (Format: ca-app-pub-XXXXXXXXXXXXXXXX/ZZZZZZZZZZ)
+      4. admob_app_open_ad_unit_id: Your App Open Ad Unit ID (Format: ca-app-pub-XXXXXXXXXXXXXXXX/ZZZZZZZZZZ)
+      5. admob_rewarded_ad_unit_id: Your Rewarded Ad Unit ID (Format: ca-app-pub-XXXXXXXXXXXXXXXX/ZZZZZZZZZZ)
+    -->
+
+    <!-- AdMob Application ID (Used in AndroidManifest.xml) -->
+    <string name="admob_app_id" translatable="false">ca-app-pub-1392123530264284~7834753715</string>
+
+    <!-- Ad Unit: Adaptive Banner on Home Screen -->
+    <string name="admob_banner_ad_unit_id" translatable="false">ca-app-pub-1392123530264284/6658750910</string>
+
+    <!-- Ad Unit: Native Ad Card on Home Screen -->
+    <string name="admob_native_ad_unit_id" translatable="false">ca-app-pub-1392123530264284/8442751662</string>
+
+    <!-- Ad Unit: Interstitial Ad -->
+    <string name="admob_interstitial_ad_unit_id" translatable="false">ca-app-pub-1392123530264284/6889603635</string>
+
+    <!-- Ad Unit: App Open Ad -->
+    <string name="admob_app_open_ad_unit_id" translatable="false">ca-app-pub-1392123530264284/4172188378</string>
+
+    <!-- Ad Unit: Rewarded Video Ad (Primary & Secondary Fallback) -->
+    <string name="admob_rewarded_ad_unit_id" translatable="false">ca-app-pub-1392123530264284/7864693820</string>
+    <string name="admob_rewarded_secondary_ad_unit_id" translatable="false">ca-app-pub-1392123530264284/7978188558</string>
+
+    <!-- App Open Ads Switch: Enabled as requested. -->
+    <bool name="app_open_ads_enabled">true</bool>
+</resources>

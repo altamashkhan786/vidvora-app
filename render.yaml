@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: vidvora-share-bot
+    runtime: node
+    plan: free
+    rootDir: functions
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: FIRESTORE_DATABASE_ID
+        value: ai-studio-android-garammas-738e4493-0090-419e-8ece-c55642a933ce
+      - key: FIREBASE_STORAGE_BUCKET
+        value: gen-lang-client-0000740810.firebasestorage.app
+      - key: PLAYBACK_SECRET
+        generateValue: true
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false

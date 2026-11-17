@@ -1,0 +1,671 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [ 6 0 R 8 0 R 10 0 R 12 0 R ] /Count 4 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595.28 841.89] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents 7 0 R >>
+endobj
+7 0 obj
+<< /Length 8503 >>
+stream
+0.027 0.051 0.102 rg
+0.00 709.89 595.28 132.00 re f
+0.004 0.650 0.920 rg
+0.00 709.89 595.28 4.50 re f
+0.780 0.570 0.060 rg
+0.00 837.89 595.28 4.00 re f
+1.000 1.000 1.000 rg
+BT /F2 26.0 Tf 1 0 0 1 48.00 789.89 Tm (VIDVORA) Tj ET
+0.004 0.906 0.992 rg
+BT /F2 12.5 Tf 1 0 0 1 48.00 763.89 Tm (Complete Application & Architecture Documentation) Tj ET
+0.780 0.840 0.930 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 739.89 Tm (Android \(Kotlin / Jetpack Compose\)  |  Firebase Firestore  |  Node.js Bot & Open Graph Preview) Tj ET
+0.945 0.961 0.988 rg
+48.00 581.89 499.28 104.00 re f
+0.810 0.860 0.930 RG
+0.80 w 48.00 581.89 499.28 104.00 re S
+0.000 0.416 0.988 rg
+48.00 581.89 4.00 104.00 re f
+0.027 0.051 0.102 rg
+BT /F2 9.2 Tf 1 0 0 1 62.00 669.89 Tm (Application ID:) Tj ET
+0.080 0.110 0.180 rg
+BT /F3 9.2 Tf 1 0 0 1 198.00 669.89 Tm (com.aistudio.vidvora.vstr  \(Namespace: com.example\)) Tj ET
+0.027 0.051 0.102 rg
+BT /F2 9.2 Tf 1 0 0 1 62.00 651.89 Tm (Firebase Project:) Tj ET
+0.080 0.110 0.180 rg
+BT /F3 9.2 Tf 1 0 0 1 198.00 651.89 Tm (gen-lang-client-0000740810) Tj ET
+0.027 0.051 0.102 rg
+BT /F2 9.2 Tf 1 0 0 1 62.00 633.89 Tm (Firestore Database:) Tj ET
+0.080 0.110 0.180 rg
+BT /F3 9.2 Tf 1 0 0 1 198.00 633.89 Tm (ai-studio-android-garammas-738e4493-0090-419e-8ece-c55642a933ce) Tj ET
+0.027 0.051 0.102 rg
+BT /F2 9.2 Tf 1 0 0 1 62.00 615.89 Tm (CloudFront Domain:) Tj ET
+0.080 0.110 0.180 rg
+BT /F3 9.2 Tf 1 0 0 1 198.00 615.89 Tm (https://d1mn8mrvlzisg5.cloudfront.net/) Tj ET
+0.027 0.051 0.102 rg
+BT /F2 9.2 Tf 1 0 0 1 62.00 597.89 Tm (Default Payout Rate:) Tj ET
+0.080 0.110 0.180 rg
+BT /F3 9.2 Tf 1 0 0 1 198.00 597.89 Tm (Rs. 190 per 1,000 views  \(Min Withdrawal: Rs. 500.00 via UPI\)) Tj ET
+0.027 0.051 0.102 rg
+48.00 557.89 24.00 18.00 re f
+0.004 0.906 0.992 rg
+BT /F2 10.5 Tf 1 0 0 1 54.50 563.39 Tm (1) Tj ET
+0.027 0.051 0.102 rg
+BT /F2 13.5 Tf 1 0 0 1 82.00 562.89 Tm (Product Overview & System Architecture) Tj ET
+0.004 0.650 0.920 RG
+1.10 w 48.00 553.39 m 547.28 553.39 l S
+0.080 0.110 0.180 rg
+BT /F1 9.8 Tf 1 0 0 1 48.00 537.89 Tm (VidVora is a private video streaming, deep-link distribution, creator monetization, and Google AdMob revenue) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.8 Tf 1 0 0 1 48.00 523.97 Tm (platform built for Android. Creators and Admins upload videos protected by cryptographic access codes) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.8 Tf 1 0 0 1 48.00 510.06 Tm (\(GM-XXXXXXXX / link_...\). Viewers tap shared links anywhere \(WhatsApp, Telegram, Facebook, Instagram, X,) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.8 Tf 1 0 0 1 48.00 496.14 Tm (browsers\), see an instant thumbnail preview card, and launch playback inside the in-app Media3 ExoPlayer.) Tj ET
+0.027 0.051 0.102 rg
+48.00 456.23 499.28 22.00 re f
+1.000 1.000 1.000 rg
+BT /F2 9.0 Tf 1 0 0 1 54.00 463.23 Tm (Layer) Tj ET
+1.000 1.000 1.000 rg
+BT /F2 9.0 Tf 1 0 0 1 149.00 463.23 Tm (Technology Stack) Tj ET
+1.000 1.000 1.000 rg
+BT /F2 9.0 Tf 1 0 0 1 324.00 463.23 Tm (Primary Responsibility) Tj ET
+1.000 1.000 1.000 rg
+48.00 422.63 499.28 33.60 re f
+0.810 0.860 0.930 RG
+0.50 w 48.00 422.63 499.28 33.60 re S
+0.027 0.051 0.102 rg
+BT /F2 8.8 Tf 1 0 0 1 54.00 443.23 Tm (Android App) Tj ET
+0.810 0.860 0.930 RG
+0.50 w 143.00 422.63 m 143.00 456.23 l S
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 149.00 443.23 Tm (Kotlin, Jetpack Compose, Material 3) Tj ET
+0.810 0.860 0.930 RG
+0.50 w 318.00 422.63 m 318.00 456.23 l S
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 324.00 443.23 Tm (Home screen, token playback, ExoPlayer, AdMob ads,) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 324.00 431.43 Tm (Creator & Admin Hub) Tj ET
+0.970 0.980 0.995 rg
+48.00 389.03 499.28 33.60 re f
+0.810 0.860 0.930 RG
+0.50 w 48.00 389.03 499.28 33.60 re S
+0.027 0.051 0.102 rg
+BT /F2 8.8 Tf 1 0 0 1 54.00 409.63 Tm (Media Engine) Tj ET
+0.810 0.860 0.930 RG
+0.50 w 143.00 389.03 m 143.00 422.63 l S
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 149.00 409.63 Tm (AndroidX Media3 \(ExoPlayer\)) Tj ET
+0.810 0.860 0.930 RG
+0.50 w 318.00 389.03 m 318.00 422.63 l S
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 324.00 409.63 Tm (Hardware/software decoding, HTTP 206 byte) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 324.00 397.83 Tm (seeking, zoom/speed/quality controls) Tj ET
+1.000 1.000 1.000 rg
+48.00 355.43 499.28 33.60 re f
+0.810 0.860 0.930 RG
+0.50 w 48.00 355.43 499.28 33.60 re S
+0.027 0.051 0.102 rg
+BT /F2 8.8 Tf 1 0 0 1 54.00 376.03 Tm (Local Storage) Tj ET
+0.810 0.860 0.930 RG
+0.50 w 143.00 355.43 m 143.00 389.03 l S
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 149.00 376.03 Tm (Room DB + SharedPreferences) Tj ET
+0.810 0.860 0.930 RG
+0.50 w 318.00 355.43 m 318.00 389.03 l S
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 324.00 376.03 Tm (Offline Watch History, install UUID heartbeat,) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 324.00 364.23 Tm (10-min VIP timer state) Tj ET
+0.970 0.980 0.995 rg
+48.00 321.83 499.28 33.60 re f
+0.810 0.860 0.930 RG
+0.50 w 48.00 321.83 499.28 33.60 re S
+0.027 0.051 0.102 rg
+BT /F2 8.8 Tf 1 0 0 1 54.00 342.43 Tm (Cloud Backend) Tj ET
+0.810 0.860 0.930 RG
+0.50 w 143.00 321.83 m 143.00 355.43 l S
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 149.00 342.43 Tm (Firebase Firestore + Auth + Storage) Tj ET
+0.810 0.860 0.930 RG
+0.50 w 318.00 321.83 m 318.00 355.43 l S
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 324.00 342.43 Tm (Videos, hashed accessLinks, members, UPI payouts,) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 324.00 330.63 Tm (notices, support chats) Tj ET
+1.000 1.000 1.000 rg
+48.00 288.23 499.28 33.60 re f
+0.810 0.860 0.930 RG
+0.50 w 48.00 288.23 499.28 33.60 re S
+0.027 0.051 0.102 rg
+BT /F2 8.8 Tf 1 0 0 1 54.00 308.83 Tm (Bot & OG Server) Tj ET
+0.810 0.860 0.930 RG
+0.50 w 143.00 288.23 m 143.00 321.83 l S
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 149.00 308.83 Tm (Node.js 20 \(server.js / index.js\)) Tj ET
+0.810 0.860 0.930 RG
+0.50 w 318.00 288.23 m 318.00 321.83 l S
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 324.00 308.83 Tm (Telegram Creator Bot, 5s ffmpeg clips,) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 324.00 297.03 Tm (/streamPublicVideo, /share & /shareThumb) Tj ET
+0.970 0.980 0.995 rg
+48.00 254.63 499.28 33.60 re f
+0.810 0.860 0.930 RG
+0.50 w 48.00 254.63 499.28 33.60 re S
+0.027 0.051 0.102 rg
+BT /F2 8.8 Tf 1 0 0 1 54.00 275.23 Tm (AWS CDN) Tj ET
+0.810 0.860 0.930 RG
+0.50 w 143.00 254.63 m 143.00 288.23 l S
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 149.00 275.23 Tm (AWS CloudFront + S3 Bucket) Tj ET
+0.810 0.860 0.930 RG
+0.50 w 318.00 254.63 m 318.00 288.23 l S
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 324.00 275.23 Tm (Static opener \(index.html\), APK download) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 324.00 263.43 Tm (\(vidvora.apk\), app-ads.txt, assetlinks.json) Tj ET
+0.027 0.051 0.102 rg
+48.00 232.63 24.00 18.00 re f
+0.004 0.906 0.992 rg
+BT /F2 10.5 Tf 1 0 0 1 54.50 238.13 Tm (2) Tj ET
+0.027 0.051 0.102 rg
+BT /F2 13.5 Tf 1 0 0 1 82.00 237.63 Tm (Viewer Features & Playback Experience) Tj ET
+0.004 0.650 0.920 RG
+1.10 w 48.00 228.13 m 547.28 228.13 l S
+0.000 0.416 0.988 rg
+56.00 214.83 4.00 4.00 re f
+0.027 0.051 0.102 rg
+BT /F2 9.6 Tf 1 0 0 1 68.00 212.63 Tm (Universal Link & Token Resolver:) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 199.19 Tm (Supports raw codes \(GM-XXXX\), vidvora://watch?link=..., CloudFront/Firebase/Render share URLs, and) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 185.75 Tm (direct .mp4 or .m3u8 stream links.) Tj ET
+0.000 0.416 0.988 rg
+56.00 171.51 4.00 4.00 re f
+0.027 0.051 0.102 rg
+BT /F2 9.6 Tf 1 0 0 1 68.00 169.31 Tm (Pro Media3 ExoPlayer:) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 155.87 Tm (Includes double-tap +/-10s seek, pinch-to-zoom/fit toggle, 0.5x-2.0x speed control, adaptive quality) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 142.43 Tm (selector, landscape lock, and direct Share button.) Tj ET
+0.000 0.416 0.988 rg
+56.00 128.19 4.00 4.00 re f
+0.027 0.051 0.102 rg
+BT /F2 9.6 Tf 1 0 0 1 68.00 125.99 Tm (Offline Watch History:) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 112.55 Tm (Saves played streams in local Room DB with thumbnail, instant replay, copy/share link \(with OG) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 99.11 Tm (thumbnail preview\), and one-tap removal.) Tj ET
+0.350 0.410 0.520 RG 0.6 w 48.00 38.00 m 547.28 38.00 l S
+0.350 0.410 0.520 rg BT /F1 8.5 Tf 1 0 0 1 48.00 25.00 Tm (VidVora App Suite - Documentation PDF) Tj ET
+BT /F2 8.5 Tf 1 0 0 1 492.28 25.00 Tm (Page 1 of 4) Tj ET
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595.28 841.89] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents 9 0 R >>
+endobj
+9 0 obj
+<< /Length 9379 >>
+stream
+0.000 0.416 0.988 rg
+56.00 780.09 4.00 4.00 re f
+0.027 0.051 0.102 rg
+BT /F2 9.6 Tf 1 0 0 1 68.00 777.89 Tm (Telegram Directory:) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 764.45 Tm (Hamburger/drawer menu displays Main Official Channel plus all built-in and custom Category Channels) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 751.01 Tm (synced live from Firestore.) Tj ET
+0.000 0.416 0.988 rg
+56.00 736.77 4.00 4.00 re f
+0.027 0.051 0.102 rg
+BT /F2 9.6 Tf 1 0 0 1 68.00 734.57 Tm (Notices & Live Support Chat:) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 721.13 Tm (Broadcast alerts with banner images & clickable video deep links, plus real-time 1-on-1 user support) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 707.69 Tm (messaging with VidVora Support Team.) Tj ET
+0.027 0.051 0.102 rg
+48.00 681.25 24.00 18.00 re f
+0.004 0.906 0.992 rg
+BT /F2 10.5 Tf 1 0 0 1 54.50 686.75 Tm (3) Tj ET
+0.027 0.051 0.102 rg
+BT /F2 13.5 Tf 1 0 0 1 82.00 686.25 Tm (Google AdMob Monetization & Reward System) Tj ET
+0.004 0.650 0.920 RG
+1.10 w 48.00 676.75 m 547.28 676.75 l S
+0.080 0.110 0.180 rg
+BT /F1 9.8 Tf 1 0 0 1 48.00 661.25 Tm (VidVora integrates 5 AdMob ad formats engineered for high eCPM and continuous impressions while strictly) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.8 Tf 1 0 0 1 48.00 647.33 Tm (enforcing AdManager.isPlayerActive so no ad ever interrupts active video playback:) Tj ET
+0.027 0.051 0.102 rg
+48.00 607.42 499.28 22.00 re f
+1.000 1.000 1.000 rg
+BT /F2 9.0 Tf 1 0 0 1 54.00 614.42 Tm (Ad Placement) Tj ET
+1.000 1.000 1.000 rg
+BT /F2 9.0 Tf 1 0 0 1 169.00 614.42 Tm (When It Triggers) Tj ET
+1.000 1.000 1.000 rg
+BT /F2 9.0 Tf 1 0 0 1 369.00 614.42 Tm (Cooldown & UX Guard) Tj ET
+1.000 1.000 1.000 rg
+48.00 573.82 499.28 33.60 re f
+0.810 0.860 0.930 RG
+0.50 w 48.00 573.82 499.28 33.60 re S
+0.027 0.051 0.102 rg
+BT /F2 8.8 Tf 1 0 0 1 54.00 594.42 Tm (App Open Ad) Tj ET
+0.810 0.860 0.930 RG
+0.50 w 163.00 573.82 m 163.00 607.42 l S
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 169.00 594.42 Tm (Cold app launch \(12s window\) + foreground) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 169.00 582.62 Tm (resume) Tj ET
+0.810 0.860 0.930 RG
+0.50 w 363.00 573.82 m 363.00 607.42 l S
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 369.00 594.42 Tm (30s resume cooldown; suppressed on) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 369.00 582.62 Tm (incoming video deep links) Tj ET
+0.970 0.980 0.995 rg
+48.00 540.22 499.28 33.60 re f
+0.810 0.860 0.930 RG
+0.50 w 48.00 540.22 499.28 33.60 re S
+0.027 0.051 0.102 rg
+BT /F2 8.8 Tf 1 0 0 1 54.00 560.82 Tm (Pre-Play Interstitial) Tj ET
+0.810 0.860 0.930 RG
+0.50 w 163.00 540.22 m 163.00 573.82 l S
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 169.00 560.82 Tm (Watch & Play, History replay, or incoming) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 169.00 549.02 Tm (deep link) Tj ET
+0.810 0.860 0.930 RG
+0.50 w 363.00 540.22 m 363.00 573.82 l S
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 369.00 560.82 Tm (Every 2 actions with 25s shared cooldown) Tj ET
+1.000 1.000 1.000 rg
+48.00 506.62 499.28 33.60 re f
+0.810 0.860 0.930 RG
+0.50 w 48.00 506.62 499.28 33.60 re S
+0.027 0.051 0.102 rg
+BT /F2 8.8 Tf 1 0 0 1 54.00 527.22 Tm (Post-Player Exit Ad) Tj ET
+0.810 0.860 0.930 RG
+0.50 w 163.00 506.62 m 163.00 540.22 l S
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 169.00 527.22 Tm (Navigating back from PlayerScreen \(viewer) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 169.00 515.42 Tm (mode\)) Tj ET
+0.810 0.860 0.930 RG
+0.50 w 363.00 506.62 m 363.00 540.22 l S
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 369.00 527.22 Tm (Respects shared 25s cooldown & 10-min) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 369.00 515.42 Tm (VIP pass) Tj ET
+0.970 0.980 0.995 rg
+48.00 473.02 499.28 33.60 re f
+0.810 0.860 0.930 RG
+0.50 w 48.00 473.02 499.28 33.60 re S
+0.027 0.051 0.102 rg
+BT /F2 8.8 Tf 1 0 0 1 54.00 493.62 Tm (Nav Transition Ads) Tj ET
+0.810 0.860 0.930 RG
+0.50 w 163.00 473.02 m 163.00 506.62 l S
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 169.00 493.62 Tm (Dismissing Telegram Menu, Notices, or) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 169.00 481.82 Tm (Support dialogs) Tj ET
+0.810 0.860 0.930 RG
+0.50 w 363.00 473.02 m 363.00 506.62 l S
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 369.00 493.62 Tm (2-action threshold & 25s cooldown) Tj ET
+1.000 1.000 1.000 rg
+48.00 439.42 499.28 33.60 re f
+0.810 0.860 0.930 RG
+0.50 w 48.00 439.42 499.28 33.60 re S
+0.027 0.051 0.102 rg
+BT /F2 8.8 Tf 1 0 0 1 54.00 460.02 Tm (Dual Home Native Ads) Tj ET
+0.810 0.860 0.930 RG
+0.50 w 163.00 439.42 m 163.00 473.02 l S
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 169.00 460.02 Tm (Primary & secondary NativeAdCard slots on) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 169.00 448.22 Tm (Home feed) Tj ET
+0.810 0.860 0.930 RG
+0.50 w 363.00 439.42 m 363.00 473.02 l S
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 369.00 460.02 Tm (Persistent exponential backoff retry on) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 369.00 448.22 Tm (load error) Tj ET
+0.970 0.980 0.995 rg
+48.00 405.82 499.28 33.60 re f
+0.810 0.860 0.930 RG
+0.50 w 48.00 405.82 499.28 33.60 re S
+0.027 0.051 0.102 rg
+BT /F2 8.8 Tf 1 0 0 1 54.00 426.42 Tm (Adaptive Banner) Tj ET
+0.810 0.860 0.930 RG
+0.50 w 163.00 405.82 m 163.00 439.42 l S
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 169.00 426.42 Tm (Sticky anchored banner at bottom of Home) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 169.00 414.62 Tm (Screen) Tj ET
+0.810 0.860 0.930 RG
+0.50 w 363.00 405.82 m 363.00 439.42 l S
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 369.00 426.42 Tm (Auto-fits screen width with network) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 369.00 414.62 Tm (retry) Tj ET
+1.000 1.000 1.000 rg
+48.00 372.22 499.28 33.60 re f
+0.810 0.860 0.930 RG
+0.50 w 48.00 372.22 499.28 33.60 re S
+0.027 0.051 0.102 rg
+BT /F2 8.8 Tf 1 0 0 1 54.00 392.82 Tm (Rewarded VIP Pass) Tj ET
+0.810 0.860 0.930 RG
+0.50 w 163.00 372.22 m 163.00 405.82 l S
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 169.00 392.82 Tm (Optional Rewarded Video CTA in Home header) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 169.00 381.02 Tm (card) Tj ET
+0.810 0.860 0.930 RG
+0.50 w 363.00 372.22 m 363.00 405.82 l S
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 369.00 392.82 Tm (Unlocks 10 minutes \(600,000 ms\) complete) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 8.8 Tf 1 0 0 1 369.00 381.02 Tm (Ad-Free session) Tj ET
+0.027 0.051 0.102 rg
+48.00 350.22 24.00 18.00 re f
+0.004 0.906 0.992 rg
+BT /F2 10.5 Tf 1 0 0 1 54.50 355.72 Tm (4) Tj ET
+0.027 0.051 0.102 rg
+BT /F2 13.5 Tf 1 0 0 1 82.00 355.22 Tm (Creator Portal, Views & UPI Payouts) Tj ET
+0.004 0.650 0.920 RG
+1.10 w 48.00 345.72 m 547.28 345.72 l S
+0.000 0.416 0.988 rg
+56.00 332.42 4.00 4.00 re f
+0.027 0.051 0.102 rg
+BT /F2 9.6 Tf 1 0 0 1 68.00 330.22 Tm (Master Key Authentication:) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 316.78 Tm (Creators sign in via their personal passkey and email/phone, isolated by role-based Firestore and) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 303.34 Tm (ViewModel guards.) Tj ET
+0.000 0.416 0.988 rg
+56.00 289.10 4.00 4.00 re f
+0.027 0.051 0.102 rg
+BT /F2 9.6 Tf 1 0 0 1 68.00 286.90 Tm (Upload & Line-by-Line Top Ordering:) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 273.46 Tm (Upload device MP4/MKV files or paste CDN HTTPS URLs with custom thumbnails. Latest uploads) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 260.02 Tm (automatically appear at the very top.) Tj ET
+0.000 0.416 0.988 rg
+56.00 245.78 4.00 4.00 re f
+0.027 0.051 0.102 rg
+BT /F2 9.6 Tf 1 0 0 1 68.00 243.58 Tm (Views & Earnings Formula:) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 230.14 Tm (Auto-calculated at Rs. 190 per 1,000 views: round\(\(views / 1000.0\) * 190.0, 2\). Creator self-playback) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 216.70 Tm (never inflates view counts.) Tj ET
+0.000 0.416 0.988 rg
+56.00 202.46 4.00 4.00 re f
+0.027 0.051 0.102 rg
+BT /F2 9.6 Tf 1 0 0 1 68.00 200.26 Tm (UPI Withdrawals \(Min Rs. 500\):) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 186.82 Tm (Creators submit UPI ID \(e.g. name@upi\) once available balance >= Rs. 500.00. Status tracks PENDING ->) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 173.38 Tm (PROCESSING -> PAID / REJECTED.) Tj ET
+0.000 0.416 0.988 rg
+56.00 159.14 4.00 4.00 re f
+0.027 0.051 0.102 rg
+BT /F2 9.6 Tf 1 0 0 1 68.00 156.94 Tm (Creator Events & Support:) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 143.50 Tm (Dedicated Events & Gifts showcase modal and direct Creator-to-Superadmin support chat.) Tj ET
+0.027 0.051 0.102 rg
+48.00 117.06 24.00 18.00 re f
+0.004 0.906 0.992 rg
+BT /F2 10.5 Tf 1 0 0 1 54.50 122.56 Tm (5) Tj ET
+0.027 0.051 0.102 rg
+BT /F2 13.5 Tf 1 0 0 1 82.00 122.06 Tm (Superadmin & Delegated Admin Console) Tj ET
+0.004 0.650 0.920 RG
+1.10 w 48.00 112.56 m 547.28 112.56 l S
+0.350 0.410 0.520 RG 0.6 w 48.00 801.89 m 547.28 801.89 l S
+BT /F2 8.5 Tf 1 0 0 1 48.00 808.89 Tm (VidVora Technical & Product Documentation) Tj ET
+BT /F1 8.5 Tf 1 0 0 1 452.28 808.89 Tm (com.aistudio.vidvora.vstr) Tj ET
+0.350 0.410 0.520 RG 0.6 w 48.00 38.00 m 547.28 38.00 l S
+0.350 0.410 0.520 rg BT /F1 8.5 Tf 1 0 0 1 48.00 25.00 Tm (VidVora App Suite - Documentation PDF) Tj ET
+BT /F2 8.5 Tf 1 0 0 1 492.28 25.00 Tm (Page 2 of 4) Tj ET
+endstream
+endobj
+10 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595.28 841.89] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents 11 0 R >>
+endobj
+11 0 obj
+<< /Length 7262 >>
+stream
+0.000 0.416 0.988 rg
+56.00 780.09 4.00 4.00 re f
+0.027 0.051 0.102 rg
+BT /F2 9.6 Tf 1 0 0 1 68.00 777.89 Tm (Role-Based Permissions \(MemberOption\):) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 764.45 Tm (Superadmin \(GM-ADMIN-2026-MASTER\) can promote delegated admins and assign granular permissions:) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 751.01 Tm (UPLOAD_VIDEOS, MANAGE_VIDEOS, MANAGE_MEMBERS, MANAGE_PAYOUTS, SEND_NOTIFICATIONS,) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 737.57 Tm (MANAGE_TELEGRAM, MANAGE_SUPPORT, MANAGE_EVENTS, VIEW_ANALYTICS.) Tj ET
+0.000 0.416 0.988 rg
+56.00 723.33 4.00 4.00 re f
+0.027 0.051 0.102 rg
+BT /F2 9.6 Tf 1 0 0 1 68.00 721.13 Tm (Member Lifecycle & Email Merge:) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 707.69 Tm (Add, pause, or delete creators; update email/identity with atomic transfer/merge of historical videos) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 694.25 Tm (and payout records; manually credit views/earnings.) Tj ET
+0.000 0.416 0.988 rg
+56.00 680.01 4.00 4.00 re f
+0.027 0.051 0.102 rg
+BT /F2 9.6 Tf 1 0 0 1 68.00 677.81 Tm (Telegram & Share Preview Config:) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 664.37 Tm (Manage Main Channel, Creator Bot Link, Share Preview Server URL \(for link thumbnails\), and up to 40) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 650.93 Tm (custom Telegram categories.) Tj ET
+0.000 0.416 0.988 rg
+56.00 636.69 4.00 4.00 re f
+0.027 0.051 0.102 rg
+BT /F2 9.6 Tf 1 0 0 1 68.00 634.49 Tm (Install Analytics:) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 621.05 Tm (Tracks unique device installs, app version updates, and Active vs. Inactive counts by configurable) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 607.61 Tm (inactivity window.) Tj ET
+0.027 0.051 0.102 rg
+48.00 581.17 24.00 18.00 re f
+0.004 0.906 0.992 rg
+BT /F2 10.5 Tf 1 0 0 1 54.50 586.67 Tm (6) Tj ET
+0.027 0.051 0.102 rg
+BT /F2 13.5 Tf 1 0 0 1 82.00 586.17 Tm (Telegram Creator Auto-Upload Bot & Free Hosting) Tj ET
+0.004 0.650 0.920 RG
+1.10 w 48.00 576.67 m 547.28 576.67 l S
+0.080 0.110 0.180 rg
+BT /F1 9.8 Tf 1 0 0 1 48.00 561.17 Tm (Creators can upload videos straight from Telegram without opening the Android app. Because Firebase Spark) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.8 Tf 1 0 0 1 48.00 547.25 Tm (\(free plan\) cannot deploy Cloud Functions without Blaze billing, VidVora includes a standalone Node.js HTTP) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.8 Tf 1 0 0 1 48.00 533.34 Tm (server \(functions/server.js\) that runs 100% free on Render.com, Koyeb, or Railway:) Tj ET
+0.000 0.416 0.988 rg
+56.00 517.62 4.00 4.00 re f
+0.027 0.051 0.102 rg
+BT /F2 9.6 Tf 1 0 0 1 68.00 515.42 Tm (Bot Commands:) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 501.98 Tm (/start & /help \(guide\), /login <MASTER_KEY> \(link Creator account\), /status \(upload stats\), /logout) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 488.54 Tm (\(unlink session\).) Tj ET
+0.000 0.416 0.988 rg
+56.00 474.30 4.00 4.00 re f
+0.027 0.051 0.102 rg
+BT /F2 9.6 Tf 1 0 0 1 68.00 472.10 Tm (Auto 5-Second Clip & Thumbnail:) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 458.66 Tm (Receives Telegram video \(<=20 MB standard Bot API\) or unlimited-size HTTPS .mp4 link. ffmpeg cuts a) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 445.22 Tm (5-second H.264/AAC preview clip and JPG thumbnail.) Tj ET
+0.000 0.416 0.988 rg
+56.00 430.98 4.00 4.00 re f
+0.027 0.051 0.102 rg
+BT /F2 9.6 Tf 1 0 0 1 68.00 428.78 Tm (Spark-Plan Fallback Streaming:) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 415.34 Tm (When Cloud Storage is unprovisioned on Spark plan, the bot stores tgFileId + inline Base64 thumbnail in) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 401.90 Tm (Firestore and proxies byte-range video via HMAC-signed /streamPublicVideo.) Tj ET
+0.945 0.961 0.988 rg
+48.00 320.46 499.28 65.00 re f
+0.810 0.860 0.930 RG
+0.70 w 48.00 320.46 499.28 65.00 re S
+0.780 0.570 0.060 rg
+48.00 320.46 4.00 65.00 re f
+0.027 0.051 0.102 rg
+BT /F2 9.8 Tf 1 0 0 1 60.00 371.46 Tm (Note on Firebase Project Android App Entries) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.2 Tf 1 0 0 1 60.00 357.46 Tm (Seeing com.aistudio.garammasala.vstr alongside com.aistudio.vidvora.vstr inside Firebase Project Settings) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.2 Tf 1 0 0 1 60.00 344.46 Tm (is harmless. The active app uses applicationId 'com.aistudio.vidvora.vstr', matching google-services.json) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.2 Tf 1 0 0 1 60.00 331.46 Tm (inside Firebase project gen-lang-client-0000740810.) Tj ET
+0.027 0.051 0.102 rg
+48.00 298.46 24.00 18.00 re f
+0.004 0.906 0.992 rg
+BT /F2 10.5 Tf 1 0 0 1 54.50 303.96 Tm (7) Tj ET
+0.027 0.051 0.102 rg
+BT /F2 13.5 Tf 1 0 0 1 82.00 303.46 Tm (AWS CloudFront CDN & Universal Link Thumbnails) Tj ET
+0.004 0.650 0.920 RG
+1.10 w 48.00 293.96 m 547.28 293.96 l S
+0.000 0.416 0.988 rg
+BT /F2 10.8 Tf 1 0 0 1 48.00 278.46 Tm (What Your AWS Setup \(d1mn8mrvlzisg5.cloudfront.net\) Does) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.8 Tf 1 0 0 1 48.00 262.46 Tm (Your AWS URL https://d1mn8mrvlzisg5.cloudfront.net/ is an Amazon CloudFront CDN backed by an Amazon) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.8 Tf 1 0 0 1 48.00 248.55 Tm (S3 static website bucket. It serves the static web-opener page \(index.html\), hosts direct APK downloads) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.8 Tf 1 0 0 1 48.00 234.63 Tm (\(/vidvora.apk\), and provides app-ads.txt and .well-known/assetlinks.json for AdMob and Android App Links.) Tj ET
+0.000 0.416 0.988 rg
+BT /F2 10.8 Tf 1 0 0 1 48.00 216.71 Tm (Why Dynamic Server-Side Open Graph \(/share & /shareThumb\) Was Added) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.8 Tf 1 0 0 1 48.00 200.71 Tm (Social apps \(WhatsApp, Telegram, Facebook, Instagram, X/Twitter, Discord\) do not execute client-side) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.8 Tf 1 0 0 1 48.00 186.80 Tm (JavaScript on static S3 pages and reject data:image/...;base64 URIs in meta tags. To guarantee every shared) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.8 Tf 1 0 0 1 48.00 172.88 Tm (video displays its exact thumbnail on every platform, VidVora provides server-side OG endpoints:) Tj ET
+0.000 0.416 0.988 rg
+56.00 157.17 4.00 4.00 re f
+0.027 0.051 0.102 rg
+BT /F2 9.6 Tf 1 0 0 1 68.00 154.97 Tm (GET /share?link=<TOKEN>:) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 141.53 Tm (Reads accessLinks & videos from Firestore, injects og:title, og:description, og:image ->) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 128.09 Tm (https://<HOST>/shareThumb?videoId=<ID>, og:image:width/height, and) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 114.65 Tm (twitter:card=summary_large_image, then renders the Watch-in-App player card.) Tj ET
+0.350 0.410 0.520 RG 0.6 w 48.00 801.89 m 547.28 801.89 l S
+BT /F2 8.5 Tf 1 0 0 1 48.00 808.89 Tm (VidVora Technical & Product Documentation) Tj ET
+BT /F1 8.5 Tf 1 0 0 1 452.28 808.89 Tm (com.aistudio.vidvora.vstr) Tj ET
+0.350 0.410 0.520 RG 0.6 w 48.00 38.00 m 547.28 38.00 l S
+0.350 0.410 0.520 rg BT /F1 8.5 Tf 1 0 0 1 48.00 25.00 Tm (VidVora App Suite - Documentation PDF) Tj ET
+BT /F2 8.5 Tf 1 0 0 1 492.28 25.00 Tm (Page 3 of 4) Tj ET
+endstream
+endobj
+12 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595.28 841.89] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents 13 0 R >>
+endobj
+13 0 obj
+<< /Length 3388 >>
+stream
+0.000 0.416 0.988 rg
+56.00 780.09 4.00 4.00 re f
+0.027 0.051 0.102 rg
+BT /F2 9.6 Tf 1 0 0 1 68.00 777.89 Tm (GET /shareThumb?videoId=<ID>:) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 764.45 Tm (Returns raw HTTP 200 JPEG/PNG bytes by decoding Base64 thumbnails, reading Firebase Storage,) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 751.01 Tm (proxying external HTTPS images, or falling back to vidvora-og-banner.png \(1200x630\).) Tj ET
+0.000 0.416 0.988 rg
+56.00 736.77 4.00 4.00 re f
+0.027 0.051 0.102 rg
+BT /F2 9.6 Tf 1 0 0 1 68.00 734.57 Tm (Zero-Rebuild Admin Activation:) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 721.13 Tm (Admin pastes the live Render/Hosting URL \(e.g. https://your-bot.onrender.com/share?link=\) into Admin) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 707.69 Tm (Panel -> Telegram Links -> Share Preview Server URL. Every share button in the app & Telegram bot) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 694.25 Tm (immediately outputs rich thumbnail-preview links.) Tj ET
+0.027 0.051 0.102 rg
+48.00 667.81 24.00 18.00 re f
+0.004 0.906 0.992 rg
+BT /F2 10.5 Tf 1 0 0 1 54.50 673.31 Tm (8) Tj ET
+0.027 0.051 0.102 rg
+BT /F2 13.5 Tf 1 0 0 1 82.00 672.81 Tm (Security, Token Hashing & Operations Checklist) Tj ET
+0.004 0.650 0.920 RG
+1.10 w 48.00 663.31 m 547.28 663.31 l S
+0.000 0.416 0.988 rg
+56.00 650.01 4.00 4.00 re f
+0.027 0.051 0.102 rg
+BT /F2 9.6 Tf 1 0 0 1 68.00 647.81 Tm (Cryptographic Token Hashing:) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 634.37 Tm (Raw tokens are normalized uppercase and stored exclusively as SHA-256 hex hashes \(tokenHash\) inside) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 620.93 Tm (accessLinks.) Tj ET
+0.000 0.416 0.988 rg
+56.00 606.69 4.00 4.00 re f
+0.027 0.051 0.102 rg
+BT /F2 9.6 Tf 1 0 0 1 68.00 604.49 Tm (HMAC-SHA256 Public Streams:) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 591.05 Tm (Public stream and thumbnail URLs require valid HMAC-SHA256 signatures and check real-time Firestore) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 577.61 Tm (isActive status on every request.) Tj ET
+0.000 0.416 0.988 rg
+56.00 563.37 4.00 4.00 re f
+0.027 0.051 0.102 rg
+BT /F2 9.6 Tf 1 0 0 1 68.00 561.17 Tm (Instant Revocation Kill-Switch:) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 547.73 Tm (Disabling a single accessLink or parent video blocks in-app playback and proxy streaming immediately) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 534.29 Tm (across all devices.) Tj ET
+0.000 0.416 0.988 rg
+56.00 520.05 4.00 4.00 re f
+0.027 0.051 0.102 rg
+BT /F2 9.6 Tf 1 0 0 1 68.00 517.85 Tm (Webhook Secret Protection:) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 504.41 Tm (Telegram webhooks verify the X-Telegram-Bot-Api-Secret-Token header before processing any upload) Tj ET
+0.080 0.110 0.180 rg
+BT /F1 9.6 Tf 1 0 0 1 76.00 490.97 Tm (command.) Tj ET
+0.350 0.410 0.520 RG 0.6 w 48.00 801.89 m 547.28 801.89 l S
+BT /F2 8.5 Tf 1 0 0 1 48.00 808.89 Tm (VidVora Technical & Product Documentation) Tj ET
+BT /F1 8.5 Tf 1 0 0 1 452.28 808.89 Tm (com.aistudio.vidvora.vstr) Tj ET
+0.350 0.410 0.520 RG 0.6 w 48.00 38.00 m 547.28 38.00 l S
+0.350 0.410 0.520 rg BT /F1 8.5 Tf 1 0 0 1 48.00 25.00 Tm (VidVora App Suite - Documentation PDF) Tj ET
+BT /F2 8.5 Tf 1 0 0 1 492.28 25.00 Tm (Page 4 of 4) Tj ET
+endstream
+endobj
+xref
+0 14
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000143 00000 n 
+0000000240 00000 n 
+0000000342 00000 n 
+0000000437 00000 n 
+0000000589 00000 n 
+0000009144 00000 n 
+0000009296 00000 n 
+0000018727 00000 n 
+0000018881 00000 n 
+0000026196 00000 n 
+0000026350 00000 n 
+trailer
+<< /Size 14 /Root 1 0 R >>
+startxref
+29791
+%%EOF

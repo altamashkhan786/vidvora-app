@@ -1,0 +1,71 @@
+{
+  "firestore": [
+    {
+      "database": "ai-studio-android-garammas-738e4493-0090-419e-8ece-c55642a933ce",
+      "rules": "firestore.rules"
+    }
+  ],
+  "storage": {
+    "rules": "storage.rules"
+  },
+  "functions": [
+    {
+      "source": "functions",
+      "codebase": "default",
+      "ignore": [
+        "node_modules",
+        ".git",
+        "firebase-debug.log",
+        "firebase-debug.*.log"
+      ]
+    }
+  ],
+  "hosting": {
+    "public": "public",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**",
+      "assets/**"
+    ],
+    "rewrites": [
+      {
+        "source": "/shareThumb/**",
+        "function": "shareThumb"
+      },
+      {
+        "source": "/shareThumb",
+        "function": "shareThumb"
+      },
+      {
+        "source": "/share/**",
+        "function": "sharePage"
+      },
+      {
+        "source": "/share",
+        "function": "sharePage"
+      },
+      {
+        "source": "/watch/**",
+        "function": "sharePage"
+      },
+      {
+        "source": "/watch",
+        "function": "sharePage"
+      }
+    ]
+  },
+  "emulators": {
+    "firestore": {
+      "host": "127.0.0.1",
+      "port": 8085
+    },
+    "auth": {
+      "host": "127.0.0.1",
+      "port": 9099
+    },
+    "ui": {
+      "enabled": false
+    }
+  }
+}

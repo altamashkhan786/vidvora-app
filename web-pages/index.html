@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VidVora — Watch Video</title>
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="VidVora" />
+  <meta property="og:title" content="VidVora — Watch Video" />
+  <meta property="og:description" content="Tap to watch this video in VidVora App." />
+  <meta property="og:url" content="https://d1mn8mrvlzisg5.cloudfront.net/" />
+  <meta property="og:image" content="https://d1mn8mrvlzisg5.cloudfront.net/vidvora-og-banner.png" />
+  <meta property="og:image:secure_url" content="https://d1mn8mrvlzisg5.cloudfront.net/vidvora-og-banner.png" />
+  <meta property="og:image:type" content="image/png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="VidVora — Watch Video" />
+  <meta name="twitter:description" content="Tap to watch this video in VidVora App." />
+  <meta name="twitter:image" content="https://d1mn8mrvlzisg5.cloudfront.net/vidvora-og-banner.png" />
+  <meta name="description" content="Tap to watch this video in VidVora App." />
+  <meta name="theme-color" content="#070d1a" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: radial-gradient(circle at top, #0c2347 0%, #070d1a 60%);
+      color: #f5f7fb;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .card {
+      width: 100%;
+      max-width: 420px;
+      background: #0d1526;
+      border: 1px solid #21355c;
+      border-radius: 22px;
+      padding: 28px 22px;
+      text-align: center;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.65);
+    }
+    .badge {
+      display: inline-block;
+      background: rgba(0, 106, 252, 0.18);
+      color: #01e7fd;
+      border: 1px solid rgba(1, 200, 252, 0.45);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 1px;
+      padding: 5px 12px;
+      border-radius: 999px;
+      margin-bottom: 14px;
+    }
+    h1 {
+      font-size: 22px;
+      font-weight: 900;
+      margin-bottom: 8px;
+      color: #ffffff;
+    }
+    p {
+      font-size: 14px;
+      color: #b8c7e0;
+      line-height: 1.5;
+      margin-bottom: 18px;
+    }
+    .code-box {
+      background: #070d1a;
+      border: 1px solid #21355c;
+      border-radius: 12px;
+      padding: 12px;
+      font-family: monospace;
+      font-size: 13px;
+      color: #01e7fd;
+      word-break: break-all;
+      margin-bottom: 18px;
+    }
+    .btn {
+      display: block;
+      width: 100%;
+      padding: 15px 18px;
+      border-radius: 14px;
+      font-size: 15px;
+      font-weight: 800;
+      text-decoration: none;
+      cursor: pointer;
+      border: none;
+      margin-bottom: 10px;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, #01c8fc, #006afc, #0112e9);
+      color: #ffffff;
+    }
+    .btn-secondary {
+      background: #15213b;
+      color: #01e7fd;
+      border: 1px solid #263d69;
+    }
+    .btn-download {
+      background: #111b30;
+      color: #ffffff;
+      border: 1px solid #263d69;
+      font-size: 14px;
+      font-weight: 700;
+    }
+    .note {
+      margin-top: 10px;
+      font-size: 12px;
+      color: #7d92b8;
+      line-height: 1.45;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">VIDVORA PLAYER</div>
+    <h1 id="pageTitle">Opening Video Stream...</h1>
+    <p id="pageDesc">Tap below to launch VidVora app directly and start watching.</p>
+    <div class="code-box" id="linkCode">Loading video link...</div>
+    <a id="downloadApkBtn" class="btn btn-download" href="https://d1mn8mrvlzisg5.cloudfront.net/vidvora.apk" download="VidVora.apk" style="display:none;">
+      Download VidVora App (APK)
+    </a>
+    <a id="openIntentBtn" class="btn btn-primary" href="#">Watch in VidVora App</a>
+    <button id="copyBtn" class="btn btn-secondary" type="button">Copy Video Link</button>
+    <a id="downloadSecondaryBtn" class="btn btn-download" href="https://d1mn8mrvlzisg5.cloudfront.net/vidvora.apk" download="VidVora.apk">
+      Don't have the app? Download APK
+    </a>
+    <div class="note" id="statusNote">If the app doesn't open automatically, tap the blue button above.</div>
+  </div>
+
+  <script>
+    (function () {
+      var params = new URLSearchParams(window.location.search);
+      var code = (params.get("link") || params.get("v") || params.get("video") || params.get("token") || "").trim();
+      var isInstallFallback = params.get("install") === "1";
+
+      var baseUrl = window.location.origin + window.location.pathname;
+      var apkUrl = "https://d1mn8mrvlzisg5.cloudfront.net/vidvora.apk";
+      var cleanShareUrl = code ? (baseUrl + "?link=" + encodeURIComponent(code)) : window.location.href;
+
+      var pageTitleEl = document.getElementById("pageTitle");
+      var pageDescEl = document.getElementById("pageDesc");
+      var linkCodeEl = document.getElementById("linkCode");
+      var openBtn = document.getElementById("openIntentBtn");
+      var downloadPrimaryBtn = document.getElementById("downloadApkBtn");
+      var downloadSecondaryBtn = document.getElementById("downloadSecondaryBtn");
+      var copyBtn = document.getElementById("copyBtn");
+      var statusNote = document.getElementById("statusNote");
+
+      function handleApkDownloadClick(e) {
+        e.preventDefault();
+        statusNote.textContent = "Checking APK file...";
+        fetch(apkUrl, { method: "HEAD" })
+          .then(function (res) {
+            if (res.ok) {
+              statusNote.textContent = "Downloading VidVora APK...";
+              window.location.href = apkUrl;
+            } else {
+              statusNote.textContent = "APK abhi server par upload nahi hua hai. Admin se VidVora APK mangein, phir link dubara kholen.";
+            }
+          })
+          .catch(function () {
+            window.location.href = apkUrl;
+          });
+      }
+
+      downloadPrimaryBtn.addEventListener("click", handleApkDownloadClick);
+      downloadSecondaryBtn.addEventListener("click", handleApkDownloadClick);
+
+      function showInstallView() {
+        pageTitleEl.textContent = "VidVora App Install Karein";
+        pageDescEl.textContent = "Aapke phone me VidVora app install nahi hai. Video dekhne ke liye pehle niche button se app download & install karein.";
+        downloadPrimaryBtn.style.display = "block";
+        downloadPrimaryBtn.className = "btn btn-primary";
+        openBtn.className = "btn btn-download";
+        openBtn.textContent = "Already Installed? Open Video";
+        downloadSecondaryBtn.style.display = "none";
+        statusNote.textContent = "Install karne ke baad wapas is link par click karein — video direct play ho jayega.";
+      }
+
+      if (!code) {
+        linkCodeEl.textContent = "VidVora Direct Player";
+        openBtn.href = "intent://watch#Intent;scheme=vidvora;package=com.aistudio.vidvora.vstr;end";
+        if (isInstallFallback) {
+          showInstallView();
+        }
+        return;
+      }
+
+      linkCodeEl.textContent = code;
+      var encoded = encodeURIComponent(code);
+      var customUri = "vidvora://watch?link=" + encoded;
+      var fallbackPageUrl = baseUrl + "?link=" + encoded + "&install=1";
+      var intentUri =
+        "intent://watch?link=" +
+        encoded +
+        "#Intent;scheme=vidvora;package=com.aistudio.vidvora.vstr;S.browser_fallback_url=" +
+        encodeURIComponent(fallbackPageUrl) +
+        ";end";
+
+      var isAndroid = /Android/i.test(navigator.userAgent || "");
+      openBtn.href = isAndroid ? intentUri : customUri;
+
+      if (isInstallFallback) {
+        showInstallView();
+      }
+
+      copyBtn.addEventListener("click", function () {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(cleanShareUrl).then(function () {
+            statusNote.textContent = "Link copied! App install karke open karein.";
+          });
+        } else {
+          statusNote.textContent = "Copy this link: " + cleanShareUrl;
+        }
+      });
+
+      if (isAndroid && !isInstallFallback) {
+        setTimeout(function () {
+          window.location.href = intentUri;
+        }, 120);
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,505 @@
+{
+  "entities": {
+    "Video": {
+      "title": "Video",
+      "description": "Video metadata and storage path records for streaming",
+      "type": "object",
+      "properties": {
+        "videoId": {
+          "type": "string",
+          "description": "Unique identifier of the video"
+        },
+        "title": {
+          "type": "string",
+          "description": "Title of the video stream"
+        },
+        "description": {
+          "type": "string",
+          "description": "Detailed description of the video content"
+        },
+        "thumbnailPath": {
+          "type": "string",
+          "description": "Storage or public URL path to video poster thumbnail"
+        },
+        "storagePath": {
+          "type": "string",
+          "description": "Cloud Storage path or stream URI of the video file"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of video creation"
+        },
+        "isActive": {
+          "type": "boolean",
+          "description": "Whether the video is active and available for streaming"
+        },
+        "totalViews": {
+          "type": "integer",
+          "description": "Total number of views accumulated by this video"
+        },
+        "uploadedBy": {
+          "type": "string",
+          "description": "Identifier of the admin or creator member who uploaded the video"
+        },
+        "uploaderName": {
+          "type": "string",
+          "description": "Display name of the uploader"
+        }
+      },
+      "required": ["videoId", "title", "description", "storagePath", "createdAt", "isActive", "totalViews"]
+    },
+    "AccessLink": {
+      "title": "AccessLink",
+      "description": "Unique token access link granting permission to stream a video",
+      "type": "object",
+      "properties": {
+        "linkId": {
+          "type": "string",
+          "description": "Unique identifier of the access link document"
+        },
+        "videoId": {
+          "type": "string",
+          "description": "Identifier of the video referenced by this access link"
+        },
+        "tokenHash": {
+          "type": "string",
+          "description": "Secure hash or token representation of the access key"
+        },
+        "isActive": {
+          "type": "boolean",
+          "description": "Whether this access link is active or deactivated by admin"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the link was created"
+        },
+        "expiresAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Optional expiration timestamp or null for permanent links"
+        }
+      },
+      "required": ["linkId", "videoId", "tokenHash", "isActive", "createdAt"]
+    },
+    "Admin": {
+      "title": "Admin",
+      "description": "Authorized administrator user profile and role definition",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Authentication user UID"
+        },
+        "role": {
+          "type": "string",
+          "description": "Role level such as admin or superadmin",
+          "enum": ["admin", "superadmin"]
+        },
+        "isActive": {
+          "type": "boolean",
+          "description": "Whether this admin account is active"
+        }
+      },
+      "required": ["uid", "role", "isActive"]
+    },
+    "Member": {
+      "title": "Member",
+      "description": "Authorized creator member account with admin-managed earning balance",
+      "type": "object",
+      "properties": {
+        "memberId": {
+          "type": "string",
+          "description": "Unique identifier of the creator member"
+        },
+        "name": {
+          "type": "string",
+          "description": "Creator display name"
+        },
+        "emailOrPhone": {
+          "type": "string",
+          "description": "Creator login email or contact"
+        },
+        "passkey": {
+          "type": "string",
+          "description": "Creator portal passkey"
+        },
+        "role": {
+          "type": "string",
+          "description": "Account role chosen by Superadmin: Creator (member) or Sub-Admin (admin)",
+          "enum": ["member", "admin"]
+        },
+        "allowedOptions": {
+          "type": "array",
+          "description": "List of panel option keys explicitly granted to this user",
+          "items": {
+            "type": "string"
+          }
+        },
+        "isActive": {
+          "type": "boolean",
+          "description": "Whether this member account is active"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp"
+        },
+        "totalEarning": {
+          "type": "number",
+          "description": "Total INR earning credited and shown by admin on the creator dashboard"
+        },
+        "creditedViews": {
+          "type": "integer",
+          "description": "Admin-credited view count displayed on the creator dashboard (kept separate from actual admin-only video views)"
+        },
+        "viewRatePer1000": {
+          "type": "number",
+          "description": "Admin payout rate in INR per 1,000 credited views (defaults to 190)"
+        }
+      },
+      "required": ["memberId", "name", "emailOrPhone", "passkey", "role", "isActive", "createdAt"]
+    },
+    "WithdrawalRequest": {
+      "title": "WithdrawalRequest",
+      "description": "Creator UPI payout withdrawal request with minimum 500 INR threshold",
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "description": "Unique identifier of the withdrawal request"
+        },
+        "memberId": {
+          "type": "string",
+          "description": "Creator memberId who requested the payout"
+        },
+        "creatorName": {
+          "type": "string",
+          "description": "Display name of the creator"
+        },
+        "creatorEmail": {
+          "type": "string",
+          "description": "Email address of the creator"
+        },
+        "amount": {
+          "type": "number",
+          "description": "Requested withdrawal amount in INR (minimum 500)"
+        },
+        "upiId": {
+          "type": "string",
+          "description": "Creator UPI ID for receiving payout"
+        },
+        "status": {
+          "type": "string",
+          "description": "Current payout processing state managed by admin",
+          "enum": ["PENDING", "PROCESSING", "DONE", "REJECTED"]
+        },
+        "adminNote": {
+          "type": "string",
+          "description": "Optional UTR reference or note added by admin"
+        },
+        "requestedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when withdrawal was requested"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when admin last updated payout status"
+        }
+      },
+      "required": ["requestId", "memberId", "creatorName", "creatorEmail", "amount", "upiId", "status", "requestedAt"]
+    },
+    "AppNotification": {
+      "title": "AppNotification",
+      "description": "Broadcast announcement notification sent by Superadmin to all VidVora app users",
+      "type": "object",
+      "properties": {
+        "notificationId": {
+          "type": "string",
+          "description": "Unique identifier of the broadcast notification"
+        },
+        "title": {
+          "type": "string",
+          "description": "Headline title of the notification"
+        },
+        "message": {
+          "type": "string",
+          "description": "Body message shown in system tray and in-app announcement banner"
+        },
+        "imageUrl": {
+          "type": "string",
+          "description": "Optional image URL or encoded banner image attached to the notification"
+        },
+        "actionUrl": {
+          "type": "string",
+          "description": "Optional clickable URL or deep link attached to the notification"
+        },
+        "sentBy": {
+          "type": "string",
+          "description": "Identifier of the admin who sent the broadcast"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when notification was broadcast"
+        },
+        "isActive": {
+          "type": "boolean",
+          "description": "Whether this broadcast notification is active"
+        }
+      },
+      "required": ["notificationId", "title", "message", "sentBy", "createdAt", "isActive"]
+    },
+    "AppInstall": {
+      "title": "AppInstall",
+      "description": "App-scoped anonymous installation and heartbeat record used to compute downloads, active installs, and estimated uninstalls without hardware identifiers",
+      "type": "object",
+      "properties": {
+        "installId": {
+          "type": "string",
+          "description": "Random app-scoped UUID generated on first launch (wiped on uninstall)"
+        },
+        "firstInstalledAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of initial app install/download"
+        },
+        "lastSeenAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of latest app open heartbeat"
+        },
+        "appVersion": {
+          "type": "string",
+          "description": "Installed application version name"
+        },
+        "deviceLabel": {
+          "type": "string",
+          "description": "Non-identifying device manufacturer and model label"
+        },
+        "androidVersion": {
+          "type": "string",
+          "description": "Android OS release label"
+        },
+        "sessionCount": {
+          "type": "integer",
+          "description": "Number of heartbeat sessions recorded for this installation"
+        },
+        "isMarkedUninstalled": {
+          "type": "boolean",
+          "description": "Optional admin override flag indicating uninstalled or retired install record"
+        }
+      },
+      "required": ["installId", "firstInstalledAt", "lastSeenAt", "appVersion", "deviceLabel", "androidVersion", "sessionCount", "isMarkedUninstalled"]
+    },
+    "AppConfig": {
+      "title": "AppConfig",
+      "description": "Global VidVora configuration including main and category-wise Telegram channel links",
+      "type": "object",
+      "properties": {
+        "telegramLink": {
+          "type": "string",
+          "description": "Main official VidVora Telegram channel URL"
+        },
+        "categoryLinks": {
+          "type": "object",
+          "description": "Map of built-in category keys (pakistani_drama, south_movie, ullu_tv_series, bhojpuri_movie, adult_content) to Telegram URL"
+        },
+        "customCategories": {
+          "type": "array",
+          "description": "Ordered list of admin-added custom Telegram categories ({id, name, link})",
+          "items": {
+            "type": "object"
+          }
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when Telegram configuration was last updated"
+        }
+      },
+      "required": ["telegramLink"]
+    },
+    "SupportChat": {
+      "title": "SupportChat",
+      "description": "User-to-Admin live support chat thread metadata",
+      "type": "object",
+      "properties": {
+        "chatId": {
+          "type": "string",
+          "description": "App-scoped chat thread identifier"
+        },
+        "userName": {
+          "type": "string",
+          "description": "Display name entered by user or Guest"
+        },
+        "deviceLabel": {
+          "type": "string",
+          "description": "Non-identifying device model label"
+        },
+        "lastMessage": {
+          "type": "string",
+          "description": "Preview of the latest message in the thread"
+        },
+        "lastSenderRole": {
+          "type": "string",
+          "description": "Role of sender of latest message (user or admin)",
+          "enum": ["user", "admin"]
+        },
+        "lastMessageAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the latest message"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when chat thread was started"
+        },
+        "unreadByAdminCount": {
+          "type": "integer",
+          "description": "Number of unread user messages awaiting admin review"
+        },
+        "unreadByUserCount": {
+          "type": "integer",
+          "description": "Number of unread admin replies for the user"
+        },
+        "status": {
+          "type": "string",
+          "description": "Support thread status",
+          "enum": ["OPEN", "RESOLVED"]
+        }
+      },
+      "required": ["chatId", "userName", "deviceLabel", "lastMessage", "lastSenderRole", "lastMessageAt", "createdAt", "unreadByAdminCount", "unreadByUserCount", "status"]
+    },
+    "SupportMessage": {
+      "title": "SupportMessage",
+      "description": "Individual support chat message sent by a user or replied by admin",
+      "type": "object",
+      "properties": {
+        "messageId": {
+          "type": "string",
+          "description": "Unique message identifier"
+        },
+        "chatId": {
+          "type": "string",
+          "description": "Parent support chat identifier"
+        },
+        "senderRole": {
+          "type": "string",
+          "description": "Sender role: user or admin",
+          "enum": ["user", "admin"]
+        },
+        "senderName": {
+          "type": "string",
+          "description": "Display name of sender"
+        },
+        "text": {
+          "type": "string",
+          "description": "Message body text"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when message was sent"
+        }
+      },
+      "required": ["messageId", "chatId", "senderRole", "senderName", "text", "createdAt"]
+    },
+    "CreatorEvent": {
+      "title": "CreatorEvent",
+      "description": "Gift, bonus, or contest announcement published by Admin for Creators",
+      "type": "object",
+      "properties": {
+        "eventId": {
+          "type": "string",
+          "description": "Unique identifier of the creator event"
+        },
+        "title": {
+          "type": "string",
+          "description": "Event headline title"
+        },
+        "description": {
+          "type": "string",
+          "description": "Full event details, rules, and gift announcement description"
+        },
+        "giftLabel": {
+          "type": "string",
+          "description": "Optional short gift or reward tag shown on the event card"
+        },
+        "imageUrl": {
+          "type": "string",
+          "description": "Optional banner image URL or base64 data URI"
+        },
+        "createdBy": {
+          "type": "string",
+          "description": "Identifier of the Admin who created the event"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when event was created"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when event was last updated"
+        },
+        "isActive": {
+          "type": "boolean",
+          "description": "Whether the event is currently live and visible to creators"
+        }
+      },
+      "required": ["eventId", "title", "description", "createdBy", "createdAt", "updatedAt", "isActive"]
+    }
+  },
+  "firestore": {
+    "/videos/{videoId}": {
+      "schema": "Video",
+      "description": "Collection of all video records and metadata"
+    },
+    "/accessLinks/{linkId}": {
+      "schema": "AccessLink",
+      "description": "Collection of unique video access tokens and validity status"
+    },
+    "/admins/{uid}": {
+      "schema": "Admin",
+      "description": "Collection of authorized administrators"
+    },
+    "/members/{memberId}": {
+      "schema": "Member",
+      "description": "Collection of authorized creator members and their admin-assigned earnings"
+    },
+    "/withdrawalRequests/{requestId}": {
+      "schema": "WithdrawalRequest",
+      "description": "Collection of creator UPI withdrawal requests and admin payout statuses"
+    },
+    "/notifications/{notificationId}": {
+      "schema": "AppNotification",
+      "description": "Collection of Superadmin broadcast notifications delivered to all app downloaders"
+    },
+    "/appInstalls/{installId}": {
+      "schema": "AppInstall",
+      "description": "Collection of app installation & activity heartbeat records for Admin install analytics"
+    },
+    "/appConfig/{configId}": {
+      "schema": "AppConfig",
+      "description": "Global app configuration including main and category-wise Telegram channel links"
+    },
+    "/supportChats/{chatId}": {
+      "schema": "SupportChat",
+      "description": "Collection of user-to-admin support chat threads"
+    },
+    "/supportChats/{chatId}/messages/{messageId}": {
+      "schema": "SupportMessage",
+      "description": "Subcollection of real-time messages within a support chat thread"
+    },
+    "/creatorEvents/{eventId}": {
+      "schema": "CreatorEvent",
+      "description": "Collection of gift and announcement events visible in the Creator Portal"
+    }
+  }
+}

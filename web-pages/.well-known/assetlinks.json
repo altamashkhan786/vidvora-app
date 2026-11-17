@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.aistudio.vidvora.vstr",
+      "sha256_cert_fingerprints": [
+        "05:44:CC:BF:52:3A:1A:BF:FC:CE:18:07:EB:15:9F:FB:D8:1A:51:7E:8D:78:60:A4:8B:8B:EF:C2:5E:F2:F7:13"
+      ]
+    }
+  }
+]

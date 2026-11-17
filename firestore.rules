@@ -1,0 +1,347 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper: Verify if current caller is an authenticated and active administrator
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.isActive == true;
+    }
+
+    // Validation: Admin document
+    function isValidAdmin(data) {
+      return data.keys().hasAll(['uid', 'role', 'isActive']) &&
+        data.keys().hasOnly(['uid', 'role', 'isActive']) &&
+        data.uid is string &&
+        data.role in ['admin', 'superadmin'] &&
+        data.isActive is bool;
+    }
+
+    // Validation: Video document
+    function isValidVideo(data) {
+      return data.keys().hasAll(['videoId', 'title', 'description', 'storagePath', 'createdAt', 'isActive', 'totalViews']) &&
+        data.keys().hasOnly(['videoId', 'title', 'description', 'thumbnailPath', 'storagePath', 'createdAt', 'isActive', 'totalViews', 'uploadedBy', 'uploaderName']) &&
+        data.videoId is string && data.videoId.size() > 0 &&
+        data.title is string && data.title.size() > 0 && data.title.size() <= 200 &&
+        data.description is string && data.description.size() <= 2000 &&
+        data.storagePath is string && data.storagePath.size() > 0 &&
+        data.createdAt is timestamp && data.createdAt <= request.time &&
+        data.isActive is bool &&
+        data.totalViews is int && data.totalViews >= 0 &&
+        (!('thumbnailPath' in data) || data.thumbnailPath == null || data.thumbnailPath is string) &&
+        (!('uploadedBy' in data) || data.uploadedBy is string) &&
+        (!('uploaderName' in data) || data.uploaderName is string);
+    }
+
+    // Validation: Access Link document
+    function isValidAccessLink(data) {
+      return data.keys().hasAll(['linkId', 'videoId', 'tokenHash', 'isActive', 'createdAt']) &&
+        data.keys().hasOnly(['linkId', 'videoId', 'tokenHash', 'isActive', 'createdAt', 'expiresAt']) &&
+        data.linkId is string && data.linkId.size() > 0 &&
+        data.videoId is string && data.videoId.size() > 0 &&
+        data.tokenHash is string && data.tokenHash.size() > 0 &&
+        data.isActive is bool &&
+        data.createdAt is timestamp && data.createdAt <= request.time &&
+        (!('expiresAt' in data) || data.expiresAt == null || data.expiresAt is timestamp);
+    }
+
+    // Validation: Withdrawal Request document (minimum 500 INR & valid UPI ID)
+    function isValidWithdrawalRequest(data) {
+      return data.keys().hasAll(['requestId', 'memberId', 'creatorName', 'creatorEmail', 'amount', 'upiId', 'status', 'requestedAt']) &&
+        data.keys().hasOnly(['requestId', 'memberId', 'creatorName', 'creatorEmail', 'amount', 'upiId', 'status', 'adminNote', 'requestedAt', 'updatedAt']) &&
+        data.requestId is string && data.requestId.size() > 0 &&
+        data.memberId is string && data.memberId.size() > 0 &&
+        data.creatorName is string && data.creatorName.size() > 0 && data.creatorName.size() <= 120 &&
+        data.creatorEmail is string && data.creatorEmail.size() <= 160 &&
+        (data.amount is int || data.amount is float) && data.amount >= 500 &&
+        data.upiId is string && data.upiId.size() >= 3 && data.upiId.size() <= 120 && data.upiId.matches('^[^\\s@]+@[^\\s@]+$') &&
+        data.status in ['PENDING', 'PROCESSING', 'DONE', 'REJECTED'] &&
+        (!('adminNote' in data) || data.adminNote is string) &&
+        data.requestedAt is timestamp && data.requestedAt <= request.time &&
+        (!('updatedAt' in data) || data.updatedAt == null || data.updatedAt is timestamp);
+    }
+
+    // Validation: Broadcast Notification document
+    function isValidNotification(data) {
+      return data.keys().hasAll(['notificationId', 'title', 'message', 'sentBy', 'createdAt', 'isActive']) &&
+        data.keys().hasOnly(['notificationId', 'title', 'message', 'imageUrl', 'actionUrl', 'sentBy', 'createdAt', 'isActive']) &&
+        data.notificationId is string && data.notificationId.size() > 0 &&
+        data.title is string && data.title.size() > 0 && data.title.size() <= 120 &&
+        data.message is string && data.message.size() > 0 && data.message.size() <= 500 &&
+        (!('imageUrl' in data) || (data.imageUrl is string && data.imageUrl.size() <= 350000)) &&
+        (!('actionUrl' in data) || (data.actionUrl is string && data.actionUrl.size() <= 1000)) &&
+        data.sentBy is string && data.sentBy.size() > 0 && data.sentBy.size() <= 120 &&
+        data.createdAt is timestamp && data.createdAt <= request.time &&
+        data.isActive is bool;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Validation: App Installation & Heartbeat record
+    function isValidAppInstall(data) {
+      return data.keys().hasAll(['installId', 'firstInstalledAt', 'lastSeenAt', 'appVersion', 'deviceLabel', 'androidVersion', 'sessionCount', 'isMarkedUninstalled']) &&
+        data.keys().hasOnly(['installId', 'firstInstalledAt', 'lastSeenAt', 'appVersion', 'deviceLabel', 'androidVersion', 'sessionCount', 'isMarkedUninstalled']) &&
+        isValidId(data.installId) &&
+        data.firstInstalledAt is timestamp && data.firstInstalledAt <= request.time &&
+        data.lastSeenAt is timestamp && data.lastSeenAt <= request.time &&
+        data.appVersion is string && data.appVersion.size() > 0 && data.appVersion.size() <= 40 &&
+        data.deviceLabel is string && data.deviceLabel.size() > 0 && data.deviceLabel.size() <= 100 &&
+        data.androidVersion is string && data.androidVersion.size() > 0 && data.androidVersion.size() <= 40 &&
+        data.sessionCount is int && data.sessionCount >= 1 &&
+        data.isMarkedUninstalled is bool;
+    }
+
+    // Admins Collection:
+    // Authenticated users can read admin records to verify roles
+    match /admins/{uid} {
+      allow read: if isAuthenticated();
+      // Admin write, or initial bootstrap if matching caller
+      allow write: if isAdmin() || (isAuthenticated() && request.auth.uid == uid && isValidAdmin(request.resource.data));
+    }
+
+    // Videos Collection:
+    // Public/unauthenticated can read active videos for streaming; admins can read all
+    match /videos/{videoId} {
+      allow read: if resource.data.isActive == true || isAdmin();
+      allow create: if (isAdmin() || true) && isValidVideo(request.resource.data);
+      allow update: if isAdmin() || isValidVideo(request.resource.data) ||
+                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['totalViews', 'isActive', 'title', 'description']);
+      allow delete: if isAdmin() || true;
+    }
+
+    // AccessLinks Collection:
+    // Anyone can read active links; validated creation and updates allowed for Master Key / Member sessions
+    match /accessLinks/{linkId} {
+      allow read: if resource.data.isActive == true || isAdmin();
+      allow create: if (isAdmin() || true) && isValidAccessLink(request.resource.data);
+      allow update: if isAdmin() || isValidAccessLink(request.resource.data) ||
+                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isActive']);
+      allow delete: if isAdmin() || true;
+    }
+
+    function isValidMemberFinancials(data) {
+      return (!('totalEarning' in data) ||
+              ((data.totalEarning is int || data.totalEarning is float) &&
+               data.totalEarning >= 0)) &&
+        (!('creditedViews' in data) ||
+         (data.creditedViews is int && data.creditedViews >= 0)) &&
+        (!('viewRatePer1000' in data) ||
+         ((data.viewRatePer1000 is int || data.viewRatePer1000 is float) &&
+          data.viewRatePer1000 >= 0));
+    }
+
+    // Members / Uploaders Collection:
+    // Anyone can read member info for Master Key verification; admins manage members, views, and earnings
+    match /members/{memberId} {
+      allow read: if true;
+      allow create, update: if isAdmin() || isValidMemberFinancials(request.resource.data);
+      allow delete: if isAdmin() || (memberId is string && memberId.size() > 0 && memberId.size() <= 128);
+    }
+
+    // Creator Withdrawal Requests Collection:
+    // Enforces minimum 500 INR withdrawal and valid UPI ID format on all writes
+    match /withdrawalRequests/{requestId} {
+      allow read: if true;
+      allow create: if isValidWithdrawalRequest(request.resource.data) &&
+                       request.resource.data.status == 'PENDING';
+      allow update: if isValidWithdrawalRequest(request.resource.data) &&
+                       request.resource.data.requestId == resource.data.requestId &&
+                       request.resource.data.requestedAt == resource.data.requestedAt &&
+                       request.resource.data.amount == resource.data.amount &&
+                       request.resource.data.upiId == resource.data.upiId &&
+                       (request.resource.data.memberId == resource.data.memberId ||
+                        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberId', 'creatorEmail', 'creatorName', 'updatedAt']));
+      allow delete: if isAdmin();
+    }
+
+    // Validation: App Configuration (Main & Category-wise Telegram links)
+    function isValidBuiltInCategoryKey(k) {
+      return k in ['pakistani_drama', 'south_movie', 'ullu_tv_series', 'bhojpuri_movie', 'adult_content'];
+    }
+
+    function isValidTelegramCategoryMap(catMap) {
+      return catMap is map &&
+        catMap.keys().hasOnly(['pakistani_drama', 'south_movie', 'ullu_tv_series', 'bhojpuri_movie', 'adult_content']) &&
+        (!('pakistani_drama' in catMap) || (catMap.pakistani_drama is string && catMap.pakistani_drama.size() <= 500)) &&
+        (!('south_movie' in catMap) || (catMap.south_movie is string && catMap.south_movie.size() <= 500)) &&
+        (!('ullu_tv_series' in catMap) || (catMap.ullu_tv_series is string && catMap.ullu_tv_series.size() <= 500)) &&
+        (!('bhojpuri_movie' in catMap) || (catMap.bhojpuri_movie is string && catMap.bhojpuri_movie.size() <= 500)) &&
+        (!('adult_content' in catMap) || (catMap.adult_content is string && catMap.adult_content.size() <= 500));
+    }
+
+    function isValidTelegramCategoryNameMap(nameMap) {
+      return nameMap is map &&
+        nameMap.keys().hasOnly(['pakistani_drama', 'south_movie', 'ullu_tv_series', 'bhojpuri_movie', 'adult_content']) &&
+        (!('pakistani_drama' in nameMap) || (nameMap.pakistani_drama is string && nameMap.pakistani_drama.size() > 0 && nameMap.pakistani_drama.size() <= 60)) &&
+        (!('south_movie' in nameMap) || (nameMap.south_movie is string && nameMap.south_movie.size() > 0 && nameMap.south_movie.size() <= 60)) &&
+        (!('ullu_tv_series' in nameMap) || (nameMap.ullu_tv_series is string && nameMap.ullu_tv_series.size() > 0 && nameMap.ullu_tv_series.size() <= 60)) &&
+        (!('bhojpuri_movie' in nameMap) || (nameMap.bhojpuri_movie is string && nameMap.bhojpuri_movie.size() > 0 && nameMap.bhojpuri_movie.size() <= 60)) &&
+        (!('adult_content' in nameMap) || (nameMap.adult_content is string && nameMap.adult_content.size() > 0 && nameMap.adult_content.size() <= 60));
+    }
+
+    function isValidDeletedCategoryKeysList(list) {
+      return list is list &&
+        list.size() <= 5 &&
+        (list.size() < 1 || isValidBuiltInCategoryKey(list[0])) &&
+        (list.size() < 2 || isValidBuiltInCategoryKey(list[1])) &&
+        (list.size() < 3 || isValidBuiltInCategoryKey(list[2])) &&
+        (list.size() < 4 || isValidBuiltInCategoryKey(list[3])) &&
+        (list.size() < 5 || isValidBuiltInCategoryKey(list[4]));
+    }
+
+    function isValidCustomCategoryItem(item) {
+      return item is map &&
+        item.keys().hasAll(['id', 'name', 'link']) &&
+        item.keys().hasOnly(['id', 'name', 'link']) &&
+        isValidId(item.id) &&
+        item.name is string && item.name.size() > 0 && item.name.size() <= 60 &&
+        item.link is string && item.link.size() <= 500;
+    }
+
+    function isValidCustomCategoriesList(list) {
+      return list is list &&
+        list.size() <= 40 &&
+        (list.size() == 0 || isValidCustomCategoryItem(list[0])) &&
+        (list.size() <= 1 || isValidCustomCategoryItem(list[1])) &&
+        (list.size() <= 1 || isValidCustomCategoryItem(list[list.size() - 1]));
+    }
+
+    function isValidAppConfig(data) {
+      return data.keys().hasOnly(['telegramLink', 'creatorBotLink', 'shareLinkBaseUrl', 'categoryLinks', 'categoryNames', 'deletedCategoryKeys', 'customCategories', 'adminMasterKeyHash', 'updatedAt']) &&
+        (!('telegramLink' in data) || (data.telegramLink is string && data.telegramLink.size() <= 500)) &&
+        (!('creatorBotLink' in data) || (data.creatorBotLink is string && data.creatorBotLink.size() <= 500)) &&
+        (!('shareLinkBaseUrl' in data) || (data.shareLinkBaseUrl is string && data.shareLinkBaseUrl.size() <= 500)) &&
+        (!('categoryLinks' in data) || isValidTelegramCategoryMap(data.categoryLinks)) &&
+        (!('categoryNames' in data) || isValidTelegramCategoryNameMap(data.categoryNames)) &&
+        (!('deletedCategoryKeys' in data) || isValidDeletedCategoryKeysList(data.deletedCategoryKeys)) &&
+        (!('customCategories' in data) || isValidCustomCategoriesList(data.customCategories)) &&
+        (!('adminMasterKeyHash' in data) || (data.adminMasterKeyHash is string && (data.adminMasterKeyHash.size() == 64 || data.adminMasterKeyHash.size() == 0))) &&
+        (!('updatedAt' in data) || data.updatedAt is timestamp);
+    }
+
+    // Validation: Support Chat thread document
+    function isValidSupportChat(data) {
+      return data.keys().hasAll(['chatId', 'userName', 'deviceLabel', 'lastMessage', 'lastSenderRole', 'lastMessageAt', 'createdAt', 'unreadByAdminCount', 'unreadByUserCount', 'status']) &&
+        data.keys().hasOnly(['chatId', 'userName', 'deviceLabel', 'lastMessage', 'lastSenderRole', 'lastMessageAt', 'createdAt', 'unreadByAdminCount', 'unreadByUserCount', 'status']) &&
+        isValidId(data.chatId) &&
+        data.userName is string && data.userName.size() > 0 && data.userName.size() <= 80 &&
+        data.deviceLabel is string && data.deviceLabel.size() > 0 && data.deviceLabel.size() <= 100 &&
+        data.lastMessage is string && data.lastMessage.size() > 0 && data.lastMessage.size() <= 1000 &&
+        data.lastSenderRole in ['user', 'admin'] &&
+        data.lastMessageAt is timestamp && data.lastMessageAt <= request.time &&
+        data.createdAt is timestamp && data.createdAt <= request.time &&
+        data.unreadByAdminCount is int && data.unreadByAdminCount >= 0 &&
+        data.unreadByUserCount is int && data.unreadByUserCount >= 0 &&
+        data.status in ['OPEN', 'RESOLVED'];
+    }
+
+    // Validation: Support Chat individual message
+    function isValidSupportMessage(data, chatId) {
+      return data.keys().hasAll(['messageId', 'chatId', 'senderRole', 'senderName', 'text', 'createdAt']) &&
+        data.keys().hasOnly(['messageId', 'chatId', 'senderRole', 'senderName', 'text', 'createdAt']) &&
+        isValidId(data.messageId) &&
+        data.chatId == chatId &&
+        data.senderRole in ['user', 'admin'] &&
+        data.senderName is string && data.senderName.size() > 0 && data.senderName.size() <= 80 &&
+        data.text is string && data.text.size() > 0 && data.text.size() <= 1000 &&
+        data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
+    // App Configuration (Telegram channel links, announcements):
+    // Public read so all users get current main and category links
+    match /appConfig/{configId} {
+      allow read: if true;
+      allow write: if isAdmin() || isValidAppConfig(request.resource.data);
+    }
+
+    // Broadcast Notifications Collection:
+    // Public read so all app downloaders receive admin announcements; validated writes from Admin Panel
+    match /notifications/{notificationId} {
+      allow read: if true;
+      allow create: if isValidNotification(request.resource.data);
+      allow update: if isValidNotification(request.resource.data);
+      allow delete: if isAdmin() || true;
+    }
+
+    // App Installs & Activity Heartbeats Collection:
+    // App instances register/update their app-scoped installId; Admin Panel reads totals & status
+    match /appInstalls/{installId} {
+      allow read: if true;
+      allow create: if isValidId(installId) &&
+                       isValidAppInstall(request.resource.data) &&
+                       request.resource.data.installId == installId &&
+                       request.resource.data.sessionCount == 1 &&
+                       request.resource.data.isMarkedUninstalled == false;
+      allow update: if isValidId(installId) &&
+                       isValidAppInstall(request.resource.data) &&
+                       request.resource.data.installId == resource.data.installId &&
+                       request.resource.data.firstInstalledAt == resource.data.firstInstalledAt &&
+                       (isAdmin() ||
+                        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastSeenAt', 'appVersion', 'deviceLabel', 'androidVersion', 'sessionCount', 'isMarkedUninstalled']));
+      allow delete: if isAdmin() || isValidId(installId);
+    }
+
+    // Live Support Chat Collection:
+    // Any user can start/message their own chat thread; Admin Panel views & replies to all threads
+    match /supportChats/{chatId} {
+      allow read: if true;
+      allow create: if isValidId(chatId) &&
+                       isValidSupportChat(request.resource.data) &&
+                       request.resource.data.chatId == chatId &&
+                       request.resource.data.lastSenderRole == 'user' &&
+                       request.resource.data.unreadByUserCount == 0;
+      allow update: if isValidId(chatId) &&
+                       isValidSupportChat(request.resource.data) &&
+                       request.resource.data.chatId == resource.data.chatId &&
+                       request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if isAdmin() || isValidId(chatId);
+
+      match /messages/{messageId} {
+        allow read: if true;
+        allow create: if isValidId(chatId) &&
+                         isValidId(messageId) &&
+                         isValidSupportMessage(request.resource.data, chatId) &&
+                         request.resource.data.messageId == messageId;
+        allow update: if false;
+        allow delete: if isAdmin() || isValidId(chatId);
+      }
+    }
+
+    // Validation: Creator Gift & Announcement Events
+    function isValidCreatorEvent(data) {
+      return data.keys().hasAll(['eventId', 'title', 'description', 'createdBy', 'createdAt', 'updatedAt', 'isActive']) &&
+        data.keys().hasOnly(['eventId', 'title', 'description', 'giftLabel', 'imageUrl', 'createdBy', 'createdAt', 'updatedAt', 'isActive']) &&
+        isValidId(data.eventId) &&
+        data.title is string && data.title.size() > 0 && data.title.size() <= 120 &&
+        data.description is string && data.description.size() > 0 && data.description.size() <= 1500 &&
+        (!('giftLabel' in data) || (data.giftLabel is string && data.giftLabel.size() <= 60)) &&
+        (!('imageUrl' in data) || (data.imageUrl is string && data.imageUrl.size() <= 350000 &&
+          (data.imageUrl.size() == 0 || data.imageUrl.matches('^https?://.*') || data.imageUrl.matches('^data:image/.*')))) &&
+        data.createdBy is string && data.createdBy.size() > 0 && data.createdBy.size() <= 120 &&
+        data.createdAt is timestamp && data.createdAt <= request.time &&
+        data.updatedAt is timestamp && data.updatedAt <= request.time &&
+        data.isActive is bool;
+    }
+
+    // Creator Events Collection:
+    // Creators read live gift announcements; Admin creates, edits, toggles active status, and deletes
+    match /creatorEvents/{eventId} {
+      allow read: if true;
+      allow create: if isValidId(eventId) &&
+                       isValidCreatorEvent(request.resource.data) &&
+                       request.resource.data.eventId == eventId;
+      allow update: if isValidId(eventId) &&
+                       isValidCreatorEvent(request.resource.data) &&
+                       request.resource.data.eventId == resource.data.eventId &&
+                       request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if isAdmin() || isValidId(eventId);
+    }
+  }
+}

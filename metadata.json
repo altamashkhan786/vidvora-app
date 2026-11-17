@@ -1,0 +1,6 @@
+{
+  "name": "VidVora",
+  "description": "VidVora native video streaming app with direct link access, Media3 ExoPlayer, and admin panel.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
