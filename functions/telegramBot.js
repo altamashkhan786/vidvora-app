@@ -756,41 +756,46 @@ async function handleTelegramUpdate({ update, db, storage, functionBaseUrl, play
   const directUrlMsg = !isVideoMsg && !vidvoraConvertTarget ? extractDirectVideoUrlMessage(textBody) : null;
 
   if (!vidvoraConvertTarget && !isVideoMsg && !directUrlMsg) {
-    // Allow beginners who send their Master Key directly without /login when unlinked
+    // Allow beginners to send their Master Key directly (to link or switch accounts) without /login
     if (textBody && !textBody.startsWith("/") && !/\s/.test(textBody) && textBody.length >= 4 && textBody.length <= 80) {
-      const existingSession = await db.collection("telegramBotSessions").doc(telegramUserId).get();
-      if (!existingSession.exists) {
-        const directCreator = await authenticateCreatorMember(db, null, textBody);
-        if (directCreator) {
-          if (!directCreator.canUpload) {
-            await replyText("⛔ Your account does not have Upload Videos permission enabled.");
-            return { ok: true, action: "login_forbidden" };
-          }
-          await db.collection("telegramBotSessions").doc(telegramUserId).set(
-            {
-              telegramUserId,
-              chatId: String(chatId),
-              memberId: directCreator.memberId,
-              memberName: directCreator.name,
-              role: directCreator.role || "member",
-              linkedAt: new Date(),
-              uploadCount: 0,
-            },
-            { merge: true }
-          );
-          await replyText(
-            `✅ Welcome *${escapeMarkdown(directCreator.name)}*!\n\nYour VidVora account is now linked. Send any *Video* or paste any *VidVora Share Link* to convert into your own link!`,
-            { parse_mode: "Markdown" }
-          );
-          return { ok: true, action: "login_success" };
+      const directCreator = await authenticateCreatorMember(db, null, textBody);
+      if (directCreator) {
+        if (!directCreator.canUpload) {
+          await replyText("⛔ Your account does not have Upload Videos permission enabled.");
+          return { ok: true, action: "login_forbidden" };
         }
+        await db.collection("telegramBotSessions").doc(telegramUserId).set(
+          {
+            telegramUserId,
+            chatId: String(chatId),
+            memberId: directCreator.memberId,
+            memberName: directCreator.name,
+            role: directCreator.role || "member",
+            linkedAt: new Date(),
+            uploadCount: 0,
+          },
+          { merge: true }
+        );
+        await replyText(
+          `✅ Welcome *${escapeMarkdown(directCreator.name)}*!\n\nYour VidVora account is now linked. Send any *Video* or paste any *VidVora Share Link* to convert into your own link!`,
+          { parse_mode: "Markdown" }
+        );
+        return { ok: true, action: "login_success" };
       }
     }
 
-    await replyText(
-      "📹 Send a *Video file*, a direct `.mp4` link, or any *VidVora Share Link* to convert into your own link.\nNeed to link first? Send `/login YOUR_MASTER_KEY`.",
-      { parse_mode: "Markdown" }
-    );
+    const existingSession = await db.collection("telegramBotSessions").doc(telegramUserId).get();
+    if (existingSession.exists) {
+      await replyText(
+        "📹 Send a *Video file*, a direct `.mp4` link, or any *VidVora Share Link* to convert into your own link.\n_(Account switch karne ke liye valid Master Key ya `/login YOUR_MASTER_KEY` bhejein.)_",
+        { parse_mode: "Markdown" }
+      );
+    } else {
+      await replyText(
+        "🔐 Invalid Master Key (ya unsupported message).\n\nApni sahi *Creator / Admin Master Key* directly bhejein, ya `/login YOUR_MASTER_KEY` likhein.",
+        { parse_mode: "Markdown" }
+      );
+    }
     return { ok: true, action: "unsupported_message" };
   }
 

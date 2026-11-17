@@ -773,3 +773,94 @@ test("handleStreamPublicVideo caches Telegram tgFileId and serves HTTP 206 byte 
     await fs.promises.unlink(path.join(os.tmpdir(), "vidvora-stream-cache", `${fakeVideoId}.mp4`)).catch(() => {});
   }
 });
+
+test("handleTelegramUpdate allows direct Master Key login and switching accounts without /login", async () => {
+  const { handleTelegramUpdate } = require("./telegramBot");
+
+  const sessions = new Map([
+    ["tg_switch_user", { telegramUserId: "tg_switch_user", memberId: "creator_old", memberName: "Old Creator" }],
+  ]);
+
+  const mockDb = {
+    collection: (name) => {
+      if (name === "appConfig") {
+        return {
+          doc: () => ({
+            get: async () => ({ exists: true, data: () => ({ botToken: "123:TEST" }) }),
+          }),
+        };
+      }
+      if (name === "members") {
+        return {
+          where: (_f, _op, val) => ({
+            limit: () => ({
+              get: async () =>
+                val === "CREATOR-777"
+                  ? {
+                      empty: false,
+                      docs: [
+                        {
+                          id: "creator_new",
+                          data: () => ({
+                            memberId: "creator_new",
+                            name: "Altamash New",
+                            passkey: "CREATOR-777",
+                            isActive: true,
+                            allowedOptions: ["UPLOAD_VIDEOS"],
+                          }),
+                        },
+                      ],
+                    }
+                  : { empty: true, docs: [] },
+            }),
+          }),
+        };
+      }
+      if (name === "telegramBotSessions") {
+        return {
+          doc: (id) => ({
+            get: async () =>
+              sessions.has(id)
+                ? { exists: true, data: () => sessions.get(id) }
+                : { exists: false },
+            set: async (payload) => {
+              sessions.set(id, payload);
+            },
+          }),
+        };
+      }
+      return { doc: () => ({ get: async () => ({ exists: false }) }) };
+    },
+  };
+
+  const sent = [];
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    sent.push({ url, body: JSON.parse(opts.body) });
+    return { ok: true, json: async () => ({ ok: true, result: { message_id: 1 } }) };
+  };
+
+  try {
+    const res = await handleTelegramUpdate({
+      update: {
+        message: {
+          message_id: 99,
+          chat: { id: 555 },
+          from: { id: "tg_switch_user" },
+          text: "CREATOR-777",
+        },
+      },
+      db: mockDb,
+      storage: null,
+      functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+      playbackSecret: "sec",
+    });
+
+    assert.equal(res.ok, true);
+    assert.equal(res.action, "login_success");
+    assert.equal(sessions.get("tg_switch_user").memberId, "creator_new");
+    assert.ok(sent[0].body.text.includes("Welcome *Altamash New*"));
+  } finally {
+    global.fetch = origFetch;
+  }
+});
