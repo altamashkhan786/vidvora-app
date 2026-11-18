@@ -11,8 +11,7 @@ const DEFAULT_VIEW_RATE_PER_1000 = 190;
 const CREATOR_REPLY_KEYBOARD = {
   keyboard: [
     [{ text: "💰 Balance" }, { text: "💸 Withdraw UPI" }],
-    [{ text: "📜 Payout History" }, { text: "🎬 Video Stats" }],
-    [{ text: "❓ Help" }],
+    [{ text: "📜 Payout History" }, { text: "❓ Help" }],
   ],
   resize_keyboard: true,
   is_persistent: true,
@@ -488,14 +487,6 @@ function normalizeCommandIntent(rawText) {
   ) {
     return "HISTORY";
   }
-  if (
-    /^\/(videos|stats)(?:@\w+)?/i.test(clean) ||
-    clean === "🎬 Video Stats" ||
-    lower === "stats" ||
-    lower === "videos"
-  ) {
-    return "VIDEOS";
-  }
   if (/^\/pending(?:@\w+)?/i.test(clean) || clean === "⏳ Pending Payouts") {
     return "ADMIN_PENDING";
   }
@@ -540,10 +531,9 @@ async function handleFinanceTelegramUpdate({ update, db }) {
         "_(Bas apna VidVora Password directly bhejein)_",
         "",
         "2️⃣ *Creator Commands:*",
-        "• `/balance` — Total & Available ₹ Balance + Views",
+        "• `/balance` — Total & Available ₹ Balance",
         "• `/withdraw` — UPI Withdrawal Request (Min ₹500)",
         "• `/history` — Payout Requests & Status",
-        "• `/videos` — Top Videos & Views Breakdown",
         "",
         "3️⃣ *Admin Payout Commands:*",
         "• `/pending` • `/summary` • `/approve ID` • `/reject ID`",
@@ -729,7 +719,7 @@ async function handleFinanceTelegramUpdate({ update, db }) {
     const snap = await fetchCreatorFinanceSnapshot(db, existingSession.memberId);
     const bal = snap ? formatInr(snap.summary.availableBalance) : "₹0";
     await replyText(
-      `✅ *Linked Creator:* ${escapeMarkdown(liveMemberData.name || existingSession.memberName || "Creator")}\n💵 *Available Balance:* ${bal}\n🎬 *Uploaded Videos:* ${snap ? snap.videos.length : 0}`,
+      `✅ *Linked Creator:* ${escapeMarkdown(liveMemberData.name || existingSession.memberName || "Creator")}\n💵 *Available Balance:* ${bal}`,
       { parse_mode: "Markdown", reply_markup: CREATOR_REPLY_KEYBOARD }
     );
     return { ok: true, action: "status" };
@@ -923,42 +913,6 @@ async function handleFinanceTelegramUpdate({ update, db }) {
     return { ok: true, action: "history" };
   }
 
-  if (cmd === "VIDEOS") {
-    await clearWithdrawState();
-    if (!canCreatorViewEarnings(snapshot.member)) {
-      await replyText("⛔ Aapke account par Earnings Stats permission enabled nahi hai.");
-      return { ok: true, action: "earnings_forbidden" };
-    }
-    if (!snapshot.videos.length) {
-      await replyText(
-        "🎬 Aapne abhi tak koi video upload nahi kiya hai.",
-        { reply_markup: CREATOR_REPLY_KEYBOARD }
-      );
-      return { ok: true, action: "videos_empty" };
-    }
-
-    const lines = [
-      `🎬 *Top Performing Videos (${snapshot.videos.length} Total):*`,
-      "",
-    ];
-    for (const [idx, v] of snapshot.videos.slice(0, 8).entries()) {
-      const views = Math.max(0, Number(v.totalViews) || 0);
-      const statusIcon = v.isActive !== false ? "🟢" : "⏸️";
-      lines.push(
-        `${idx + 1}. ${statusIcon} *${escapeMarkdown(v.title || "Untitled Video")}* — *${views.toLocaleString("en-IN")}* views`
-      );
-    }
-    lines.push(
-      "",
-      `📊 *Total Views:* ${snapshot.realViews.toLocaleString("en-IN")} | *Credited:* ${snapshot.creditedViews.toLocaleString("en-IN")}`
-    );
-    await replyText(lines.join("\n"), {
-      parse_mode: "Markdown",
-      reply_markup: CREATOR_REPLY_KEYBOARD,
-    });
-    return { ok: true, action: "videos" };
-  }
-
   if (cmd === "WITHDRAW") {
     if (!canCreatorWithdraw(snapshot.member)) {
       await clearWithdrawState();
@@ -1150,7 +1104,7 @@ async function handleFinanceTelegramUpdate({ update, db }) {
   }
 
   await replyText(
-    "💰 Niche buttons use karein ya command bhejein:\n`/balance` • `/withdraw` • `/history` • `/videos` • `/help`",
+    "💰 Niche buttons use karein ya command bhejein:\n`/balance` • `/withdraw` • `/history` • `/help`",
     { parse_mode: "Markdown", reply_markup: CREATOR_REPLY_KEYBOARD }
   );
   return { ok: true, action: "menu_hint" };

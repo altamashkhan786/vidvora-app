@@ -4333,7 +4333,7 @@ private fun TelegramFinanceBotCard(
             text = if (isSuperAdmin) {
               "Creators: /balance, /withdraw, /history • Admin: /pending, /approve"
             } else {
-              "Check live ₹ balance, video views & request ₹500+ UPI withdrawals directly on Telegram"
+              "Check live ₹ balance, payout history & request ₹500+ UPI withdrawals directly on Telegram"
             },
             color = MasalaTextSecondary,
             fontSize = 11.sp

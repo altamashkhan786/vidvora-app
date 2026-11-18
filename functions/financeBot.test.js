@@ -204,6 +204,11 @@ test("Creator logs in with Password, checks balance, and submits interactive 2-s
     assert.match(sentMessages.at(-1).text, /Available Balance:\* ₹1,300/);
     assert.match(sentMessages.at(-1).text, /Total Paid:\* ₹500/);
     assert.doesNotMatch(sentMessages.at(-1).text, /Credited Views:|View Rate:|Videos:/);
+    assert.doesNotMatch(JSON.stringify(sentMessages.at(-1).reply_markup), /Video Stats/);
+
+    const rVideos = await sendMsg("/videos");
+    assert.equal(rVideos.action, "menu_hint");
+    assert.doesNotMatch(sentMessages.at(-1).text, /views|\/videos/i);
 
     // 3. Guided 2-step UPI withdrawal using 1-tap Quick Amount button
     const rStartW = await sendMsg("💸 Withdraw UPI");
