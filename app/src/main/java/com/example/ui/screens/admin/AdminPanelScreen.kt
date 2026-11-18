@@ -165,6 +165,7 @@ import com.example.ui.theme.MasalaSurfaceVariant
 import com.example.ui.theme.MasalaTextMuted
 import com.example.ui.theme.MasalaTextPrimary
 import com.example.ui.theme.MasalaTextSecondary
+import com.example.ui.theme.MasalaWarning
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -1448,28 +1449,47 @@ fun AdminPanelScreen(
               item {
                 val totalMemberVideos = memberStatsList.sumOf { it.videoCount }
                 val totalMemberViews = memberStatsList.sumOf { it.totalViews }
-                Row(
+                val totalMemberViews24h = memberStatsList.sumOf { it.viewsLast24Hours }
+                Column(
                   modifier = Modifier.fillMaxWidth(),
-                  horizontalArrangement = Arrangement.spacedBy(10.dp)
+                  verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                  StatCard(
-                    title = "MEMBERS",
-                    value = "${memberStatsList.size}",
-                    color = MasalaGold,
-                    modifier = Modifier.weight(1f)
-                  )
-                  StatCard(
-                    title = "MEMBER UPLOADS",
-                    value = "$totalMemberVideos",
-                    color = MasalaTextPrimary,
-                    modifier = Modifier.weight(1f)
-                  )
-                  StatCard(
-                    title = "MEMBER VIEWS",
-                    value = "$totalMemberViews",
-                    color = MasalaRedAccent,
-                    modifier = Modifier.weight(1f)
-                  )
+                  Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                  ) {
+                    StatCard(
+                      title = "MEMBERS",
+                      value = "${memberStatsList.size}",
+                      color = MasalaGold,
+                      modifier = Modifier.weight(1f)
+                    )
+                    StatCard(
+                      title = "MEMBER UPLOADS",
+                      value = "$totalMemberVideos",
+                      color = MasalaTextPrimary,
+                      modifier = Modifier.weight(1f)
+                    )
+                  }
+                  Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                  ) {
+                    StatCard(
+                      title = "TOTAL VIEWS",
+                      value = "$totalMemberViews",
+                      color = MasalaRedAccent,
+                      modifier = Modifier.weight(1f)
+                    )
+                    StatCard(
+                      title = "24H VIEWS (ADMIN)",
+                      value = "$totalMemberViews24h",
+                      color = MasalaWarning,
+                      modifier = Modifier
+                        .weight(1f)
+                        .testTag("admin_total_24h_views_card")
+                    )
+                  }
                 }
               }
 
@@ -1819,7 +1839,7 @@ fun AdminPanelScreen(
                                 fontWeight = FontWeight.Bold
                               )
                               Text(
-                                text = "Real: ${stats.totalViews} • Panel: ${stats.member.creditedViews} views",
+                                text = "24h: ${stats.viewsLast24Hours} • Real: ${stats.totalViews} • Panel: ${stats.member.creditedViews} views",
                                 color = MasalaTextSecondary,
                                 fontSize = 10.sp
                               )
@@ -2615,8 +2635,37 @@ private fun MemberCard(
 
       Spacer(modifier = Modifier.height(10.dp))
 
-      // Member Stats Pills: Videos, Real Views (Admin-only), Creator Panel Views, & Earning
+      // Member Stats Pills: 24h Views (Admin-only), Real Views (Admin-only), Videos, Creator Panel Views, & Earning
       Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Box(
+          modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(MasalaSurfaceVariant)
+            .border(1.dp, MasalaWarning.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
+            .padding(vertical = 8.dp, horizontal = 12.dp)
+            .testTag("member_24h_views_${stats.member.memberId}")
+        ) {
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+          ) {
+            Text(
+              text = "LAST 24 HOURS VIEWS (ADMIN)",
+              color = MasalaWarning,
+              fontSize = 9.sp,
+              fontWeight = FontWeight.ExtraBold
+            )
+            Text(
+              text = "${stats.viewsLast24Hours}",
+              color = MasalaWarning,
+              fontSize = 16.sp,
+              fontWeight = FontWeight.Black
+            )
+          }
+        }
+
         Row(
           modifier = Modifier.fillMaxWidth(),
           horizontalArrangement = Arrangement.spacedBy(8.dp)

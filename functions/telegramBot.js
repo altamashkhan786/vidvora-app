@@ -1154,10 +1154,13 @@ async function handleTelegramUpdate({
     }
   }
 
+  const uploadFileSizeBytes = Number((message.video || message.document)?.file_size || 0) || 0;
   const statusMsg = await replyText(
     vidvoraConvertTarget
       ? "🔄 Converting VidVora link to your Creator link..."
-      : "⏳ Uploading to VidVora & generating 5-sec preview clip..."
+      : uploadFileSizeBytes > BOT_API_MAX_BYTES && apiId && apiHash
+        ? `⏳ Uploading ${Math.max(21, Math.round(uploadFileSizeBytes / (1024 * 1024)))} MB video via 2 GB MTProto mode...`
+        : "⏳ Uploading to VidVora & generating 5-sec preview clip..."
   );
   const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "vidvora-bot-"));
 
@@ -1298,34 +1301,51 @@ async function handleTelegramUpdate({
         thumbExists = await fetchTelegramThumb();
 
         if (reportedFileSize > 0 && reportedFileSize <= WEBHOOK_PREVIEW_MAX_BYTES) {
-          await downloadTelegramFileViaMtproto({
-            apiId,
-            apiHash,
-            botToken,
-            tgFileId: mediaObj.file_id,
-            tgChatId: chatId,
-            tgMessageId: message.message_id,
-            tgFileSize: reportedFileSize,
-            destPath: localVideoPath,
-            telegramLibOverride,
-          });
-          hasDownloadedLocalVideo = fs.existsSync(localVideoPath) && fs.statSync(localVideoPath).size > 0;
+          try {
+            await downloadTelegramFileViaMtproto({
+              apiId,
+              apiHash,
+              botToken,
+              tgFileId: mediaObj.file_id,
+              tgChatId: chatId,
+              tgMessageId: message.message_id,
+              tgFileSize: reportedFileSize,
+              destPath: localVideoPath,
+              telegramLibOverride,
+            });
+            hasDownloadedLocalVideo = fs.existsSync(localVideoPath) && fs.statSync(localVideoPath).size > 0;
+            if (!hasDownloadedLocalVideo) {
+              mtprotoStreamOnly = true;
+            }
+          } catch (previewDlErr) {
+            console.warn("20-60MB MTProto preview download skipped, switching to instant stream mode:", previewDlErr?.message || previewDlErr);
+            hasDownloadedLocalVideo = false;
+            mtprotoStreamOnly = true;
+            await fs.promises.unlink(localVideoPath).catch(() => {});
+          }
         } else {
           // Giant video (>60 MB up to 2 GB): publish immediately using Telegram thumbnail and stream bytes on-demand via MTProto Range requests
           mtprotoStreamOnly = true;
         }
       }
 
-      if (hasDownloadedLocalVideo) {
-        const generated = await createFiveSecondPreviewAndThumbnail({
-          inputPathOrUrl: localVideoPath,
-          outputClipPath: clipPath,
-          outputThumbPath: thumbPath,
-          durationSeconds: message.video?.duration || 0,
-          previewSeconds: DEFAULT_PREVIEW_SECONDS,
-        });
-        clipExists = generated.clipExists;
-        thumbExists = generated.thumbExists || thumbExists;
+      if (hasDownloadedLocalVideo && !mtprotoStreamOnly) {
+        try {
+          const generated = await createFiveSecondPreviewAndThumbnail({
+            inputPathOrUrl: localVideoPath,
+            outputClipPath: clipPath,
+            outputThumbPath: thumbPath,
+            durationSeconds: message.video?.duration || 0,
+            previewSeconds: DEFAULT_PREVIEW_SECONDS,
+          });
+          clipExists = generated.clipExists;
+          thumbExists = generated.thumbExists || thumbExists;
+        } catch (previewGenErr) {
+          console.warn("5-sec preview generation skipped for large video:", previewGenErr?.message || previewGenErr);
+          if (reportedFileSize > BOT_API_MAX_BYTES) {
+            mtprotoStreamOnly = true;
+          }
+        }
       }
 
       const baseHost = functionBaseUrl.replace(/\/+$/, "");
@@ -1369,7 +1389,26 @@ async function handleTelegramUpdate({
       if (!storageUploadSucceeded && hasDownloadedLocalVideo && !mtprotoStreamOnly) {
         try {
           await fs.promises.mkdir(STREAM_CACHE_DIR, { recursive: true });
-          await fs.promises.copyFile(localVideoPath, path.join(STREAM_CACHE_DIR, `${videoId}.mp4`));
+          const cachedTarget = path.join(STREAM_CACHE_DIR, `${videoId}.mp4`);
+          let remuxed = false;
+          try {
+            const ffmpegBin = getFfmpegBinary();
+            const fastStartTmp = path.join(tmpDir, `${videoId}_faststart.mp4`);
+            await execFileAsync(
+              ffmpegBin,
+              ["-y", "-i", localVideoPath, "-c", "copy", "-movflags", "+faststart", fastStartTmp],
+              { timeout: 15_000, maxBuffer: 5 * 1024 * 1024 }
+            );
+            if (fs.existsSync(fastStartTmp) && fs.statSync(fastStartTmp).size > 0) {
+              await fs.promises.copyFile(fastStartTmp, cachedTarget);
+              remuxed = true;
+            }
+          } catch (_) {
+            // Fall back to direct file copy when stream copy isn't applicable
+          }
+          if (!remuxed) {
+            await fs.promises.copyFile(localVideoPath, cachedTarget);
+          }
           pruneStreamCacheIfNeeded();
         } catch (_) {
           // Cache pre-warm optional
@@ -1548,7 +1587,9 @@ async function handleTelegramUpdate({
 }
 
 const STREAM_CACHE_DIR = path.join(os.tmpdir(), "vidvora-stream-cache");
-const MAX_STREAM_CACHE_FILES = 8;
+const MAX_STREAM_CACHE_FILES = 12;
+const VIDEO_DOC_CACHE_TTL_MS = 30_000;
+const videoDocCache = new Map();
 const inflightTelegramDownloads = new Map();
 
 function parseHttpByteRange(rangeHeader, fileSize) {
@@ -1950,19 +1991,35 @@ async function handleStreamPublicVideo({
     return;
   }
 
-  const videosCol = db.collection("videos");
-  const videoRef = typeof videosCol.doc === "function" ? videosCol.doc(cleanVideoId) : videosCol.document(cleanVideoId);
-  const videoDoc = await videoRef.get();
-  if (!videoDoc.exists || videoDoc.data()?.isActive !== true) {
-    res.writeHead(403, { "Content-Type": "text/plain" });
-    res.end("Forbidden: This video is deactivated or unavailable.");
-    return;
+  const nowMs = Date.now();
+  const cachedEntry = videoDocCache.get(cleanVideoId);
+  let videoData = null;
+  if (cachedEntry && nowMs - cachedEntry.cachedAt < VIDEO_DOC_CACHE_TTL_MS) {
+    videoData = cachedEntry.data;
+  } else {
+    const videosCol = db.collection("videos");
+    const videoRef = typeof videosCol.doc === "function" ? videosCol.doc(cleanVideoId) : videosCol.document(cleanVideoId);
+    const videoDoc = await videoRef.get();
+    if (!videoDoc.exists || videoDoc.data()?.isActive !== true) {
+      videoDocCache.delete(cleanVideoId);
+      res.writeHead(403, { "Content-Type": "text/plain" });
+      res.end("Forbidden: This video is deactivated or unavailable.");
+      return;
+    }
+    videoData = videoDoc.data() || {};
+    if (videoDocCache.size >= 200) {
+      const oldestKey = videoDocCache.keys().next().value;
+      if (oldestKey) videoDocCache.delete(oldestKey);
+    }
+    videoDocCache.set(cleanVideoId, { data: videoData, cachedAt: nowMs });
   }
 
-  const videoData = videoDoc.data() || {};
+  // Fast path: if video was saved with Telegram fallback (no Storage copy) or is already cached in /tmp,
+  // avoid slow Firebase Storage metadata checks on every range request.
+  const isTelegramVideoStream = cleanKind === "video" && Boolean(videoData.tgFileId);
 
-  // 1. Try Firebase Storage first if available
-  if (storage && typeof storage.bucket === "function") {
+  // 1. Try Firebase Storage first only when video is NOT Telegram-fallback backed
+  if (!isTelegramVideoStream && storage && typeof storage.bucket === "function") {
     try {
       const storagePath =
         cleanKind === "thumb"

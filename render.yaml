@@ -22,3 +22,7 @@ services:
         sync: false
       - key: FINANCE_BOT_TOKEN
         sync: false
+      - key: TELEGRAM_API_ID
+        sync: false
+      - key: TELEGRAM_API_HASH
+        sync: false

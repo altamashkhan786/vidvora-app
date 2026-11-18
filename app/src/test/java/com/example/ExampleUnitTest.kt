@@ -1001,4 +1001,48 @@ class ExampleUnitTest {
     val allMatches = com.example.data.repository.FirestoreVideoRepository.filterMembersByQuery(sorted, "@gmail.com")
     assertEquals(listOf("mem_newest", "mem_middle", "mem_oldest"), allMatches.map { it.memberId })
   }
+
+  @Test
+  fun creatorHourlyViews_computesLast24HoursWindowAndMergesBuckets() {
+    // Fixed reference timestamp: 2026-11-18T17:30:00Z
+    val sdf = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US).apply {
+      timeZone = java.util.TimeZone.getTimeZone("UTC")
+    }
+    val nowMs = sdf.parse("2026-11-18T17:30:00Z")!!.time
+
+    val currentBucket = com.example.data.repository.FirestoreVideoRepository.currentUtcHourBucketKey(nowMs)
+    assertEquals("2026111817", currentBucket)
+
+    val recentKeys = com.example.data.repository.FirestoreVideoRepository.recent24HourBucketKeys(nowMs)
+    assertEquals(24, recentKeys.size)
+    assertTrue("2026111817" in recentKeys)
+    assertTrue("2026111718" in recentKeys)
+    org.junit.Assert.assertFalse("2026111717" in recentKeys)
+
+    val hourlyViews = mapOf(
+      "2026111817" to 12L, // 0h ago -> counted
+      "2026111805" to 8L,  // 12h ago -> counted
+      "2026111718" to 5L,  // 23h ago -> counted
+      "2026111717" to 99L, // 24h ago -> expired (NOT counted)
+      "2026111012" to 40L, // old bucket -> NOT counted
+      "2026111816" to -3L  // negative safety clamp -> ignored
+    )
+    assertEquals(
+      25L,
+      com.example.data.repository.FirestoreVideoRepository.computeViewsLast24Hours(hourlyViews, nowMs)
+    )
+
+    val merged = com.example.data.repository.FirestoreVideoRepository.mergeHourlyViews(
+      target = mapOf("2026111817" to 10L, "2026111717" to 50L),
+      source = mapOf("2026111817" to 4L, "2026111801" to 7L),
+      nowMillis = nowMs
+    )
+    assertEquals(14L, merged["2026111817"])
+    assertEquals(7L, merged["2026111801"])
+    org.junit.Assert.assertFalse(merged.containsKey("2026111717"))
+    assertEquals(
+      21L,
+      com.example.data.repository.FirestoreVideoRepository.computeViewsLast24Hours(merged, nowMs)
+    )
+  }
 }

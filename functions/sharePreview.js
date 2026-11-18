@@ -234,6 +234,14 @@ function escapeHtml(value) {
     .replace(/>/g, "&gt;");
 }
 
+function isSocialCrawlerUserAgent(userAgent) {
+  const ua = String(userAgent || "").trim();
+  if (!ua) return false;
+  return /TelegramBot|WhatsApp|facebookexternalhit|Facebot|Twitterbot|Discordbot|Slackbot|LinkedInBot|Googlebot|Applebot|bingbot|Pinterest|vkShare|SkypeUriPreview/i.test(
+    ua
+  );
+}
+
 function normalizeShareBaseUrl(rawUrl) {
   const clean = String(rawUrl || "").trim();
   if (!clean) return "";
@@ -575,6 +583,15 @@ function buildShareHtml({
   <link rel="image_src" href="${safeOgImage}" />
   <meta name="description" content="${safeDesc}" />
   <meta name="theme-color" content="#070d1a" />
+  <script>
+    (function () {
+      var code = ${JSON.stringify(code || "")};
+      var params = new URLSearchParams(window.location.search);
+      if (code && params.get("install") !== "1" && /Android/i.test(navigator.userAgent || "")) {
+        window.location.replace(${JSON.stringify(intentUri)});
+      }
+    })();
+  </script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -795,9 +812,7 @@ function buildShareHtml({
       });
 
       if (code && isAndroid && !isInstallFallback) {
-        setTimeout(function () {
-          window.location.href = intentUri;
-        }, 120);
+        window.location.replace(intentUri);
       }
     })();
   </script>
@@ -813,6 +828,7 @@ async function handleSharePageRequest({
   method = "GET",
   res,
   db,
+  userAgent = "",
 }) {
   const cleanHost = String(hostBaseUrl || "").replace(/\/+$/, "");
   let urlObj = null;
@@ -823,7 +839,17 @@ async function handleSharePageRequest({
   }
 
   const code = extractShareCode({ urlObj, codeParam });
-  const target = code ? await resolveShareTarget(db, code) : { found: false, isActive: false };
+  const isInstallFallback = urlObj?.searchParams?.get("install") === "1";
+  const skipDbForInstantAndroidOpen = Boolean(
+    code &&
+      !isInstallFallback &&
+      /Android/i.test(userAgent || "") &&
+      !isSocialCrawlerUserAgent(userAgent)
+  );
+  const target =
+    code && !skipDbForInstantAndroidOpen
+      ? await resolveShareTarget(db, code)
+      : { found: false, isActive: false };
 
   const activeVideo = Boolean(target && target.found && target.isActive);
   const title = "VidVora — Watch Video";

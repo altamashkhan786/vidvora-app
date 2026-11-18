@@ -44,13 +44,22 @@ import com.google.firebase.functions.FirebaseFunctionsException
 import com.google.firebase.storage.FirebaseStorage
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
 import java.security.MessageDigest
 import java.security.SecureRandom
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 import java.util.UUID
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -79,6 +88,30 @@ class FirestoreVideoRepository(
     FirebaseFunctions.getInstance(),
     context.applicationContext
   )
+
+  private val backgroundIoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+  private fun prewarmStreamEndpoint(streamUrl: String) {
+    if (!streamUrl.startsWith("https://", ignoreCase = true) ||
+      !streamUrl.contains("/streamPublicVideo", ignoreCase = true)
+    ) {
+      return
+    }
+    backgroundIoScope.launch {
+      try {
+        val conn = (URL(streamUrl).openConnection() as HttpURLConnection).apply {
+          requestMethod = "HEAD"
+          connectTimeout = 4_000
+          readTimeout = 4_000
+          setRequestProperty("User-Agent", "VidVoraPlayer/1.0 (Android)")
+        }
+        conn.responseCode
+        conn.disconnect()
+      } catch (_: Exception) {
+        // Best-effort TCP/cache warmup only
+      }
+    }
+  }
 
   fun extractToken(input: String): String {
     val trimmed = input.trim()
@@ -368,7 +401,11 @@ class FirestoreVideoRepository(
       try {
         db.collection("videos").document(video.videoId).update("totalViews", FieldValue.increment(1))
       } catch (_: Exception) {}
+      backgroundIoScope.launch {
+        recordCreatorHourlyView(video.uploadedBy)
+      }
     }
+    prewarmStreamEndpoint(playableUrl)
 
     return TokenValidationResult.Success(
       VideoToken(
@@ -509,7 +546,11 @@ class FirestoreVideoRepository(
             try {
               db.collection("videos").document(videoId).update("totalViews", FieldValue.increment(1))
             } catch (_: Exception) {}
+            backgroundIoScope.launch {
+              recordCreatorHourlyView(uploadedBy)
+            }
           }
+          prewarmStreamEndpoint(playableUrl)
 
           return TokenValidationResult.Success(
             VideoToken(
@@ -1524,6 +1565,16 @@ class FirestoreVideoRepository(
     } else {
       MemberOption.defaultKeysForRole(normalizedRole)
     }
+    val rawHourlyViews = doc.get("hourlyViews") as? Map<*, *>
+    val parsedHourlyViews = buildMap<String, Long> {
+      rawHourlyViews?.forEach { (k, v) ->
+        val key = (k as? String)?.trim().orEmpty()
+        val count = (v as? Number)?.toLong()?.coerceAtLeast(0L) ?: 0L
+        if (key.length == 10 && key.all { it.isDigit() } && count > 0L) {
+          put(key, count)
+        }
+      }
+    }
     return FirestoreMember(
       memberId = doc.getString("memberId")?.takeIf { it.isNotBlank() } ?: doc.id,
       name = doc.getString("name") ?: "",
@@ -1536,8 +1587,21 @@ class FirestoreVideoRepository(
       creditedViews = (doc.get("creditedViews") as? Number)?.toLong()?.coerceAtLeast(0L) ?: 0L,
       viewRatePer1000 = (doc.get("viewRatePer1000") as? Number)?.toDouble()?.takeIf { it >= 0.0 }
         ?: DEFAULT_VIEW_RATE_PER_1000,
-      allowedOptions = resolvedOptions
+      allowedOptions = resolvedOptions,
+      hourlyViews = parsedHourlyViews
     )
+  }
+
+  private suspend fun recordCreatorHourlyView(uploadedBy: String) {
+    val cleanUploader = uploadedBy.trim()
+    if (cleanUploader.isBlank() || cleanUploader.equals("admin", ignoreCase = true)) return
+    try {
+      val bucketKey = currentUtcHourBucketKey()
+      val memberRef = resolveMemberDocRef(cleanUploader)
+      memberRef.update("hourlyViews.$bucketKey", FieldValue.increment(1)).await()
+    } catch (_: Exception) {
+      // Best-effort 24h view bucket tracking; never block playback
+    }
   }
 
   fun getAllMembersFlow(): Flow<List<FirestoreMember>> = callbackFlow {
@@ -1944,6 +2008,7 @@ class FirestoreVideoRepository(
 
         val combinedViews = latestTarget.creditedViews + latestSource.creditedViews
         val combinedEarning = kotlin.math.round((latestTarget.totalEarning + latestSource.totalEarning) * 100.0) / 100.0
+        val combinedHourlyViews = mergeHourlyViews(latestTarget.hourlyViews, latestSource.hourlyViews)
 
         tx.update(
           targetRef,
@@ -1952,6 +2017,7 @@ class FirestoreVideoRepository(
             "totalEarning" to combinedEarning,
             "viewRatePer1000" to resolvedRate,
             "allowedOptions" to mergedOptions,
+            "hourlyViews" to combinedHourlyViews,
             "isActive" to (latestTarget.isActive || latestSource.isActive)
           )
         )
@@ -1960,6 +2026,7 @@ class FirestoreVideoRepository(
           totalEarning = combinedEarning,
           viewRatePer1000 = resolvedRate,
           allowedOptions = mergedOptions,
+          hourlyViews = combinedHourlyViews,
           isActive = latestTarget.isActive || latestSource.isActive
         )
       }.await()
@@ -3616,5 +3683,58 @@ class FirestoreVideoRepository(
 
     fun encodeJpegBytesAsDataUrl(bytes: ByteArray): String =
       "data:image/jpeg;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)
+
+    private const val MILLIS_PER_HOUR = 3_600_000L
+    private const val HOURS_WINDOW_24H = 24
+
+    fun currentUtcHourBucketKey(nowMillis: Long = System.currentTimeMillis()): String {
+      val sdf = SimpleDateFormat("yyyyMMddHH", Locale.US).apply {
+        timeZone = TimeZone.getTimeZone("UTC")
+      }
+      return sdf.format(Date(nowMillis))
+    }
+
+    fun recent24HourBucketKeys(nowMillis: Long = System.currentTimeMillis()): Set<String> {
+      val sdf = SimpleDateFormat("yyyyMMddHH", Locale.US).apply {
+        timeZone = TimeZone.getTimeZone("UTC")
+      }
+      return buildSet {
+        for (hoursAgo in 0 until HOURS_WINDOW_24H) {
+          add(sdf.format(Date(nowMillis - hoursAgo * MILLIS_PER_HOUR)))
+        }
+      }
+    }
+
+    fun computeViewsLast24Hours(
+      hourlyViews: Map<String, Long>,
+      nowMillis: Long = System.currentTimeMillis()
+    ): Long {
+      if (hourlyViews.isEmpty()) return 0L
+      val activeKeys = recent24HourBucketKeys(nowMillis)
+      var total = 0L
+      for (key in activeKeys) {
+        val count = hourlyViews[key] ?: 0L
+        if (count > 0L) {
+          total += count
+        }
+      }
+      return total
+    }
+
+    fun mergeHourlyViews(
+      target: Map<String, Long>,
+      source: Map<String, Long>,
+      nowMillis: Long = System.currentTimeMillis()
+    ): Map<String, Long> {
+      val activeKeys = recent24HourBucketKeys(nowMillis)
+      val merged = linkedMapOf<String, Long>()
+      for (key in activeKeys) {
+        val combined = (target[key] ?: 0L).coerceAtLeast(0L) + (source[key] ?: 0L).coerceAtLeast(0L)
+        if (combined > 0L) {
+          merged[key] = combined
+        }
+      }
+      return merged
+    }
   }
 }

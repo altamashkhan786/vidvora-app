@@ -86,6 +86,7 @@ import com.example.ui.theme.MasalaSurfaceVariant
 import com.example.ui.theme.MasalaTextMuted
 import com.example.ui.theme.MasalaTextPrimary
 import com.example.ui.theme.MasalaTextSecondary
+import com.example.ui.theme.MasalaWarning
 import java.text.SimpleDateFormat
 import java.util.Locale
 
@@ -673,7 +674,7 @@ fun ManageCreatorEarningDialog(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // Admin Overview Pill: Real Views (Admin-only) vs Creator Views vs Total Earning
+        // Admin Overview Pill: 24h Views, Real Views (Admin-only), Creator Views vs Total Earning
         Row(
           modifier = Modifier
             .fillMaxWidth()
@@ -684,16 +685,20 @@ fun ManageCreatorEarningDialog(
           horizontalArrangement = Arrangement.SpaceBetween
         ) {
           Column(modifier = Modifier.weight(1f)) {
-            Text("REAL VIEWS", color = MasalaRedAccent, fontSize = 8.5.sp, fontWeight = FontWeight.Bold)
-            Text("${memberStats.totalViews}", color = MasalaRedAccent, fontSize = 14.sp, fontWeight = FontWeight.ExtraBold)
+            Text("24H VIEWS", color = MasalaWarning, fontSize = 8.sp, fontWeight = FontWeight.Bold)
+            Text("${memberStats.viewsLast24Hours}", color = MasalaWarning, fontSize = 13.5.sp, fontWeight = FontWeight.ExtraBold)
           }
           Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("CREATOR VIEWS", color = MasalaSuccess, fontSize = 8.5.sp, fontWeight = FontWeight.Bold)
-            Text("${memberStats.member.creditedViews}", color = MasalaSuccess, fontSize = 14.sp, fontWeight = FontWeight.ExtraBold)
+            Text("REAL VIEWS", color = MasalaRedAccent, fontSize = 8.sp, fontWeight = FontWeight.Bold)
+            Text("${memberStats.totalViews}", color = MasalaRedAccent, fontSize = 13.5.sp, fontWeight = FontWeight.ExtraBold)
+          }
+          Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("CREATOR VIEWS", color = MasalaSuccess, fontSize = 8.sp, fontWeight = FontWeight.Bold)
+            Text("${memberStats.member.creditedViews}", color = MasalaSuccess, fontSize = 13.5.sp, fontWeight = FontWeight.ExtraBold)
           }
           Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.End) {
-            Text("EARNING", color = MasalaGold, fontSize = 8.5.sp, fontWeight = FontWeight.Bold)
-            Text(formatInr(memberStats.earningSummary.totalEarning), color = MasalaGold, fontSize = 14.sp, fontWeight = FontWeight.ExtraBold)
+            Text("EARNING", color = MasalaGold, fontSize = 8.sp, fontWeight = FontWeight.Bold)
+            Text(formatInr(memberStats.earningSummary.totalEarning), color = MasalaGold, fontSize = 13.5.sp, fontWeight = FontWeight.ExtraBold)
           }
         }
 

@@ -1213,3 +1213,153 @@ test("handleTelegramUpdate publishes 150MB video immediately via MTProto mode & 
   assert.equal(streamed.headers["Content-Length"], 16);
   assert.equal(Buffer.compare(streamed.body, fakeMtprotoChunk.subarray(100, 116)), 0);
 });
+
+test("handleTelegramUpdate falls back to instant MTProto stream when 45MB preview download fails", async () => {
+  const { handleTelegramUpdate } = require("./telegramBot");
+
+  const mediumLargeFileSize = 45 * 1024 * 1024;
+  const mediumLargeFileId = buildFakeTelegramBotFileId({
+    typeId: 4,
+    dcId: 5,
+    fileReference: Buffer.from("med_large_ref"),
+    id: 111222333444n,
+    accessHash: 555444333222n,
+  });
+
+  const videosStore = new Map();
+  const mockDb = {
+    collection: (name) => {
+      if (name === "appConfig") {
+        return {
+          doc: (id) => ({
+            get: async () =>
+              id === "telegramBot"
+                ? {
+                    exists: true,
+                    data: () => ({
+                      botToken: "123:TESTTOKEN",
+                      apiId: 2040,
+                      apiHash: "abcdef1234567890abcdef1234567890",
+                    }),
+                  }
+                : { exists: false, data: () => ({}) },
+          }),
+        };
+      }
+      if (name === "telegramBotSessions") {
+        return {
+          doc: () => ({
+            get: async () => ({
+              exists: true,
+              data: () => ({ memberId: "admin", memberName: "Admin", uploadCount: 1 }),
+            }),
+            set: async () => {},
+          }),
+        };
+      }
+      if (name === "videos") {
+        return {
+          doc: (id) => ({
+            set: async (payload) => videosStore.set(id, payload),
+          }),
+        };
+      }
+      if (name === "accessLinks") {
+        return { doc: () => ({ set: async () => {} }) };
+      }
+      return { doc: () => ({ get: async () => ({ exists: false }) }) };
+    },
+  };
+
+  const failingMtprotoLib = {
+    StringSession: class {},
+    Api: { InputDocumentFileLocation: class {} },
+    bigInt: require("big-integer"),
+    TelegramClient: class {
+      async start() {
+        throw new Error("Simulated MTProto preview timeout");
+      }
+      setLogLevel() {}
+    },
+  };
+
+  const origFetch = global.fetch;
+  global.fetch = async (url) => {
+    const u = String(url);
+    if (u.endsWith("/getFile")) {
+      return { ok: true, json: async () => ({ ok: true, result: { file_path: "thumbnails/t2.jpg" } }) };
+    }
+    if (u.includes("/file/bot")) {
+      return { ok: true, arrayBuffer: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]) };
+    }
+    return { ok: true, json: async () => ({ ok: true, result: { message_id: 333 } }) };
+  };
+
+  try {
+    const res = await handleTelegramUpdate({
+      update: {
+        message: {
+          message_id: 401,
+          chat: { id: 888999 },
+          from: { id: "admin_user" },
+          document: {
+            file_id: mediumLargeFileId,
+            file_size: mediumLargeFileSize,
+            file_name: "Episode_45MB.mp4",
+            mime_type: "video/mp4",
+            thumbnail: { file_id: "THUMB_45MB" },
+          },
+          caption: "45MB Episode",
+        },
+      },
+      db: mockDb,
+      storage: null,
+      functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+      playbackSecret: "mtproto-secret",
+      telegramLibOverride: failingMtprotoLib,
+    });
+
+    assert.equal(res.ok, true);
+    const saved = videosStore.get(res.videoId);
+    assert.ok(saved);
+    assert.equal(saved.tgFileId, mediumLargeFileId);
+    assert.equal(saved.tgFileSize, mediumLargeFileSize);
+  } finally {
+    global.fetch = origFetch;
+  }
+});
+
+test("handleSharePageRequest skips blocking DB lookups for Android browsers and redirects immediately in head", async () => {
+  const { handleSharePageRequest } = require("./sharePreview");
+  let dbCalls = 0;
+  const mockDb = {
+    collection: () => {
+      dbCalls += 1;
+      throw new Error("Should not query Firestore on Android browser redirect");
+    },
+  };
+  const out = { statusCode: 0, headers: {}, chunks: [] };
+  const mockRes = {
+    writeHead(code, headers) {
+      out.statusCode = code;
+      out.headers = headers || {};
+    },
+    end(chunk) {
+      if (chunk) out.chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+    },
+  };
+
+  await handleSharePageRequest({
+    reqUrl: "/share?link=GM-FAST123",
+    hostBaseUrl: "https://vidvora-share-bot.onrender.com",
+    res: mockRes,
+    db: mockDb,
+    userAgent: "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 Chrome/126.0.0.0 Mobile Safari/537.36",
+  });
+
+  assert.equal(dbCalls, 0);
+  assert.equal(out.statusCode, 200);
+  const html = Buffer.concat(out.chunks).toString("utf8");
+  assert.ok(html.includes('window.location.replace("intent://watch?link=GM-FAST123'));
+  assert.ok(!html.includes("setTimeout("));
+});

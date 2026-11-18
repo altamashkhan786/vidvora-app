@@ -115,6 +115,7 @@ import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
@@ -338,7 +339,18 @@ fun PlayerScreen(
         }
       }
 
+    val loadControl = DefaultLoadControl.Builder()
+      .setBufferDurationsMs(
+        /* minBufferMs = */ 15_000,
+        /* maxBufferMs = */ 50_000,
+        /* bufferForPlaybackMs = */ 350,
+        /* bufferForPlaybackAfterRebufferMs = */ 1_200
+      )
+      .setPrioritizeTimeOverSizeThresholds(true)
+      .build()
+
     ExoPlayer.Builder(context, renderersFactory)
+      .setLoadControl(loadControl)
       .setTrackSelector(trackSelector)
       .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
       .build()

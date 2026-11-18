@@ -201,6 +201,19 @@ exports.validateVideoAccess = onCall({ cors: true }, async (request) => {
       totalViews: FieldValue.increment(1),
     });
 
+    if (videoData.uploadedBy && videoData.uploadedBy !== "admin") {
+      try {
+        const nowIso = new Date().toISOString();
+        const hourBucketKey =
+          nowIso.slice(0, 4) + nowIso.slice(5, 7) + nowIso.slice(8, 10) + nowIso.slice(11, 13);
+        await db.collection("members").doc(videoData.uploadedBy).update({
+          [`hourlyViews.${hourBucketKey}`]: FieldValue.increment(1),
+        });
+      } catch (hourlyErr) {
+        console.warn("authorizePlayback hourlyViews update skipped:", hourlyErr?.message || hourlyErr);
+      }
+    }
+
     // 9. Generate short-lived playback authorization ticket (15 min)
     const playbackPayload = {
       videoId: videoId,

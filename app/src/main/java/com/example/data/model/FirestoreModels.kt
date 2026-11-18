@@ -187,7 +187,8 @@ data class FirestoreMember(
   val totalEarning: Double = 0.0,
   val creditedViews: Long = 0L,
   val viewRatePer1000: Double = 190.0,
-  val allowedOptions: List<String> = MemberOption.defaultKeysForRole(MemberRole.CREATOR)
+  val allowedOptions: List<String> = MemberOption.defaultKeysForRole(MemberRole.CREATOR),
+  val hourlyViews: Map<String, Long> = emptyMap()
 ) {
   fun isPasskeyMatch(inputKey: String): Boolean {
     return isActive && passkey.trim().equals(inputKey.trim(), ignoreCase = false)
@@ -237,7 +238,8 @@ data class MemberStats(
   val earningSummary: EarningSummary = EarningSummary(
     totalEarning = member.totalEarning,
     availableBalance = member.totalEarning
-  )
+  ),
+  val viewsLast24Hours: Long = 0L
 )
 
 data class CreatorEmailChangeResult(

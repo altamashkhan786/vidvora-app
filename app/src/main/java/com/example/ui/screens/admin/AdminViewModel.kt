@@ -225,12 +225,14 @@ class AdminViewModel(
         )
         val totalViews = mVideos.sumOf { it.totalViews }
         val mRequests = requests.filter { it.memberId == m.memberId }
+        val viewsLast24h = FirestoreVideoRepository.computeViewsLast24Hours(m.hourlyViews)
         MemberStats(
           member = m,
           videoCount = mVideos.size,
           totalViews = totalViews,
           videos = mVideos,
-          earningSummary = computeEarningSummary(m.totalEarning, mRequests)
+          earningSummary = computeEarningSummary(m.totalEarning, mRequests),
+          viewsLast24Hours = viewsLast24h
         )
       }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())

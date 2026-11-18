@@ -96,8 +96,33 @@ const server = http.createServer(async (req, res) => {
         service: "VidVora Telegram Bot, Finance Bot & Share Preview Server",
         uploadBotConfigured: Boolean((process.env.TELEGRAM_BOT_TOKEN || "").trim()),
         financeBotConfigured: Boolean((process.env.FINANCE_BOT_TOKEN || "").trim()),
+        mtprotoConfigured: Boolean(
+          (process.env.TELEGRAM_API_ID || "").trim() && (process.env.TELEGRAM_API_HASH || "").trim()
+        ),
       })
     );
+    return;
+  }
+
+  if (req.method === "GET" && pathname === "/.well-known/assetlinks.json") {
+    const fingerprints = String(process.env.ANDROID_APP_SHA256_FINGERPRINTS || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const body = fingerprints.length
+      ? [
+          {
+            relation: ["delegate_permission/common.handle_all_urls"],
+            target: {
+              namespace: "android_app",
+              package_name: "com.aistudio.vidvora.vstr",
+              sha256_cert_fingerprints: fingerprints,
+            },
+          },
+        ]
+      : [];
+    res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "public, max-age=3600" });
+    res.end(JSON.stringify(body));
     return;
   }
 
@@ -116,6 +141,7 @@ const server = http.createServer(async (req, res) => {
         method: req.method,
         res,
         db,
+        userAgent: req.headers["user-agent"] || "",
       });
     } catch (err) {
       console.error("Standalone sharePage error:", err);
@@ -172,6 +198,24 @@ const server = http.createServer(async (req, res) => {
 
       const body = await readJsonBody(req);
       const publicBaseUrl = resolvePublicHostBaseUrl(req);
+      const msg = body?.message || body?.edited_message;
+      const isMediaUpload = Boolean(msg && (msg.video || msg.document));
+
+      if (isMediaUpload) {
+        // Respond 200 OK immediately so Telegram never retries on >20 MB processing (>60s)
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, accepted: true, async: true }));
+        handleTelegramUpdate({
+          update: body,
+          db,
+          storage,
+          functionBaseUrl: publicBaseUrl,
+          playbackSecret: PLAYBACK_SECRET,
+        }).catch((bgErr) => {
+          console.error("Async telegramWebhook video processing error:", bgErr);
+        });
+        return;
+      }
 
       const result = await handleTelegramUpdate({
         update: body,
