@@ -1558,3 +1558,176 @@ test("handleTelegramUpdate uploads forwarded Telegram video even when caption co
   }
 });
 
+test("handleTelegramUpdate retries transient terminated download errors and serializes concurrent batch uploads", async () => {
+  const { handleTelegramUpdate } = require("./telegramBot");
+
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "vidvora-batch-serial-"));
+  let sampleVideoBytes;
+  try {
+    const sampleMp4 = path.join(tmpDir, "sample.mp4");
+    await execFileAsync(
+      "ffmpeg",
+      ["-y", "-f", "lavfi", "-i", "testsrc=duration=2:size=160x120:rate=10", "-c:v", "libx264", "-pix_fmt", "yuv420p", sampleMp4],
+      { timeout: 15_000 }
+    );
+    sampleVideoBytes = await fs.promises.readFile(sampleMp4);
+  } finally {
+    await fs.promises.rm(tmpDir, { recursive: true, force: true });
+  }
+
+  const videosStore = new Map();
+  const mockDb = {
+    collection: (name) => {
+      if (name === "appConfig") {
+        return {
+          doc: () => ({
+            get: async () => ({ exists: true, data: () => ({ botToken: "123:TESTTOKEN" }) }),
+          }),
+        };
+      }
+      if (name === "telegramBotSessions") {
+        return {
+          doc: () => ({
+            get: async () => ({
+              exists: true,
+              data: () => ({ memberId: "admin", memberName: "Admin", uploadCount: 0 }),
+            }),
+            set: async () => {},
+          }),
+        };
+      }
+      if (name === "videos") {
+        return {
+          doc: (id) => ({
+            set: async (payload) => videosStore.set(id, payload),
+          }),
+        };
+      }
+      if (name === "accessLinks") {
+        return { doc: () => ({ set: async () => {} }) };
+      }
+      return { doc: () => ({ get: async () => ({ exists: false }) }) };
+    },
+  };
+
+  let downloadCalls = 0;
+  let activeDownloads = 0;
+  let maxConcurrentDownloads = 0;
+  const origFetch = global.fetch;
+  global.fetch = async (url) => {
+    const u = String(url);
+    if (u.endsWith("/getFile")) {
+      return { ok: true, json: async () => ({ ok: true, result: { file_path: "videos/batch.mp4" } }) };
+    }
+    if (u.includes("/file/bot")) {
+      downloadCalls += 1;
+      activeDownloads += 1;
+      maxConcurrentDownloads = Math.max(maxConcurrentDownloads, activeDownloads);
+      try {
+        if (downloadCalls === 1) {
+          throw new TypeError("terminated");
+        }
+        await new Promise((r) => setTimeout(r, 30));
+        return { ok: true, arrayBuffer: async () => sampleVideoBytes };
+      } finally {
+        activeDownloads -= 1;
+      }
+    }
+    return { ok: true, json: async () => ({ ok: true, result: { message_id: 950 } }) };
+  };
+
+  try {
+    const [r1, r2, r3] = await Promise.all([
+      handleTelegramUpdate({
+        update: {
+          message: {
+            message_id: 901,
+            chat: { id: 444111 },
+            from: { id: "admin_user" },
+            video: { file_id: "VID_B1", file_size: sampleVideoBytes.length, duration: 2, mime_type: "video/mp4" },
+            caption: "Batch 1",
+          },
+        },
+        db: mockDb,
+        storage: null,
+        functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+        playbackSecret: "test-secret",
+      }),
+      handleTelegramUpdate({
+        update: {
+          message: {
+            message_id: 902,
+            chat: { id: 444111 },
+            from: { id: "admin_user" },
+            video: { file_id: "VID_B2", file_size: sampleVideoBytes.length, duration: 2, mime_type: "video/mp4" },
+            caption: "Batch 2",
+          },
+        },
+        db: mockDb,
+        storage: null,
+        functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+        playbackSecret: "test-secret",
+      }),
+      handleTelegramUpdate({
+        update: {
+          message: {
+            message_id: 903,
+            chat: { id: 444111 },
+            from: { id: "admin_user" },
+            video: { file_id: "VID_B3", file_size: sampleVideoBytes.length, duration: 2, mime_type: "video/mp4" },
+            caption: "Batch 3",
+          },
+        },
+        db: mockDb,
+        storage: null,
+        functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+        playbackSecret: "test-secret",
+      }),
+    ]);
+
+    assert.equal(r1.ok, true);
+    assert.equal(r2.ok, true);
+    assert.equal(r3.ok, true);
+    assert.equal(videosStore.size, 3);
+    assert.equal(maxConcurrentDownloads, 1);
+    assert.equal(downloadCalls, 4); // 1 transient 'terminated' retry + 3 successful downloads
+  } finally {
+    await fs.promises.rm(path.join(os.tmpdir(), "vidvora-stream-cache"), { recursive: true, force: true }).catch(() => {});
+    global.fetch = origFetch;
+  }
+});
+
+test("telegramApiJson automatically waits and retries on Telegram 429 Too Many Requests", async () => {
+  const { telegramApiJson } = require("./telegramBot");
+  let attempts = 0;
+  const origFetch = global.fetch;
+  global.fetch = async () => {
+    attempts += 1;
+    if (attempts === 1) {
+      return {
+        ok: false,
+        json: async () => ({
+          ok: false,
+          error_code: 429,
+          description: "Too Many Requests: retry after 1",
+          parameters: { retry_after: 1 },
+        }),
+      };
+    }
+    return { ok: true, json: async () => ({ ok: true, result: { message_id: 777 } }) };
+  };
+
+  try {
+    const res = await telegramApiJson("https://api.telegram.org", "123:TEST", "sendMessage", {
+      chat_id: 111,
+      text: "Hello",
+    });
+    assert.equal(attempts, 2);
+    assert.equal(res.message_id, 777);
+  } finally {
+    global.fetch = origFetch;
+  }
+});
+
+
+

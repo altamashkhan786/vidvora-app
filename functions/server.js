@@ -79,6 +79,26 @@ function readJsonBody(req) {
   });
 }
 
+const MAX_MEDIA_QUEUE_PENDING = 500;
+let mediaQueueTail = Promise.resolve();
+let mediaQueueDepth = 0;
+
+function enqueueTelegramMediaTask(taskFn) {
+  if (mediaQueueDepth >= MAX_MEDIA_QUEUE_PENDING) {
+    return Promise.resolve({ ok: false, reason: "queue_full" });
+  }
+  mediaQueueDepth += 1;
+  const runNext = async () => {
+    try {
+      return await taskFn();
+    } finally {
+      mediaQueueDepth = Math.max(0, mediaQueueDepth - 1);
+    }
+  };
+  mediaQueueTail = mediaQueueTail.then(runNext, runNext);
+  return mediaQueueTail;
+}
+
 const server = http.createServer(async (req, res) => {
   const urlObj = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
   const pathname = urlObj.pathname;
@@ -99,6 +119,7 @@ const server = http.createServer(async (req, res) => {
         mtprotoConfigured: Boolean(
           (process.env.TELEGRAM_API_ID || "").trim() && (process.env.TELEGRAM_API_HASH || "").trim()
         ),
+        mediaQueueDepth,
       })
     );
     return;
@@ -202,16 +223,18 @@ const server = http.createServer(async (req, res) => {
       const isMediaUpload = Boolean(msg && (msg.video || msg.document));
 
       if (isMediaUpload) {
-        // Respond 200 OK immediately so Telegram never retries on >20 MB processing (>60s)
+        // Respond 200 OK immediately so Telegram never retries, and serialize heavy uploads 1-by-1 to stay under 512MB RAM
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true, accepted: true, async: true }));
-        handleTelegramUpdate({
-          update: body,
-          db,
-          storage,
-          functionBaseUrl: publicBaseUrl,
-          playbackSecret: PLAYBACK_SECRET,
-        }).catch((bgErr) => {
+        res.end(JSON.stringify({ ok: true, accepted: true, async: true, queued: mediaQueueDepth + 1 }));
+        enqueueTelegramMediaTask(() =>
+          handleTelegramUpdate({
+            update: body,
+            db,
+            storage,
+            functionBaseUrl: publicBaseUrl,
+            playbackSecret: PLAYBACK_SECRET,
+          })
+        ).catch((bgErr) => {
           console.error("Async telegramWebhook video processing error:", bgErr);
         });
         return;
