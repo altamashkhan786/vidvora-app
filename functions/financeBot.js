@@ -873,7 +873,7 @@ async function handleFinanceTelegramUpdate({ update, db }) {
       await replyText("⛔ Aapke account par View Earnings permission enabled nahi hai.");
       return { ok: true, action: "earnings_forbidden" };
     }
-    const { summary, realViews, creditedViews, viewRate, videos, activeVideosCount } = snapshot;
+    const { summary } = snapshot;
     const withdrawHint =
       summary.availableBalance >= MIN_WITHDRAWAL_INR
         ? "✅ Withdraw karne ke liye niche *💸 Withdraw UPI* button dabayein."
@@ -887,10 +887,6 @@ async function handleFinanceTelegramUpdate({ update, db }) {
         `🏆 *Total Earning:* ${formatInr(summary.totalEarning)}`,
         `⏳ *Pending / Processing:* ${formatInr(summary.pendingOrProcessingAmount)}`,
         `✅ *Total Paid:* ${formatInr(summary.paidAmount)}`,
-        "",
-        `👀 *Credited Views:* ${creditedViews.toLocaleString("en-IN")} _(Real: ${realViews.toLocaleString("en-IN")})_`,
-        `📈 *View Rate:* ${formatInr(viewRate)} / 1,000 views`,
-        `🎬 *Videos:* ${videos.length} _(${activeVideosCount} active)_`,
         "",
         withdrawHint,
       ].join("\n"),
