@@ -109,23 +109,69 @@ function extractDirectVideoUrlMessage(text) {
   return { url, caption: remainder };
 }
 
-function extractCodeFromVidVoraUrl(rawUrl) {
+const UNSUPPORTED_THIRD_PARTY_HOST_REGEX =
+  /(?:^|\.)(?:(?:1024)?terabox(?:app|link|share|file)?|1024tera|freeterabox|teraurl|terasharefile|nephobox|mirrobox|momerybox|4funbox|(?:1024)?tenbox|flezen|vidbunker|diskwala|mdisk|pdisk|dood(?:stream|s)?|streamtape|mixdrop|filemoon|voe)\.[a-z0-9.-]+$/i;
+
+function isUnsupportedThirdPartyHostUrl(rawUrl) {
   const urlText = String(rawUrl || "").trim();
-  if (!urlText) return "";
+  if (!urlText) return false;
+  try {
+    const parsed = new URL(urlText);
+    const hostname = String(parsed.hostname || "").toLowerCase();
+    return UNSUPPORTED_THIRD_PARTY_HOST_REGEX.test(hostname);
+  } catch (_) {
+    return false;
+  }
+}
+
+function isVidVoraHostOrScheme(rawUrl) {
+  const urlText = String(rawUrl || "").trim();
+  if (!urlText) return false;
+  if (/^vidvora:\/\//i.test(urlText)) return true;
+  try {
+    const parsed = new URL(urlText);
+    const host = String(parsed.hostname || "").toLowerCase();
+    return (
+      host.includes("vidvora") ||
+      host === "d1mn8mrvlzisg5.cloudfront.net" ||
+      host.endsWith(".cloudfront.net")
+    );
+  } catch (_) {
+    return false;
+  }
+}
+
+function extractCodeFromVidVoraUrl(rawUrl, options = {}) {
+  const urlText = String(rawUrl || "").trim();
+  if (!urlText || isUnsupportedThirdPartyHostUrl(urlText)) return "";
+  const strictVidVoraOnly = Boolean(options?.strictVidVoraOnly);
+  const isKnownVidVoraHost = isVidVoraHostOrScheme(urlText);
+  const matchesVidVoraTokenPattern = (candidate) =>
+    /^(?:GM-[A-Za-z0-9-]{4,}|link_[A-Za-z0-9]{4,}|vid_[A-Za-z0-9]{4,})$/i.test(String(candidate || "").trim());
 
   try {
     const parsed = new URL(urlText);
-    const paramCode =
+    const paramCode = (
       parsed.searchParams.get("link") ||
       parsed.searchParams.get("v") ||
       parsed.searchParams.get("video") ||
       parsed.searchParams.get("token") ||
-      "";
-    if (paramCode.trim()) return paramCode.trim();
+      ""
+    ).trim();
+    if (paramCode) {
+      if (!strictVidVoraOnly || isKnownVidVoraHost || matchesVidVoraTokenPattern(paramCode)) {
+        return paramCode;
+      }
+      return "";
+    }
 
     const pathMatch = parsed.pathname.match(/^\/(?:share|watch)\/([A-Za-z0-9_-]{4,})/i);
     if (pathMatch && pathMatch[1]) {
-      return pathMatch[1].trim();
+      const pathCode = pathMatch[1].trim();
+      if (!strictVidVoraOnly || isKnownVidVoraHost || matchesVidVoraTokenPattern(pathCode)) {
+        return pathCode;
+      }
+      return "";
     }
   } catch (_) {
     // Fallback regex parsing for custom scheme / partial URLs
@@ -133,13 +179,17 @@ function extractCodeFromVidVoraUrl(rawUrl) {
 
   const queryMatch = urlText.match(/[?&](?:link|v|video|token)=([A-Za-z0-9_-]{4,})/i);
   if (queryMatch && queryMatch[1]) {
-    return queryMatch[1].trim();
+    const qCode = queryMatch[1].trim();
+    if (!strictVidVoraOnly || isKnownVidVoraHost || matchesVidVoraTokenPattern(qCode)) {
+      return qCode;
+    }
   }
   return "";
 }
 
-function extractVidVoraShareTarget(text, message = null) {
+function extractVidVoraShareTarget(text, message = null, options = {}) {
   const raw = String(text || "").trim();
+  const strictVidVoraOnly = Boolean(options?.strictVidVoraOnly);
   const candidateUrls = [];
 
   if (raw) {
@@ -178,7 +228,7 @@ function extractVidVoraShareTarget(text, message = null) {
   let matchedUrl = "";
 
   for (const url of candidateUrls) {
-    const code = extractCodeFromVidVoraUrl(url);
+    const code = extractCodeFromVidVoraUrl(url, { strictVidVoraOnly });
     if (code) {
       matchedCode = code;
       matchedUrl = url;
@@ -190,8 +240,8 @@ function extractVidVoraShareTarget(text, message = null) {
     const convertCmdMatch = raw.match(/^\/convert(?:@[A-Za-z0-9_]+)?\s+(\S+)(?:\s+([\s\S]+))?$/i);
     if (convertCmdMatch && convertCmdMatch[1]) {
       const arg = convertCmdMatch[1].trim();
-      const fromUrl = extractCodeFromVidVoraUrl(arg);
-      matchedCode = fromUrl || arg;
+      const fromUrl = extractCodeFromVidVoraUrl(arg, { strictVidVoraOnly });
+      matchedCode = fromUrl || (isUnsupportedThirdPartyHostUrl(arg) ? "" : arg);
       matchedUrl = arg;
     }
   }
@@ -213,13 +263,17 @@ function extractVidVoraShareTarget(text, message = null) {
     .map((line) => line.trim())
     .filter((line) => {
       if (!line) return false;
-      if (/^(?:🎬\s*)?VidVora\s*[—-]\s*Watch Video/i.test(line)) return false;
+      if (/^(?:🎬\s*)?\*?VidVora\s*[—-]\s*Watch Video\*?$/i.test(line)) return false;
       if (/^✅\s*Uploaded to VidVora/i.test(line)) return false;
       if (/^🎞️\s*Preview Clip:/i.test(line)) return false;
       if (/^🔗\s*\*?Watch Full Video/i.test(line)) return false;
       if (/^🔑\s*\*?Access Code/i.test(line)) return false;
       if (/^📲\s*\*?App Link/i.test(line)) return false;
       if (/^_?Forward this preview clip/i.test(line)) return false;
+      if (/^(?:वीडियो कैसे देखे|video kaise dekhe)(?:\s|\/|$)/iu.test(line)) return false;
+      if (/^👇+$/u.test(line)) return false;
+      if (/^\[?https?:\/\/t\.me\/VideoKaiseDekhe/i.test(line)) return false;
+      if (/^https?:\/\/t\.me\/VideoKaiseDekhe/i.test(line.replace(/\\_/g, "_"))) return false;
       if (line.toUpperCase() === matchedCode.toUpperCase()) return false;
       return true;
     })
@@ -339,6 +393,10 @@ function buildShareMessageCaption({
     "",
     `🔗 *Watch Full Video:*`,
     watchUrl,
+    "",
+    "वीडियो कैसे देखे / How to play video",
+    "👇👇👇👇",
+    "[https://t.me/VideoKaiseDekhe\\_ar](https://t.me/VideoKaiseDekhe_ar)",
   ];
   return lines.join("\n");
 }
@@ -1022,8 +1080,8 @@ async function handleTelegramUpdate({
         "1️⃣ Link your VidVora Creator / Admin account:",
         "_(Just send your Password directly)_",
         "",
-        "2️⃣ *Upload Video:* Send any Video file (or direct `.mp4` link) with a caption for Title.",
-        "3️⃣ *Convert VidVora Link:* Paste or forward any VidVora Share Link.",
+        "2️⃣ *Batch Forward / Upload:* Telegram channel se 1 ya 10–50 *video files* ek saath select karke yahan forward karein (ya direct `.mp4`/`.m3u8` URL bhejein).",
+        "3️⃣ *Convert VidVora Link:* Kisi VidVora Share Link ko paste ya forward karein.",
         "",
         "Commands: `/status` • `/logout` • `/convert`",
       ].join("\n"),
@@ -1087,7 +1145,9 @@ async function handleTelegramUpdate({
   // 2. Check upload session before handling VidVora link conversion, video, or direct URL
   const combinedText = String(message.text || message.caption || "").trim();
   const isVideoMsg = isAllowedTelegramVideoMessage(message);
-  const vidvoraConvertTarget = extractVidVoraShareTarget(combinedText, message);
+  const vidvoraConvertTarget = extractVidVoraShareTarget(combinedText, message, {
+    strictVidVoraOnly: isVideoMsg,
+  });
   const directUrlMsg = !isVideoMsg && !vidvoraConvertTarget ? extractDirectVideoUrlMessage(textBody) : null;
 
   if (!vidvoraConvertTarget && !isVideoMsg && !directUrlMsg) {
@@ -1122,7 +1182,7 @@ async function handleTelegramUpdate({
     const existingSession = await db.collection("telegramBotSessions").doc(telegramUserId).get();
     if (existingSession.exists) {
       await replyText(
-        "📹 Send a *Video file*, a direct `.mp4` link, or any *VidVora Share Link* to convert into your own link.\n_(Account switch karne ke liye valid Password ya `/login YOUR_PASSWORD` bhejein.)_",
+        "📹 Send/Batch-Forward *Video files*, a direct `.mp4` link, or any *VidVora Share Link* to convert into your own link.\n_(Account switch karne ke liye valid Password ya `/login YOUR_PASSWORD` bhejein.)_",
         { parse_mode: "Markdown" }
       );
     } else {
@@ -1152,6 +1212,23 @@ async function handleTelegramUpdate({
       await replyText("⛔ Your Creator upload access is currently paused or disabled.");
       return { ok: true, action: "member_disabled" };
     }
+  }
+
+  if (directUrlMsg && isUnsupportedThirdPartyHostUrl(directUrlMsg.url)) {
+    await replyText(
+      [
+        "⚠️ *Third-Party Web Link Supported Nahi Hai*",
+        "",
+        "`TeraBox`, `Tenbox`, `Flezen`, `Vidbunker` jaise external links login/Cloudflare protected HTML web pages hote hain — inhe direct fetch ya convert nahi kiya ja sakta.",
+        "",
+        "*Tezi se bulk upload/convert karne ke sahi tarike:*",
+        "1️⃣ *Batch Forward Videos (Sabse Fast):* Telegram channel se 10–50 *video files* ek saath select karke yahan forward karein — bina download/upload kiye sabke VidVora links ban jayenge!",
+        "2️⃣ *VidVora Link Convert:* Kisi VidVora share post ya link ko forward/paste karein.",
+        "3️⃣ *Direct Stream URL:* Seedha `.mp4` / `.m3u8` / CDN (Bunny, R2, S3, CloudFront) link bhejein.",
+      ].join("\n"),
+      { parse_mode: "Markdown" }
+    );
+    return { ok: false, reason: "unsupported_third_party_host" };
   }
 
   const uploadFileSizeBytes = Number((message.video || message.document)?.file_size || 0) || 0;
@@ -2165,6 +2242,7 @@ module.exports = {
   parseTitleAndDescription,
   extractDirectVideoUrlMessage,
   extractVidVoraShareTarget,
+  isUnsupportedThirdPartyHostUrl,
   resolveVidVoraSourceVideo,
   isAllowedTelegramVideoMessage,
   buildShareMessageCaption,

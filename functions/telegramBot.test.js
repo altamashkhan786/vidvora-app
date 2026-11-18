@@ -85,6 +85,9 @@ test("token generation, stream HMAC signing, and share caption match VidVora for
   assert.ok(caption.includes("VidVora — Watch Video"));
   assert.ok(caption.includes("Watch Full Video:"));
   assert.ok(caption.includes(`${SHARE_LINK_BASE_URL}${token}`));
+  assert.ok(caption.includes("वीडियो कैसे देखे / How to play video"));
+  assert.ok(caption.includes("👇👇👇👇"));
+  assert.ok(caption.includes("https://t.me/VideoKaiseDekhe_ar"));
   assert.ok(!caption.includes("Uploaded to VidVora"));
   assert.ok(!caption.includes("Preview Clip"));
   assert.ok(!caption.includes("Access Code"));
@@ -425,6 +428,20 @@ test("extractVidVoraShareTarget detects share links, CloudFront links, deep link
     },
   });
   assert.deepEqual(forwardedBtn, { code: "GM-BTN11", customTitle: "Forwarded post" });
+
+  const forwardedFooterPost = extractVidVoraShareTarget(
+    [
+      "🎬 *VidVora — Watch Video*",
+      "",
+      "🔗 *Watch Full Video:*",
+      "https://vidvora-share-bot.onrender.com/share?link=GM-FWD99",
+      "",
+      "वीडियो कैसे देखे / How to play video",
+      "👇👇👇👇",
+      "https://t.me/VideoKaiseDekhe_ar",
+    ].join("\n")
+  );
+  assert.deepEqual(forwardedFooterPost, { code: "GM-FWD99", customTitle: "" });
 
   // Normal .mp4 URL must NOT be treated as a VidVora share link
   assert.equal(extractVidVoraShareTarget("https://cdn.example.com/movies/action.mp4\nAction Film"), null);
@@ -1363,3 +1380,181 @@ test("handleSharePageRequest skips blocking DB lookups for Android browsers and 
   assert.ok(html.includes('window.location.replace("intent://watch?link=GM-FAST123'));
   assert.ok(!html.includes("setTimeout("));
 });
+
+test("isUnsupportedThirdPartyHostUrl detects TeraBox/Tenbox/Flezen/Vidbunker links and handleTelegramUpdate rejects them cleanly without ffmpeg", async () => {
+  const { handleTelegramUpdate, isUnsupportedThirdPartyHostUrl } = require("./telegramBot");
+
+  assert.equal(isUnsupportedThirdPartyHostUrl("https://terabox.com/s/1abcXYZ"), true);
+  assert.equal(isUnsupportedThirdPartyHostUrl("https://www.1024terabox.com/sharing/link?surl=123"), true);
+  assert.equal(isUnsupportedThirdPartyHostUrl("https://tenbox.in/v/abc123"), true);
+  assert.equal(isUnsupportedThirdPartyHostUrl("https://1024tenbox.com/f/file/DYCdmeBFQV6PZdWnWDGtZg"), true);
+  assert.equal(isUnsupportedThirdPartyHostUrl("https://flezen.com/watch/demo99"), true);
+  assert.equal(isUnsupportedThirdPartyHostUrl("https://vidbunker.com/share/vid888"), true);
+  assert.equal(isUnsupportedThirdPartyHostUrl("https://cdn.example.com/movies/sample.mp4"), false);
+
+  const mockDb = {
+    collection: (name) => {
+      if (name === "appConfig") {
+        return {
+          doc: () => ({
+            get: async () => ({ exists: true, data: () => ({ botToken: "123:TESTTOKEN" }) }),
+          }),
+        };
+      }
+      if (name === "telegramBotSessions") {
+        return {
+          doc: () => ({
+            get: async () => ({
+              exists: true,
+              data: () => ({ memberId: "admin", memberName: "Admin", uploadCount: 1 }),
+            }),
+          }),
+        };
+      }
+      throw new Error(`Unexpected DB write/query to ${name}`);
+    },
+  };
+
+  const sent = [];
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    sent.push({ method: String(url).split("/").pop(), body: JSON.parse(opts.body) });
+    return { ok: true, json: async () => ({ ok: true, result: { message_id: 404 } }) };
+  };
+
+  try {
+    for (const badUrl of [
+      "https://terabox.com/s/1abcdEFG",
+      "https://vidbunker.com/watch/demo1234",
+      "https://flezen.com/share/clip999",
+    ]) {
+      const res = await handleTelegramUpdate({
+        update: {
+          message: {
+            message_id: 600 + sent.length,
+            chat: { id: 12345 },
+            from: { id: "admin_user" },
+            text: badUrl,
+          },
+        },
+        db: mockDb,
+        storage: null,
+        functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+        playbackSecret: "sec",
+      });
+
+      assert.equal(res.ok, false);
+      assert.equal(res.reason, "unsupported_third_party_host");
+    }
+
+    assert.equal(sent.length, 3);
+    assert.ok(sent[0].body.text.includes("Third-Party Web Link Supported Nahi Hai"));
+    assert.ok(sent[0].body.text.includes("Batch Forward Videos"));
+  } finally {
+    global.fetch = origFetch;
+  }
+});
+
+test("handleTelegramUpdate uploads forwarded Telegram video even when caption contains unrelated /watch or third-party links", async () => {
+  const { handleTelegramUpdate } = require("./telegramBot");
+
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "vidvora-fwd-promo-"));
+  let sampleVideoBytes;
+  try {
+    const sampleMp4 = path.join(tmpDir, "sample.mp4");
+    await execFileAsync(
+      "ffmpeg",
+      ["-y", "-f", "lavfi", "-i", "testsrc=duration=2:size=160x120:rate=10", "-c:v", "libx264", "-pix_fmt", "yuv420p", sampleMp4],
+      { timeout: 15_000 }
+    );
+    sampleVideoBytes = await fs.promises.readFile(sampleMp4);
+  } finally {
+    await fs.promises.rm(tmpDir, { recursive: true, force: true });
+  }
+
+  const videosStore = new Map();
+  const accessLinksStore = new Map();
+  const mockDb = {
+    collection: (name) => {
+      if (name === "appConfig") {
+        return {
+          doc: () => ({
+            get: async () => ({ exists: true, data: () => ({ botToken: "123:TESTTOKEN" }) }),
+          }),
+        };
+      }
+      if (name === "telegramBotSessions") {
+        return {
+          doc: () => ({
+            get: async () => ({
+              exists: true,
+              data: () => ({ memberId: "admin", memberName: "Admin", uploadCount: 0 }),
+            }),
+            set: async () => {},
+          }),
+        };
+      }
+      if (name === "videos") {
+        return {
+          doc: (id) => ({
+            set: async (payload) => videosStore.set(id, payload),
+          }),
+        };
+      }
+      if (name === "accessLinks") {
+        return {
+          doc: (id) => ({
+            set: async (payload) => accessLinksStore.set(id, payload),
+          }),
+        };
+      }
+      return { doc: () => ({ get: async () => ({ exists: false }) }) };
+    },
+  };
+
+  const origFetch = global.fetch;
+  global.fetch = async (url) => {
+    const u = String(url);
+    if (u.endsWith("/getFile")) {
+      return { ok: true, json: async () => ({ ok: true, result: { file_path: "videos/fwd.mp4" } }) };
+    }
+    if (u.includes("/file/bot")) {
+      return { ok: true, arrayBuffer: async () => sampleVideoBytes };
+    }
+    return { ok: true, json: async () => ({ ok: true, result: { message_id: 901 } }) };
+  };
+
+  try {
+    const res = await handleTelegramUpdate({
+      update: {
+        message: {
+          message_id: 808,
+          chat: { id: 777111 },
+          from: { id: "admin_user" },
+          video: {
+            file_id: "BAAC_FWD_VIDEO_1",
+            file_size: sampleVideoBytes.length,
+            duration: 2,
+            mime_type: "video/mp4",
+          },
+          caption: "New Channel Episode 1\nBackup: https://terabox.com/share/1xyz\nPromo: https://otherchannel.site/watch/ep101",
+        },
+      },
+      db: mockDb,
+      storage: null,
+      functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+      playbackSecret: "test-secret",
+    });
+
+    assert.equal(res.ok, true);
+    assert.ok(res.rawToken.startsWith("GM-"));
+    const saved = videosStore.get(res.videoId);
+    assert.ok(saved);
+    assert.equal(saved.title, "New Channel Episode 1");
+    assert.equal(saved.tgFileId, "BAAC_FWD_VIDEO_1");
+  } finally {
+    await fs.promises.rm(path.join(os.tmpdir(), "vidvora-stream-cache"), { recursive: true, force: true }).catch(() => {});
+    global.fetch = origFetch;
+  }
+});
+
