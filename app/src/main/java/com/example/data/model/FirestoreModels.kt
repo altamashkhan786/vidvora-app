@@ -150,8 +150,8 @@ enum class MemberOption(
   ),
   CHANGE_MASTER_KEY(
     key = "CHANGE_MASTER_KEY",
-    label = "Change Own Master Key",
-    description = "Update their own login Master Key",
+    label = "Change Own Password",
+    description = "Update their own login Password",
     recommendedForCreator = true,
     recommendedForAdmin = true
   );
@@ -333,6 +333,7 @@ enum class TelegramChannelCategory(
 data class TelegramConfig(
   val mainLink: String = "https://t.me/VidVoraApp",
   val creatorBotLink: String = "",
+  val financeBotLink: String = "",
   val shareLinkBaseUrl: String = "",
   val categoryLinks: Map<String, String> = TelegramChannelCategory.emptyCategoryMap(),
   val categoryNames: Map<String, String> = emptyMap(),
@@ -356,6 +357,22 @@ data class TelegramConfig(
 
   fun allCategories(): List<TelegramCategoryItem> =
     activeBuiltInCategories() + customCategories.map { it.copy(isBuiltIn = false) }
+}
+
+data class AppUpdateConfig(
+  val isEnabled: Boolean = false,
+  val latestVersionCode: Int = 1,
+  val latestVersionName: String = "1.0",
+  val title: String = "New VidVora Update Available",
+  val message: String = "Faster video playback, cleaner share links, and performance improvements are ready. Update now!",
+  val apkUrl: String = "https://d1mn8mrvlzisg5.cloudfront.net/vidvora.apk",
+  val isForceUpdate: Boolean = false
+) {
+  fun shouldPromptUpdate(currentVersionCode: Int): Boolean {
+    return isEnabled &&
+      latestVersionCode > currentVersionCode &&
+      apkUrl.trim().let { it.startsWith("http://", ignoreCase = true) || it.startsWith("https://", ignoreCase = true) }
+  }
 }
 
 object SupportSenderRole {

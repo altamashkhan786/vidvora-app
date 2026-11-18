@@ -8,16 +8,29 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.size
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.ads.AdManager
 import com.example.ads.ConsentManager
 import com.example.data.local.VideoDatabase
@@ -32,6 +45,8 @@ import com.example.ui.screens.home.HomeScreen
 import com.example.ui.screens.home.HomeViewModel
 import com.example.ui.screens.player.PlayerScreen
 import com.example.ui.theme.MasalaBlack
+import com.example.ui.theme.MasalaRedPrimary
+import com.example.ui.theme.MasalaTextPrimary
 import com.example.ui.theme.MyApplicationTheme
 import com.example.util.VideoShareModeDialogHost
 import com.google.firebase.appcheck.FirebaseAppCheck
@@ -82,7 +97,11 @@ class MainActivity : ComponentActivity() {
       firestoreVideoRepository.registerOrHeartbeatAppInstall(applicationContext)
     }
 
-    pendingDeepLinkState.value = extractTokenFromIntent(intent)
+    val initialDeepLink = extractTokenFromIntent(intent)
+    if (!initialDeepLink.isNullOrBlank()) {
+      adManager.appOpenAdManager.suppressNextColdLaunchAd()
+    }
+    pendingDeepLinkState.value = initialDeepLink
 
     setContent {
       MyApplicationTheme {
@@ -122,6 +141,9 @@ class MainActivity : ComponentActivity() {
     setIntent(intent)
     val extracted = extractTokenFromIntent(intent)
     if (!extracted.isNullOrBlank()) {
+      if (::adManager.isInitialized) {
+        adManager.appOpenAdManager.suppressNextColdLaunchAd()
+      }
       pendingDeepLinkState.value = extracted
     }
   }
@@ -185,6 +207,8 @@ fun VidVoraApp(
   val hostActivity = context as? android.app.Activity
   var currentScreen by remember { mutableStateOf<AppScreen>(AppScreen.Home) }
   var returnScreenAfterPlayer by remember { mutableStateOf<AppScreen>(AppScreen.Home) }
+  var isOpeningDeepLink by remember { mutableStateOf(!deepLinkToken.isNullOrBlank()) }
+  var activeDeepLinkRequestId by remember { mutableIntStateOf(0) }
 
   // Keep ad manager updated on player status to strictly prevent ads during video playback
   LaunchedEffect(currentScreen) {
@@ -199,93 +223,142 @@ fun VidVoraApp(
     AdminViewModel(firestoreVideoRepository, localVideoRepository, adminAuthRepository)
   }
 
-  // Handle incoming deep link on launch or onNewIntent (monetized with Pre-Play Ad)
+  // Handle incoming deep link on launch or onNewIntent (monetized with quick Pre-Play Ad check)
   LaunchedEffect(deepLinkToken) {
-    if (!deepLinkToken.isNullOrBlank()) {
+    val token = deepLinkToken?.trim()
+    if (!token.isNullOrBlank()) {
+      val requestId = ++activeDeepLinkRequestId
+      isOpeningDeepLink = true
       adManager?.appOpenAdManager?.suppressNextColdLaunchAd()
       if (currentScreen !is AppScreen.Home) {
         currentScreen = AppScreen.Home
       }
-      homeViewModel.onInputChange(deepLinkToken)
+      homeViewModel.onInputChange(token)
       homeViewModel.validateAndPlay(
-        input = deepLinkToken,
+        input = token,
         onError = { err ->
+          if (activeDeepLinkRequestId == requestId) {
+            isOpeningDeepLink = false
+          }
           android.widget.Toast.makeText(context, err, android.widget.Toast.LENGTH_LONG).show()
         }
       ) { video ->
+        if (activeDeepLinkRequestId != requestId) return@validateAndPlay
         if (adManager != null && hostActivity != null) {
-          adManager.showPrePlayAd(hostActivity) {
-            returnScreenAfterPlayer = AppScreen.Home
-            currentScreen = AppScreen.Player(video)
+          adManager.showPrePlayAd(hostActivity, maxWaitMs = 600L) {
+            if (activeDeepLinkRequestId == requestId) {
+              returnScreenAfterPlayer = AppScreen.Home
+              currentScreen = AppScreen.Player(video)
+              isOpeningDeepLink = false
+            }
           }
         } else {
           returnScreenAfterPlayer = AppScreen.Home
           currentScreen = AppScreen.Player(video)
+          isOpeningDeepLink = false
         }
       }
       onDeepLinkConsumed()
     }
   }
 
-  when (val screen = currentScreen) {
-    is AppScreen.Home -> {
-      HomeScreen(
-        viewModel = homeViewModel,
-        adManager = adManager,
-        onNavigateToPlayer = { video ->
-          returnScreenAfterPlayer = AppScreen.Home
-          currentScreen = AppScreen.Player(video)
-        },
-        onNavigateToAdmin = {
-          currentScreen = AppScreen.Admin
-        }
-      )
-    }
+  val showDeepLinkOverlay =
+    (isOpeningDeepLink || !deepLinkToken.isNullOrBlank()) && currentScreen is AppScreen.Home
 
-    is AppScreen.Player -> {
-      val liveTelegramConfig by homeViewModel.telegramConfig.collectAsState()
-      androidx.compose.runtime.key(screen.video.id, screen.video.streamUrl) {
-        PlayerScreen(
-          video = screen.video,
+  Box(modifier = Modifier.fillMaxSize()) {
+    when (val screen = currentScreen) {
+      is AppScreen.Home -> {
+        HomeScreen(
+          viewModel = homeViewModel,
           adManager = adManager,
-          allowExitAd = (returnScreenAfterPlayer != AppScreen.Admin),
-          shareLinkBaseUrl = liveTelegramConfig.shareLinkBaseUrl,
+          isAutoOpeningDeepLink = showDeepLinkOverlay,
+          onNavigateToPlayer = { video ->
+            returnScreenAfterPlayer = AppScreen.Home
+            currentScreen = AppScreen.Player(video)
+          },
+          onNavigateToAdmin = {
+            currentScreen = AppScreen.Admin
+          }
+        )
+      }
+
+      is AppScreen.Player -> {
+        val liveTelegramConfig by homeViewModel.telegramConfig.collectAsState()
+        androidx.compose.runtime.key(screen.video.id, screen.video.streamUrl) {
+          PlayerScreen(
+            video = screen.video,
+            adManager = adManager,
+            allowExitAd = (returnScreenAfterPlayer != AppScreen.Admin),
+            shareLinkBaseUrl = liveTelegramConfig.shareLinkBaseUrl,
+            onNavigateBack = {
+              currentScreen = returnScreenAfterPlayer
+            }
+          )
+        }
+      }
+
+      is AppScreen.Admin -> {
+        AdminPanelScreen(
+          viewModel = adminViewModel,
           onNavigateBack = {
-            currentScreen = returnScreenAfterPlayer
+            currentScreen = AppScreen.Home
+          },
+          onPlayVideo = { linkOrId ->
+            homeViewModel.validateAndPlay(
+              input = linkOrId,
+              onError = { err ->
+                android.widget.Toast.makeText(context, err, android.widget.Toast.LENGTH_LONG).show()
+              }
+            ) { video ->
+              returnScreenAfterPlayer = AppScreen.Admin
+              currentScreen = AppScreen.Player(video)
+            }
+          },
+          onPlayVideoItem = { firestoreVideo ->
+            adminViewModel.prepareVideoForPlayback(
+              video = firestoreVideo,
+              onError = { err ->
+                android.widget.Toast.makeText(context, err, android.widget.Toast.LENGTH_LONG).show()
+              }
+            ) { playableVideo ->
+              returnScreenAfterPlayer = AppScreen.Admin
+              currentScreen = AppScreen.Player(playableVideo)
+            }
           }
         )
       }
     }
 
-    is AppScreen.Admin -> {
-      AdminPanelScreen(
-        viewModel = adminViewModel,
-        onNavigateBack = {
-          currentScreen = AppScreen.Home
-        },
-        onPlayVideo = { linkOrId ->
-          homeViewModel.validateAndPlay(
-            input = linkOrId,
-            onError = { err ->
-              android.widget.Toast.makeText(context, err, android.widget.Toast.LENGTH_LONG).show()
-            }
-          ) { video ->
-            returnScreenAfterPlayer = AppScreen.Admin
-            currentScreen = AppScreen.Player(video)
-          }
-        },
-        onPlayVideoItem = { firestoreVideo ->
-          adminViewModel.prepareVideoForPlayback(
-            video = firestoreVideo,
-            onError = { err ->
-              android.widget.Toast.makeText(context, err, android.widget.Toast.LENGTH_LONG).show()
-            }
-          ) { playableVideo ->
-            returnScreenAfterPlayer = AppScreen.Admin
-            currentScreen = AppScreen.Player(playableVideo)
-          }
+    if (showDeepLinkOverlay) {
+      Box(
+        modifier = Modifier
+          .fillMaxSize()
+          .background(MasalaBlack.copy(alpha = 0.94f))
+          .clickable(
+            interactionSource = remember { MutableInteractionSource() },
+            indication = null,
+            onClick = {}
+          )
+          .testTag("deep_link_opening_overlay"),
+        contentAlignment = Alignment.Center
+      ) {
+        Column(
+          horizontalAlignment = Alignment.CenterHorizontally,
+          verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+          CircularProgressIndicator(
+            color = MasalaRedPrimary,
+            strokeWidth = 3.dp,
+            modifier = Modifier.size(44.dp)
+          )
+          Text(
+            text = "Opening video...",
+            color = MasalaTextPrimary,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.SemiBold
+          )
         }
-      )
+      }
     }
   }
 }

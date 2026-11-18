@@ -2,6 +2,8 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const { Readable } = require("stream");
+const { pipeline } = require("stream/promises");
 const { execFile } = require("child_process");
 const { promisify } = require("util");
 
@@ -10,6 +12,9 @@ const execFileAsync = promisify(execFile);
 const SHARE_LINK_BASE_URL = "https://d1mn8mrvlzisg5.cloudfront.net/index.html?link=";
 const SUPERADMIN_PASSKEY = "GM-ADMIN-2026-MASTER";
 const DEFAULT_PREVIEW_SECONDS = 5;
+const BOT_API_MAX_BYTES = 20 * 1024 * 1024;
+const WEBHOOK_PREVIEW_MAX_BYTES = 60 * 1024 * 1024;
+const MTPROTO_CHUNK_SIZE = 512 * 1024;
 const { normalizeShareBaseUrl } = require("./sharePreview");
 
 function getFfmpegBinary() {
@@ -548,13 +553,312 @@ async function sendTelegramPhoto(apiBase, botToken, { chatId, imagePathOrUri, ca
   });
 }
 
+async function writeFetchResponseToFile(res, destPath) {
+  if (res.body && typeof res.body.getReader === "function" && typeof Readable.fromWeb === "function") {
+    const outStream = fs.createWriteStream(destPath);
+    await pipeline(Readable.fromWeb(res.body), outStream);
+    const stat = await fs.promises.stat(destPath);
+    return stat.size;
+  }
+  const bytes = Buffer.from(await res.arrayBuffer());
+  if (!bytes.length) {
+    return 0;
+  }
+  await fs.promises.writeFile(destPath, bytes);
+  return bytes.length;
+}
+
 async function downloadFileToPath(url, destPath) {
   const res = await fetch(url);
   if (!res.ok) {
     throw new Error(`Download failed (${res.status} ${res.statusText})`);
   }
-  const arrayBuffer = await res.arrayBuffer();
-  await fs.promises.writeFile(destPath, Buffer.from(arrayBuffer));
+  const written = await writeFetchResponseToFile(res, destPath);
+  if (!written) {
+    throw new Error("Downloaded file is empty.");
+  }
+}
+
+function telegramRleDecode(buf) {
+  const out = [];
+  for (let i = 0; i < buf.length; i += 1) {
+    if (buf[i] === 0x00) {
+      if (i + 1 >= buf.length) break;
+      const count = buf[i + 1];
+      for (let c = 0; c < count; c += 1) {
+        out.push(0x00);
+      }
+      i += 1;
+    } else {
+      out.push(buf[i]);
+    }
+  }
+  return Buffer.from(out);
+}
+
+/**
+ * Decodes a Telegram Bot API v4 file_id into MTProto InputDocumentFileLocation components
+ * so streaming & downloads work even across stateless container restarts without needing user entity cache.
+ */
+function decodeTelegramBotFileId(fileId) {
+  const clean = String(fileId || "").trim();
+  if (!clean || clean.length < 16) return null;
+
+  try {
+    let b64 = clean.replace(/-/g, "+").replace(/_/g, "/");
+    while (b64.length % 4 !== 0) b64 += "=";
+    const raw = Buffer.from(b64, "base64");
+    if (!raw.length) return null;
+
+    const decoded = telegramRleDecode(raw);
+    if (decoded.length < 18) return null;
+
+    const majorVersion = decoded[decoded.length - 1];
+    if (majorVersion !== 4) return null;
+
+    const payload = decoded.subarray(0, decoded.length - 2);
+    if (payload.length < 24) return null;
+
+    let pos = 0;
+    const rawTypeId = payload.readUInt32LE(pos);
+    pos += 4;
+    const WEB_LOCATION_FLAG = 1 << 24;
+    const FILE_REFERENCE_FLAG = 1 << 25;
+    if ((rawTypeId & WEB_LOCATION_FLAG) !== 0) return null;
+
+    const typeId = rawTypeId & ~(FILE_REFERENCE_FLAG | WEB_LOCATION_FLAG);
+    const dcId = payload.readInt32LE(pos);
+    pos += 4;
+    if (dcId <= 0 || dcId > 32) return null;
+
+    let fileReference = Buffer.alloc(0);
+    if ((rawTypeId & FILE_REFERENCE_FLAG) !== 0) {
+      if (pos >= payload.length) return null;
+      let len = payload[pos];
+      let headerBytes = 1;
+      pos += 1;
+      if (len === 254) {
+        if (pos + 3 > payload.length) return null;
+        len = payload[pos] | (payload[pos + 1] << 8) | (payload[pos + 2] << 16);
+        pos += 3;
+        headerBytes = 4;
+      }
+      if (pos + len > payload.length) return null;
+      fileReference = Buffer.from(payload.subarray(pos, pos + len));
+      pos += len;
+      const pad = (4 - ((headerBytes + len) % 4)) % 4;
+      pos += pad;
+    }
+
+    if (pos + 16 > payload.length) return null;
+    const id = payload.readBigInt64LE(pos);
+    pos += 8;
+    const accessHash = payload.readBigInt64LE(pos);
+    pos += 8;
+
+    return {
+      majorVersion,
+      typeId,
+      dcId,
+      id: id.toString(),
+      accessHash: accessHash.toString(),
+      fileReference,
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+let mtprotoState = { key: "", client: null, promise: null };
+
+function loadTelegramMtprotoLibs(telegramLibOverride = null) {
+  if (telegramLibOverride) {
+    return telegramLibOverride;
+  }
+  const { TelegramClient, Api } = require("telegram");
+  const { StringSession } = require("telegram/sessions");
+  const bigInt = require("big-integer");
+  return { TelegramClient, Api, StringSession, bigInt };
+}
+
+async function getMtprotoClient({ apiId, apiHash, botToken, telegramLibOverride = null }) {
+  const numApiId = Number(apiId);
+  const cleanHash = String(apiHash || "").trim();
+  const cleanToken = String(botToken || "").trim();
+  if (!numApiId || !cleanHash || !cleanToken) {
+    throw new Error("TELEGRAM_API_ID and TELEGRAM_API_HASH are required for >20 MB MTProto downloads.");
+  }
+
+  if (telegramLibOverride) {
+    const libs = loadTelegramMtprotoLibs(telegramLibOverride);
+    const client = new libs.TelegramClient(new libs.StringSession(""), numApiId, cleanHash, {
+      connectionRetries: 3,
+      useWSS: false,
+    });
+    if (typeof client.setLogLevel === "function") client.setLogLevel("warn");
+    await client.start({ botAuthToken: cleanToken });
+    return { client, libs };
+  }
+
+  const key = `${numApiId}:${cleanHash}:${cleanToken}`;
+  if (mtprotoState.key === key && mtprotoState.client && !mtprotoState.client.disconnected) {
+    return { client: mtprotoState.client, libs: loadTelegramMtprotoLibs() };
+  }
+  if (mtprotoState.key === key && mtprotoState.promise) {
+    return mtprotoState.promise;
+  }
+
+  const prevClient = mtprotoState.client;
+  const connectPromise = (async () => {
+    if (prevClient && typeof prevClient.disconnect === "function") {
+      await prevClient.disconnect().catch(() => {});
+    }
+    const libs = loadTelegramMtprotoLibs();
+    const client = new libs.TelegramClient(new libs.StringSession(""), numApiId, cleanHash, {
+      connectionRetries: 5,
+      useWSS: false,
+    });
+    if (typeof client.setLogLevel === "function") {
+      client.setLogLevel("warn");
+    }
+    await client.start({ botAuthToken: cleanToken });
+    mtprotoState = { key, client, promise: null };
+    return { client, libs };
+  })();
+
+  mtprotoState = { key, client: null, promise: connectPromise };
+  try {
+    return await connectPromise;
+  } catch (err) {
+    if (mtprotoState.promise === connectPromise) {
+      mtprotoState = { key: "", client: null, promise: null };
+    }
+    throw err;
+  }
+}
+
+async function resolveMtprotoMediaDescriptor({
+  client,
+  libs,
+  tgFileId,
+  tgChatId = null,
+  tgMessageId = null,
+  tgFileSize = 0,
+  forceRefresh = false,
+}) {
+  const { Api, bigInt } = libs;
+
+  if (!forceRefresh) {
+    const decoded = decodeTelegramBotFileId(tgFileId);
+    if (decoded) {
+      return {
+        dcId: decoded.dcId,
+        fileSize: Number(tgFileSize || 0),
+        location: new Api.InputDocumentFileLocation({
+          id: bigInt(decoded.id),
+          accessHash: bigInt(decoded.accessHash),
+          fileReference: decoded.fileReference,
+          thumbSize: "",
+        }),
+      };
+    }
+  }
+
+  if (tgChatId && tgMessageId && typeof client.getMessages === "function") {
+    const peer = /^-?\d+$/.test(String(tgChatId)) ? Number(tgChatId) : String(tgChatId);
+    const msgs = await client.getMessages(peer, { ids: [Number(tgMessageId)] });
+    const msg = Array.isArray(msgs) ? msgs[0] : msgs;
+    const doc = msg?.media?.document || msg?.document;
+    if (doc) {
+      return {
+        dcId: doc.dcId,
+        fileSize: Number(doc.size || tgFileSize || 0),
+        location: new Api.InputDocumentFileLocation({
+          id: doc.id,
+          accessHash: doc.accessHash,
+          fileReference: doc.fileReference,
+          thumbSize: "",
+        }),
+      };
+    }
+  }
+
+  throw new Error("Unable to resolve Telegram MTProto media location for this video.");
+}
+
+async function downloadTelegramFileViaMtproto({
+  apiId,
+  apiHash,
+  botToken,
+  tgFileId,
+  tgChatId = null,
+  tgMessageId = null,
+  tgFileSize = 0,
+  destPath,
+  telegramLibOverride = null,
+}) {
+  const { client, libs } = await getMtprotoClient({ apiId, apiHash, botToken, telegramLibOverride });
+  let descriptor = await resolveMtprotoMediaDescriptor({
+    client,
+    libs,
+    tgFileId,
+    tgChatId,
+    tgMessageId,
+    tgFileSize,
+    forceRefresh: false,
+  });
+
+  const runDownload = async (desc) => {
+    const outStream = fs.createWriteStream(destPath);
+    let written = 0;
+    try {
+      const iter = client.iterDownload({
+        file: desc.location,
+        dcId: desc.dcId,
+        offset: libs.bigInt.zero,
+        requestSize: MTPROTO_CHUNK_SIZE,
+      });
+      for await (const rawChunk of iter) {
+        const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
+        if (!chunk.length) break;
+        written += chunk.length;
+        if (!outStream.write(chunk)) {
+          await new Promise((resolve, reject) => {
+            outStream.once("drain", resolve);
+            outStream.once("error", reject);
+          });
+        }
+      }
+      await new Promise((resolve, reject) => {
+        outStream.once("finish", resolve);
+        outStream.once("error", reject);
+        outStream.end();
+      });
+      return written;
+    } catch (err) {
+      outStream.destroy();
+      throw err;
+    }
+  };
+
+  try {
+    return await runDownload(descriptor);
+  } catch (err) {
+    const msg = String(err?.errorMessage || err?.message || "");
+    if (msg.includes("FILE_REFERENCE") && tgChatId && tgMessageId) {
+      descriptor = await resolveMtprotoMediaDescriptor({
+        client,
+        libs,
+        tgFileId,
+        tgChatId,
+        tgMessageId,
+        tgFileSize,
+        forceRefresh: true,
+      });
+      return runDownload(descriptor);
+    }
+    throw err;
+  }
 }
 
 async function resolveBotRuntimeConfig(db) {
@@ -562,17 +866,25 @@ async function resolveBotRuntimeConfig(db) {
   let apiBase = (process.env.TELEGRAM_API_BASE || "https://api.telegram.org").trim().replace(/\/+$/, "");
   let webhookSecret = (process.env.TELEGRAM_WEBHOOK_SECRET || "").trim();
   let shareLinkBaseUrl = normalizeShareBaseUrl(process.env.SHARE_LINK_BASE_URL || "");
+  let apiId = parseInt(String(process.env.TELEGRAM_API_ID || "0").trim(), 10) || 0;
+  let apiHash = (process.env.TELEGRAM_API_HASH || "").trim();
 
-  if (!botToken) {
+  if (!botToken || !apiId || !apiHash) {
     try {
       const cfgSnap = await db.collection("appConfig").doc("telegramBot").get();
       if (cfgSnap.exists) {
         const data = cfgSnap.data() || {};
-        if (typeof data.botToken === "string" && data.botToken.trim()) {
+        if (!botToken && typeof data.botToken === "string" && data.botToken.trim()) {
           botToken = data.botToken.trim();
         }
-        if (typeof data.webhookSecret === "string" && data.webhookSecret.trim()) {
+        if (!webhookSecret && typeof data.webhookSecret === "string" && data.webhookSecret.trim()) {
           webhookSecret = data.webhookSecret.trim();
+        }
+        if (!apiId && data.apiId) {
+          apiId = parseInt(String(data.apiId).trim(), 10) || 0;
+        }
+        if (!apiHash && typeof data.apiHash === "string" && data.apiHash.trim()) {
+          apiHash = data.apiHash.trim();
         }
       }
     } catch (_) {
@@ -594,7 +906,7 @@ async function resolveBotRuntimeConfig(db) {
     }
   }
 
-  return { botToken, apiBase, webhookSecret, shareLinkBaseUrl };
+  return { botToken, apiBase, webhookSecret, shareLinkBaseUrl, apiId, apiHash };
 }
 
 async function authenticateCreatorMember(db, emailOrPhone, passkey) {
@@ -655,7 +967,31 @@ async function authenticateCreatorMember(db, emailOrPhone, passkey) {
   return null;
 }
 
-async function handleTelegramUpdate({ update, db, storage, functionBaseUrl, playbackSecret }) {
+const processedUpdateIds = new Set();
+
+function recordAndCheckDuplicateUpdate(updateId) {
+  if (updateId == null) return false;
+  const key = String(updateId);
+  if (processedUpdateIds.has(key)) return true;
+  processedUpdateIds.add(key);
+  if (processedUpdateIds.size > 200) {
+    const oldest = processedUpdateIds.values().next().value;
+    if (oldest !== undefined) processedUpdateIds.delete(oldest);
+  }
+  return false;
+}
+
+async function handleTelegramUpdate({
+  update,
+  db,
+  storage,
+  functionBaseUrl,
+  playbackSecret,
+  telegramLibOverride = null,
+}) {
+  if (recordAndCheckDuplicateUpdate(update?.update_id)) {
+    return { ok: true, duplicate: true };
+  }
   const message = update?.message || update?.edited_message;
   if (!message || !message.chat || !message.from) {
     return { ok: true, ignored: true };
@@ -663,7 +999,7 @@ async function handleTelegramUpdate({ update, db, storage, functionBaseUrl, play
 
   const chatId = message.chat.id;
   const telegramUserId = String(message.from.id);
-  const { botToken, apiBase, shareLinkBaseUrl } = await resolveBotRuntimeConfig(db);
+  const { botToken, apiBase, shareLinkBaseUrl, apiId, apiHash } = await resolveBotRuntimeConfig(db);
   if (!botToken) {
     throw new Error("TELEGRAM_BOT_TOKEN is not configured.");
   }
@@ -684,7 +1020,7 @@ async function handleTelegramUpdate({ update, db, storage, functionBaseUrl, play
         "🎬 *VidVora Creator Auto-Upload & Link Converter Bot*",
         "",
         "1️⃣ Link your VidVora Creator / Admin account:",
-        "_(Just send your Master Key directly)_",
+        "_(Just send your Password directly)_",
         "",
         "2️⃣ *Upload Video:* Send any Video file (or direct `.mp4` link) with a caption for Title.",
         "3️⃣ *Convert VidVora Link:* Paste or forward any VidVora Share Link.",
@@ -698,7 +1034,7 @@ async function handleTelegramUpdate({ update, db, storage, functionBaseUrl, play
 
   if (/^\/logout(?:@\w+)?/i.test(textBody)) {
     await db.collection("telegramBotSessions").doc(telegramUserId).delete();
-    await replyText("🔓 Unlinked your VidVora account from this bot. Send `/login MASTER_KEY` anytime to reconnect.", {
+    await replyText("🔓 Unlinked your VidVora account from this bot. Send `/login PASSWORD` anytime to reconnect.", {
       parse_mode: "Markdown",
     });
     return { ok: true, action: "logout" };
@@ -707,7 +1043,7 @@ async function handleTelegramUpdate({ update, db, storage, functionBaseUrl, play
   if (/^\/status(?:@\w+)?/i.test(textBody)) {
     const sessionSnap = await db.collection("telegramBotSessions").doc(telegramUserId).get();
     if (!sessionSnap.exists) {
-      await replyText("❌ Not linked yet. Send `/login YOUR_MASTER_KEY` first.", { parse_mode: "Markdown" });
+      await replyText("❌ Not linked yet. Send `/login YOUR_PASSWORD` first.", { parse_mode: "Markdown" });
       return { ok: true, action: "status_unlinked" };
     }
     const s = sessionSnap.data() || {};
@@ -722,7 +1058,7 @@ async function handleTelegramUpdate({ update, db, storage, functionBaseUrl, play
   if (loginCmd) {
     const creator = await authenticateCreatorMember(db, loginCmd.emailOrPhone, loginCmd.passkey);
     if (!creator) {
-      await replyText("❌ Invalid or paused Master Key. Check your VidVora Creator Master Key and try again.");
+      await replyText("❌ Invalid or paused Password. Check your VidVora Creator Password and try again.");
       return { ok: true, action: "login_failed" };
     }
     if (!creator.canUpload) {
@@ -786,12 +1122,12 @@ async function handleTelegramUpdate({ update, db, storage, functionBaseUrl, play
     const existingSession = await db.collection("telegramBotSessions").doc(telegramUserId).get();
     if (existingSession.exists) {
       await replyText(
-        "📹 Send a *Video file*, a direct `.mp4` link, or any *VidVora Share Link* to convert into your own link.\n_(Account switch karne ke liye valid Master Key ya `/login YOUR_MASTER_KEY` bhejein.)_",
+        "📹 Send a *Video file*, a direct `.mp4` link, or any *VidVora Share Link* to convert into your own link.\n_(Account switch karne ke liye valid Password ya `/login YOUR_PASSWORD` bhejein.)_",
         { parse_mode: "Markdown" }
       );
     } else {
       await replyText(
-        "🔐 Invalid Master Key (ya unsupported message).\n\nApni sahi *Creator / Admin Master Key* directly bhejein, ya `/login YOUR_MASTER_KEY` likhein.",
+        "🔐 Invalid Password (ya unsupported message).\n\nApna sahi *Creator / Admin Password* directly bhejein, ya `/login YOUR_PASSWORD` likhein.",
         { parse_mode: "Markdown" }
       );
     }
@@ -800,7 +1136,7 @@ async function handleTelegramUpdate({ update, db, storage, functionBaseUrl, play
 
   const sessionSnap = await db.collection("telegramBotSessions").doc(telegramUserId).get();
   if (!sessionSnap.exists) {
-    await replyText("🔐 Please link your Creator account first:\n`/login YOUR_MASTER_KEY`", {
+    await replyText("🔐 Please link your Creator account first:\n`/login YOUR_PASSWORD`", {
       parse_mode: "Markdown",
     });
     return { ok: true, action: "auth_required" };
@@ -837,6 +1173,11 @@ async function handleTelegramUpdate({ update, db, storage, functionBaseUrl, play
     let description = "Uploaded via VidVora Telegram Bot";
     let finalStoragePath = "";
     let finalThumbPath = null;
+    let tgFileIdForDoc = null;
+    let tgChatIdForDoc = null;
+    let tgMessageIdForDoc = null;
+    let tgFileSizeForDoc = 0;
+    let tgMimeTypeForDoc = null;
     const bucket = storage && typeof storage.bucket === "function" ? storage.bucket() : null;
 
     if (vidvoraConvertTarget) {
@@ -854,7 +1195,11 @@ async function handleTelegramUpdate({ update, db, storage, functionBaseUrl, play
       description = source.video.description || "Converted via VidVora Link Converter Bot";
       finalStoragePath = source.video.storagePath;
       finalThumbPath = source.video.thumbnailPath || null;
-      var tgFileIdForDoc = source.video.tgFileId ? String(source.video.tgFileId) : null;
+      tgFileIdForDoc = source.video.tgFileId ? String(source.video.tgFileId) : null;
+      tgChatIdForDoc = source.video.tgChatId ? String(source.video.tgChatId) : null;
+      tgMessageIdForDoc = source.video.tgMessageId ? Number(source.video.tgMessageId) : null;
+      tgFileSizeForDoc = Number(source.video.tgFileSize || 0) || 0;
+      tgMimeTypeForDoc = source.video.tgMimeType ? String(source.video.tgMimeType) : null;
 
       if (finalStoragePath && /^https?:\/\//i.test(finalStoragePath)) {
         try {
@@ -879,37 +1224,109 @@ async function handleTelegramUpdate({ update, db, storage, functionBaseUrl, play
       const parsedMeta = parseTitleAndDescription(message.caption, fallbackName);
       title = parsedMeta.title;
       description = parsedMeta.description;
+      const reportedFileSize = Number(mediaObj.file_size || 0) || 0;
+      const mimeType = String(mediaObj.mime_type || "video/mp4");
+      const hasMtproto = Boolean(apiId && apiHash);
+      const localVideoPath = path.join(tmpDir, `${videoId}.mp4`);
 
-      let fileInfo;
-      try {
-        fileInfo = await telegramApiJson(apiBase, botToken, "getFile", { file_id: mediaObj.file_id });
-      } catch (err) {
-        if (String(err.message || "").toLowerCase().includes("file is too big")) {
-          await telegramApiJson(apiBase, botToken, "editMessageText", {
-            chat_id: chatId,
-            message_id: statusMsg.message_id,
-            text: "⚠️ Telegram standard Bot API allows direct downloads up to 20 MB.\n\nFor larger videos: paste a direct `https://...mp4` stream link with Title (or configure a Telegram Local Bot API Server via `TELEGRAM_API_BASE`).",
-            parse_mode: "Markdown",
-          });
-          return { ok: false, reason: "file_too_big" };
+      const fetchTelegramThumb = async () => {
+        const thumbObj = mediaObj.thumbnail || mediaObj.thumb;
+        if (!thumbObj || !thumbObj.file_id) return false;
+        try {
+          const thumbInfo = await telegramApiJson(apiBase, botToken, "getFile", { file_id: thumbObj.file_id });
+          if (!thumbInfo?.file_path) return false;
+          const thumbUrl = String(thumbInfo.file_path).startsWith("http")
+            ? thumbInfo.file_path
+            : `${apiBase}/file/bot${botToken}/${thumbInfo.file_path}`;
+          await downloadFileToPath(thumbUrl, thumbPath);
+          return fs.existsSync(thumbPath) && fs.statSync(thumbPath).size > 0;
+        } catch (_) {
+          return false;
         }
-        throw err;
+      };
+
+      const sendFileTooBigGuide = async () => {
+        await telegramApiJson(apiBase, botToken, "editMessageText", {
+          chat_id: chatId,
+          message_id: statusMsg.message_id,
+          text: [
+            "⚠️ *20 MB Se Badi File (Telegram Bot API Limit)*",
+            "",
+            "Telegram Bot API bina setup ke sirf *20 MB* tak direct download allow karta hai. Ise *2 GB tak* unlock karne ke 2 aasan tarike hain:",
+            "",
+            "1️⃣ *2 GB Direct Telegram Upload On Karein (Recommended):*",
+            "• https://my.telegram.org par login karke *API Development Tools* se apna free `API ID` aur `API Hash` lein.",
+            "• Render Dashboard (`vidvora-share-bot` → *Environment*) me `TELEGRAM_API_ID` aur `TELEGRAM_API_HASH` add karke redeploy karein.",
+            "• Iske baad aap *2 GB tak ke videos* seedha bot par upload kar payenge!",
+            "",
+            "2️⃣ *Instant Direct Link Mode (Unlimited Size):*",
+            "• Koi bhi direct `https://...mp4` stream link + Title bhej dein.",
+          ].join("\n"),
+          parse_mode: "Markdown",
+        });
+      };
+
+      let downloadedViaBotApi = false;
+      let mtprotoStreamOnly = false;
+      let hasDownloadedLocalVideo = false;
+      let clipExists = false;
+      let thumbExists = false;
+
+      if (reportedFileSize <= BOT_API_MAX_BYTES) {
+        try {
+          const fileInfo = await telegramApiJson(apiBase, botToken, "getFile", { file_id: mediaObj.file_id });
+          const filePath = fileInfo.file_path;
+          const downloadUrl = String(filePath || "").startsWith("http")
+            ? filePath
+            : `${apiBase}/file/bot${botToken}/${filePath}`;
+          await downloadFileToPath(downloadUrl, localVideoPath);
+          downloadedViaBotApi = true;
+          hasDownloadedLocalVideo = true;
+        } catch (err) {
+          if (!String(err.message || "").toLowerCase().includes("file is too big")) {
+            throw err;
+          }
+        }
       }
 
-      const filePath = fileInfo.file_path;
-      const downloadUrl = filePath.startsWith("http")
-        ? filePath
-        : `${apiBase}/file/bot${botToken}/${filePath}`;
-      const localVideoPath = path.join(tmpDir, `${videoId}.mp4`);
-      await downloadFileToPath(downloadUrl, localVideoPath);
+      if (!downloadedViaBotApi) {
+        if (!hasMtproto) {
+          await sendFileTooBigGuide();
+          return { ok: false, reason: "file_too_big" };
+        }
 
-      const { clipExists, thumbExists } = await createFiveSecondPreviewAndThumbnail({
-        inputPathOrUrl: localVideoPath,
-        outputClipPath: clipPath,
-        outputThumbPath: thumbPath,
-        durationSeconds: message.video?.duration || 0,
-        previewSeconds: DEFAULT_PREVIEW_SECONDS,
-      });
+        thumbExists = await fetchTelegramThumb();
+
+        if (reportedFileSize > 0 && reportedFileSize <= WEBHOOK_PREVIEW_MAX_BYTES) {
+          await downloadTelegramFileViaMtproto({
+            apiId,
+            apiHash,
+            botToken,
+            tgFileId: mediaObj.file_id,
+            tgChatId: chatId,
+            tgMessageId: message.message_id,
+            tgFileSize: reportedFileSize,
+            destPath: localVideoPath,
+            telegramLibOverride,
+          });
+          hasDownloadedLocalVideo = fs.existsSync(localVideoPath) && fs.statSync(localVideoPath).size > 0;
+        } else {
+          // Giant video (>60 MB up to 2 GB): publish immediately using Telegram thumbnail and stream bytes on-demand via MTProto Range requests
+          mtprotoStreamOnly = true;
+        }
+      }
+
+      if (hasDownloadedLocalVideo) {
+        const generated = await createFiveSecondPreviewAndThumbnail({
+          inputPathOrUrl: localVideoPath,
+          outputClipPath: clipPath,
+          outputThumbPath: thumbPath,
+          durationSeconds: message.video?.duration || 0,
+          previewSeconds: DEFAULT_PREVIEW_SECONDS,
+        });
+        clipExists = generated.clipExists;
+        thumbExists = generated.thumbExists || thumbExists;
+      }
 
       const baseHost = functionBaseUrl.replace(/\/+$/, "");
       const videoSig = signStreamTarget(videoId, "video", playbackSecret);
@@ -918,12 +1335,14 @@ async function handleTelegramUpdate({ update, db, storage, functionBaseUrl, play
       let storageUploadSucceeded = false;
       try {
         if (bucket && typeof bucket.upload === "function") {
-          const videoDest = `videos/${videoId}/video.mp4`;
-          await bucket.upload(localVideoPath, {
-            destination: videoDest,
-            metadata: { contentType: mediaObj.mime_type || "video/mp4" },
-          });
-          storageUploadSucceeded = true;
+          if (hasDownloadedLocalVideo && !mtprotoStreamOnly) {
+            const videoDest = `videos/${videoId}/video.mp4`;
+            await bucket.upload(localVideoPath, {
+              destination: videoDest,
+              metadata: { contentType: mimeType },
+            });
+            storageUploadSucceeded = true;
+          }
 
           if (thumbExists) {
             await bucket.upload(thumbPath, {
@@ -944,10 +1363,10 @@ async function handleTelegramUpdate({ update, db, storage, functionBaseUrl, play
         console.warn("Firebase Storage unavailable (Spark/unprovisioned bucket), using Telegram stream fallback:", storageErr.message);
       }
 
-      if (!storageUploadSucceeded && thumbExists) {
+      if (!finalThumbPath && thumbExists) {
         finalThumbPath = await encodeCrispThumbDataUri(thumbPath);
       }
-      if (!storageUploadSucceeded) {
+      if (!storageUploadSucceeded && hasDownloadedLocalVideo && !mtprotoStreamOnly) {
         try {
           await fs.promises.mkdir(STREAM_CACHE_DIR, { recursive: true });
           await fs.promises.copyFile(localVideoPath, path.join(STREAM_CACHE_DIR, `${videoId}.mp4`));
@@ -957,7 +1376,13 @@ async function handleTelegramUpdate({ update, db, storage, functionBaseUrl, play
         }
       }
 
-      var tgFileIdForDoc = storageUploadSucceeded ? null : String(mediaObj.file_id || "");
+      if (!storageUploadSucceeded) {
+        tgFileIdForDoc = String(mediaObj.file_id || "");
+        tgChatIdForDoc = String(chatId);
+        tgMessageIdForDoc = Number(message.message_id);
+        tgFileSizeForDoc = reportedFileSize;
+        tgMimeTypeForDoc = mimeType;
+      }
     } else {
       // Direct URL flow (supports unlimited file sizes hosted on Bunny/Cloudflare/S3/CDN)
       const parsedMeta = parseTitleAndDescription(directUrlMsg.caption, "Stream Video");
@@ -1000,8 +1425,6 @@ async function handleTelegramUpdate({ update, db, storage, functionBaseUrl, play
       if (!storageThumbUploaded && thumbExists) {
         finalThumbPath = await encodeCrispThumbDataUri(thumbPath);
       }
-
-      var tgFileIdForDoc = null;
     }
 
     const now = new Date();
@@ -1019,6 +1442,18 @@ async function handleTelegramUpdate({ update, db, storage, functionBaseUrl, play
     };
     if (tgFileIdForDoc) {
       videoDocPayload.tgFileId = tgFileIdForDoc;
+    }
+    if (tgChatIdForDoc) {
+      videoDocPayload.tgChatId = tgChatIdForDoc;
+    }
+    if (tgMessageIdForDoc) {
+      videoDocPayload.tgMessageId = tgMessageIdForDoc;
+    }
+    if (tgFileSizeForDoc > 0) {
+      videoDocPayload.tgFileSize = tgFileSizeForDoc;
+    }
+    if (tgMimeTypeForDoc) {
+      videoDocPayload.tgMimeType = tgMimeTypeForDoc;
     }
     await db.collection("videos").doc(videoId).set(videoDocPayload);
 
@@ -1050,6 +1485,9 @@ async function handleTelegramUpdate({ update, db, storage, functionBaseUrl, play
       previewSeconds: DEFAULT_PREVIEW_SECONDS,
       shareLinkBaseUrl: resolvedShareBase,
     });
+    const watchInlineMarkup = {
+      inline_keyboard: [[{ text: "▶️ Watch Full Video on VidVora", url: watchUrl }]],
+    };
 
     if (fs.existsSync(clipPath) && fs.statSync(clipPath).size > 0) {
       await sendTelegramVideoClip(apiBase, botToken, {
@@ -1082,6 +1520,7 @@ async function handleTelegramUpdate({ update, db, storage, functionBaseUrl, play
           message_id: statusMsg.message_id,
           text: caption,
           parse_mode: "Markdown",
+          reply_markup: watchInlineMarkup,
         });
       }
     } else {
@@ -1090,6 +1529,7 @@ async function handleTelegramUpdate({ update, db, storage, functionBaseUrl, play
         message_id: statusMsg.message_id,
         text: caption,
         parse_mode: "Markdown",
+        reply_markup: watchInlineMarkup,
       });
     }
 
@@ -1200,13 +1640,13 @@ async function ensureTelegramVideoCached({ videoId, tgFileId, db }) {
     }
 
     const tmpPart = `${cachedPath}.part.${crypto.randomBytes(4).toString("hex")}`;
-    const bytes = Buffer.from(await upstream.arrayBuffer());
-    if (!bytes.length) {
+    const written = await writeFetchResponseToFile(upstream, tmpPart);
+    if (!written) {
+      await fs.promises.unlink(tmpPart).catch(() => {});
       const err = new Error("Empty video file from Telegram.");
       err.statusCode = 502;
       throw err;
     }
-    await fs.promises.writeFile(tmpPart, bytes);
     await fs.promises.rename(tmpPart, cachedPath);
     pruneStreamCacheIfNeeded();
     return cachedPath;
@@ -1276,7 +1716,229 @@ async function serveLocalFileWithRange({ filePath, contentType, method, rangeHea
   stream.pipe(res);
 }
 
-async function handleStreamPublicVideo({ videoId, kind, sig, method = "GET", rangeHeader, res, db, storage, playbackSecret }) {
+async function streamTelegramMtprotoWithRange({
+  videoData,
+  method = "GET",
+  rangeHeader,
+  res,
+  db,
+  telegramLibOverride = null,
+}) {
+  const { botToken, apiId, apiHash } = await resolveBotRuntimeConfig(db);
+  if (!botToken || !apiId || !apiHash) {
+    const err = new Error("MTProto streaming requires TELEGRAM_API_ID and TELEGRAM_API_HASH.");
+    err.statusCode = 502;
+    throw err;
+  }
+
+  const { client, libs } = await getMtprotoClient({ apiId, apiHash, botToken, telegramLibOverride });
+  const isHead = String(method || "GET").toUpperCase() === "HEAD";
+  const contentType = String(videoData.tgMimeType || "video/mp4").startsWith("video/")
+    ? String(videoData.tgMimeType)
+    : "video/mp4";
+
+  let descriptor = await resolveMtprotoMediaDescriptor({
+    client,
+    libs,
+    tgFileId: videoData.tgFileId,
+    tgChatId: videoData.tgChatId || null,
+    tgMessageId: videoData.tgMessageId || null,
+    tgFileSize: Number(videoData.tgFileSize || 0) || 0,
+    forceRefresh: false,
+  });
+
+  if ((!descriptor.fileSize || descriptor.fileSize <= 0) && videoData.tgChatId && videoData.tgMessageId) {
+    descriptor = await resolveMtprotoMediaDescriptor({
+      client,
+      libs,
+      tgFileId: videoData.tgFileId,
+      tgChatId: videoData.tgChatId,
+      tgMessageId: videoData.tgMessageId,
+      tgFileSize: 0,
+      forceRefresh: true,
+    });
+  }
+
+  const fileSize = Number(descriptor.fileSize || videoData.tgFileSize || 0);
+  if (!Number.isFinite(fileSize) || fileSize <= 0) {
+    const err = new Error("Unable to determine Telegram video byte size for streaming.");
+    err.statusCode = 502;
+    throw err;
+  }
+
+  let start = 0;
+  let end = fileSize - 1;
+  let isPartial = false;
+
+  if (rangeHeader) {
+    const parsed = parseHttpByteRange(rangeHeader, fileSize);
+    if (parsed && parsed.invalid) {
+      res.writeHead(416, { "Content-Range": `bytes */${fileSize}` });
+      res.end();
+      return;
+    }
+    if (parsed) {
+      start = parsed.start;
+      end = parsed.end;
+      isPartial = true;
+    }
+  }
+
+  const chunkSize = end - start + 1;
+  const responseHeaders = isPartial
+    ? {
+        "Content-Range": `bytes ${start}-${end}/${fileSize}`,
+        "Accept-Ranges": "bytes",
+        "Content-Length": chunkSize,
+        "Content-Type": contentType,
+        "Cache-Control": "private, no-cache",
+      }
+    : {
+        "Content-Length": fileSize,
+        "Content-Type": contentType,
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "private, no-cache",
+      };
+
+  if (isHead) {
+    res.writeHead(isPartial ? 206 : 200, responseHeaders);
+    res.end();
+    return;
+  }
+
+  const startIteration = async (desc) => {
+    const alignedStart = Math.floor(start / MTPROTO_CHUNK_SIZE) * MTPROTO_CHUNK_SIZE;
+    const chunksNeeded = Math.ceil((end - alignedStart + 1) / MTPROTO_CHUNK_SIZE) + 1;
+    const iter = client.iterDownload({
+      file: desc.location,
+      dcId: desc.dcId,
+      offset: libs.bigInt(alignedStart),
+      requestSize: MTPROTO_CHUNK_SIZE,
+      limit: chunksNeeded,
+    });
+    const first = await iter.next();
+    return { iter, first, alignedStart };
+  };
+
+  let iterState;
+  try {
+    iterState = await startIteration(descriptor);
+  } catch (err) {
+    const msg = String(err?.errorMessage || err?.message || "");
+    if (msg.includes("FILE_REFERENCE") && videoData.tgChatId && videoData.tgMessageId) {
+      descriptor = await resolveMtprotoMediaDescriptor({
+        client,
+        libs,
+        tgFileId: videoData.tgFileId,
+        tgChatId: videoData.tgChatId,
+        tgMessageId: videoData.tgMessageId,
+        tgFileSize: fileSize,
+        forceRefresh: true,
+      });
+      iterState = await startIteration(descriptor);
+    } else {
+      throw err;
+    }
+  }
+
+  const { iter, first, alignedStart } = iterState;
+  let aborted = false;
+  if (typeof res.on === "function") {
+    res.on("close", () => {
+      aborted = true;
+      if (typeof iter.return === "function") {
+        Promise.resolve(iter.return()).catch(() => {});
+      }
+    });
+  }
+
+  res.writeHead(isPartial ? 206 : 200, responseHeaders);
+
+  let skipBytes = start - alignedStart;
+  let remaining = chunkSize;
+
+  const emitChunk = async (rawChunk) => {
+    if (aborted || res.destroyed || res.writableEnded || remaining <= 0) return false;
+    let slice = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
+    if (!slice.length) return false;
+
+    if (skipBytes > 0) {
+      if (slice.length <= skipBytes) {
+        skipBytes -= slice.length;
+        return true;
+      }
+      slice = slice.subarray(skipBytes);
+      skipBytes = 0;
+    }
+
+    if (slice.length > remaining) {
+      slice = slice.subarray(0, remaining);
+    }
+
+    if (slice.length > 0) {
+      remaining -= slice.length;
+      const canContinue = res.write(slice);
+      if (!canContinue && !aborted && !res.destroyed) {
+        await new Promise((resolve) => {
+          const cleanup = () => {
+            if (typeof res.off === "function") {
+              res.off("drain", onDone);
+              res.off("close", onDone);
+            } else if (typeof res.removeListener === "function") {
+              res.removeListener("drain", onDone);
+              res.removeListener("close", onDone);
+            }
+          };
+          const onDone = () => {
+            cleanup();
+            resolve();
+          };
+          if (typeof res.once === "function") {
+            res.once("drain", onDone);
+            res.once("close", onDone);
+          } else {
+            resolve();
+          }
+        });
+      }
+    }
+    return remaining > 0;
+  };
+
+  try {
+    if (first && !first.done) {
+      const keepGoing = await emitChunk(first.value);
+      if (keepGoing && !aborted) {
+        while (remaining > 0 && !aborted) {
+          const step = await iter.next();
+          if (step.done) break;
+          const cont = await emitChunk(step.value);
+          if (!cont) break;
+        }
+      }
+    }
+  } finally {
+    if (typeof iter.return === "function") {
+      await Promise.resolve(iter.return()).catch(() => {});
+    }
+    if (!res.writableEnded) {
+      res.end();
+    }
+  }
+}
+
+async function handleStreamPublicVideo({
+  videoId,
+  kind,
+  sig,
+  method = "GET",
+  rangeHeader,
+  res,
+  db,
+  storage,
+  playbackSecret,
+  telegramLibOverride = null,
+}) {
   const cleanVideoId = String(videoId || "").trim();
   const cleanKind = kind === "thumb" ? "thumb" : "video";
   const cleanSig = String(sig || "").trim();
@@ -1369,27 +2031,59 @@ async function handleStreamPublicVideo({ videoId, kind, sig, method = "GET", ran
     }
   }
 
-  // 2. Fallback: Cache Telegram file locally in /tmp & serve true HTTP 206 byte ranges for ExoPlayer
+  // 2. Fallback: Stream Telegram file directly (MTProto byte-ranges for >20 MB, or /tmp cache for <=20 MB)
   if (cleanKind === "video" && videoData.tgFileId) {
     try {
-      const cachedPath = await ensureTelegramVideoCached({
-        videoId: cleanVideoId,
-        tgFileId: videoData.tgFileId,
-        db,
-      });
-      await serveLocalFileWithRange({
-        filePath: cachedPath,
-        contentType: "video/mp4",
-        method,
-        rangeHeader,
-        cacheControl: "private, no-cache",
-        res,
-      });
-      return;
+      const knownFileSize = Number(videoData.tgFileSize || 0) || 0;
+      if (knownFileSize > BOT_API_MAX_BYTES) {
+        await streamTelegramMtprotoWithRange({
+          videoData,
+          method,
+          rangeHeader,
+          res,
+          db,
+          telegramLibOverride,
+        });
+        return;
+      }
+
+      try {
+        const cachedPath = await ensureTelegramVideoCached({
+          videoId: cleanVideoId,
+          tgFileId: videoData.tgFileId,
+          db,
+        });
+        await serveLocalFileWithRange({
+          filePath: cachedPath,
+          contentType: "video/mp4",
+          method,
+          rangeHeader,
+          cacheControl: "private, no-cache",
+          res,
+        });
+        return;
+      } catch (botCacheErr) {
+        if (String(botCacheErr?.message || "").toLowerCase().includes("file is too big")) {
+          await streamTelegramMtprotoWithRange({
+            videoData,
+            method,
+            rangeHeader,
+            res,
+            db,
+            telegramLibOverride,
+          });
+          return;
+        }
+        throw botCacheErr;
+      }
     } catch (tgStreamErr) {
       const status = tgStreamErr.statusCode || 502;
-      res.writeHead(status, { "Content-Type": "text/plain" });
-      res.end(tgStreamErr.message || "Unable to stream video from Telegram.");
+      if (!res.headersSent) {
+        res.writeHead(status, { "Content-Type": "text/plain" });
+        res.end(tgStreamErr.message || "Unable to stream video from Telegram.");
+      } else if (!res.writableEnded) {
+        res.end();
+      }
       return;
     }
   }
@@ -1401,8 +2095,13 @@ async function handleStreamPublicVideo({ videoId, kind, sig, method = "GET", ran
 module.exports = {
   SHARE_LINK_BASE_URL,
   SUPERADMIN_PASSKEY,
+  BOT_API_MAX_BYTES,
+  WEBHOOK_PREVIEW_MAX_BYTES,
+  MTPROTO_CHUNK_SIZE,
   hashToken,
   generateAccessToken,
+  escapeMarkdown,
+  telegramApiJson,
   signStreamTarget,
   verifyStreamTarget,
   parseLoginCommand,
@@ -1413,8 +2112,10 @@ module.exports = {
   isAllowedTelegramVideoMessage,
   buildShareMessageCaption,
   createFiveSecondPreviewAndThumbnail,
+  decodeTelegramBotFileId,
   resolveBotRuntimeConfig,
   authenticateCreatorMember,
   handleTelegramUpdate,
+  streamTelegramMtprotoWithRange,
   handleStreamPublicVideo,
 };

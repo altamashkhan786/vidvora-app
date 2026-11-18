@@ -10,6 +10,7 @@ import android.util.Base64
 import android.util.Log
 import com.example.BuildConfig
 import com.example.R
+import com.example.data.model.AppUpdateConfig
 import com.example.data.model.CreatorEmailChangeResult
 import com.example.data.model.FirestoreAccessLink
 import com.example.data.model.FirestoreAppInstall
@@ -1053,6 +1054,7 @@ class FirestoreVideoRepository(
     val mainRaw = snapshot?.getString("telegramLink")
     val mainLink = if (!mainRaw.isNullOrBlank()) mainRaw.trim() else DEFAULT_TELEGRAM_LINK
     val creatorBotLink = normalizeTelegramUrl(snapshot?.getString("creatorBotLink").orEmpty())
+    val financeBotLink = normalizeTelegramUrl(snapshot?.getString("financeBotLink").orEmpty())
     val shareLinkBaseUrl = normalizeShareLinkBaseUrl(snapshot?.getString("shareLinkBaseUrl").orEmpty())
     val rawMap = snapshot?.get("categoryLinks") as? Map<*, *>
     val categoryMap = TelegramChannelCategory.entries.associate { category ->
@@ -1095,6 +1097,7 @@ class FirestoreVideoRepository(
     return TelegramConfig(
       mainLink = mainLink,
       creatorBotLink = creatorBotLink,
+      financeBotLink = financeBotLink,
       shareLinkBaseUrl = shareLinkBaseUrl,
       categoryLinks = categoryMap,
       categoryNames = categoryNamesMap,
@@ -1153,6 +1156,7 @@ class FirestoreVideoRepository(
     categoryNames: Map<String, String> = emptyMap(),
     deletedCategoryKeys: List<String> = emptyList(),
     creatorBotLink: String = "",
+    financeBotLink: String = "",
     shareLinkBaseUrl: String = ""
   ): Result<TelegramConfig> {
     return try {
@@ -1163,6 +1167,10 @@ class FirestoreVideoRepository(
       val cleanCreatorBotLink = normalizeTelegramUrl(creatorBotLink)
       if (cleanCreatorBotLink.length > 500) {
         return Result.failure(IllegalArgumentException("Creator Bot link cannot exceed 500 characters."))
+      }
+      val cleanFinanceBotLink = normalizeTelegramUrl(financeBotLink)
+      if (cleanFinanceBotLink.length > 500) {
+        return Result.failure(IllegalArgumentException("Finance Bot link cannot exceed 500 characters."))
       }
       val cleanShareLinkBaseUrl = normalizeShareLinkBaseUrl(shareLinkBaseUrl)
       if (cleanShareLinkBaseUrl.length > 500) {
@@ -1262,6 +1270,7 @@ class FirestoreVideoRepository(
       val data = hashMapOf<String, Any>(
         "telegramLink" to cleanMain,
         "creatorBotLink" to cleanCreatorBotLink,
+        "financeBotLink" to cleanFinanceBotLink,
         "shareLinkBaseUrl" to cleanShareLinkBaseUrl,
         "categoryLinks" to sanitizedCategories,
         "categoryNames" to sanitizedCategoryNames,
@@ -1276,6 +1285,7 @@ class FirestoreVideoRepository(
         TelegramConfig(
           mainLink = cleanMain,
           creatorBotLink = cleanCreatorBotLink,
+          financeBotLink = cleanFinanceBotLink,
           shareLinkBaseUrl = cleanShareLinkBaseUrl,
           categoryLinks = sanitizedCategories,
           categoryNames = sanitizedCategoryNames,
@@ -1313,6 +1323,127 @@ class FirestoreVideoRepository(
       if (!link.isNullOrBlank()) link.trim() else DEFAULT_TELEGRAM_LINK
     } catch (e: Exception) {
       DEFAULT_TELEGRAM_LINK
+    }
+  }
+
+  // --- Self-Hosted In-App Update Config ---
+
+  private fun parseAppUpdateConfigSnapshot(snapshot: DocumentSnapshot?): AppUpdateConfig {
+    if (snapshot == null || !snapshot.exists()) {
+      return AppUpdateConfig(
+        latestVersionCode = BuildConfig.VERSION_CODE,
+        latestVersionName = BuildConfig.VERSION_NAME,
+        apkUrl = DEFAULT_APK_DOWNLOAD_URL
+      )
+    }
+    val isEnabled = snapshot.getBoolean("isEnabled") ?: false
+    val latestVersionCode = (snapshot.getLong("latestVersionCode")?.toInt() ?: BuildConfig.VERSION_CODE)
+      .coerceAtLeast(1)
+    val latestVersionName = snapshot.getString("latestVersionName")?.trim()
+      ?.takeIf { it.isNotBlank() } ?: BuildConfig.VERSION_NAME
+    val title = snapshot.getString("title")?.trim()
+      ?.takeIf { it.isNotBlank() } ?: "New VidVora Update Available"
+    val message = snapshot.getString("message")?.trim()
+      ?: "Faster video playback and improvements are ready. Update now!"
+    val apkUrl = snapshot.getString("apkUrl")?.trim()
+      ?.takeIf { it.isNotBlank() } ?: DEFAULT_APK_DOWNLOAD_URL
+    val isForceUpdate = snapshot.getBoolean("isForceUpdate") ?: false
+    return AppUpdateConfig(
+      isEnabled = isEnabled,
+      latestVersionCode = latestVersionCode,
+      latestVersionName = latestVersionName,
+      title = title,
+      message = message,
+      apkUrl = apkUrl,
+      isForceUpdate = isForceUpdate
+    )
+  }
+
+  fun getAppUpdateConfigFlow(): Flow<AppUpdateConfig> = callbackFlow {
+    val registration = db.collection("appConfig").document(APP_UPDATE_DOC_ID)
+      .addSnapshotListener { snapshot, error ->
+        if (error != null) {
+          Log.w(TAG, "Error listening to appUpdate config: ${error.message}")
+          trySend(
+            AppUpdateConfig(
+              latestVersionCode = BuildConfig.VERSION_CODE,
+              latestVersionName = BuildConfig.VERSION_NAME,
+              apkUrl = DEFAULT_APK_DOWNLOAD_URL
+            )
+          )
+          return@addSnapshotListener
+        }
+        trySend(parseAppUpdateConfigSnapshot(snapshot))
+      }
+    awaitClose { registration.remove() }
+  }
+
+  suspend fun fetchAppUpdateConfigFromServer(): AppUpdateConfig? {
+    return try {
+      val snapshot = db.collection("appConfig").document(APP_UPDATE_DOC_ID)
+        .get(com.google.firebase.firestore.Source.SERVER)
+        .await()
+      parseAppUpdateConfigSnapshot(snapshot)
+    } catch (e: Exception) {
+      Log.w(TAG, "Server refresh on appConfig/appUpdate skipped: ${e.message}")
+      null
+    }
+  }
+
+  suspend fun updateAppUpdateConfig(
+    isEnabled: Boolean,
+    latestVersionCode: Int,
+    latestVersionName: String,
+    title: String,
+    message: String,
+    apkUrl: String,
+    isForceUpdate: Boolean
+  ): Result<AppUpdateConfig> {
+    return try {
+      val cleanVersionName = latestVersionName.trim()
+      val cleanTitle = title.trim()
+      val cleanMessage = message.trim()
+      val cleanApkUrl = apkUrl.trim().ifBlank { DEFAULT_APK_DOWNLOAD_URL }
+
+      val validationError = validateAppUpdateInput(
+        latestVersionCode = latestVersionCode,
+        latestVersionName = cleanVersionName,
+        title = cleanTitle,
+        message = cleanMessage,
+        apkUrl = cleanApkUrl
+      )
+      if (validationError != null) {
+        return Result.failure(IllegalArgumentException(validationError))
+      }
+
+      val payload = hashMapOf<String, Any>(
+        "isEnabled" to isEnabled,
+        "latestVersionCode" to latestVersionCode,
+        "latestVersionName" to cleanVersionName,
+        "title" to cleanTitle,
+        "message" to cleanMessage,
+        "apkUrl" to cleanApkUrl,
+        "isForceUpdate" to isForceUpdate,
+        "updatedAt" to FieldValue.serverTimestamp()
+      )
+      db.collection("appConfig").document(APP_UPDATE_DOC_ID)
+        .set(payload)
+        .await()
+
+      Result.success(
+        AppUpdateConfig(
+          isEnabled = isEnabled,
+          latestVersionCode = latestVersionCode,
+          latestVersionName = cleanVersionName,
+          title = cleanTitle,
+          message = cleanMessage,
+          apkUrl = cleanApkUrl,
+          isForceUpdate = isForceUpdate
+        )
+      )
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to update appUpdate config in Firestore", e)
+      Result.failure(e)
     }
   }
 
@@ -1365,7 +1496,7 @@ class FirestoreVideoRepository(
       val cleanNew = newPasskey.trim()
       val conflictingMember = getMemberByPasskey(cleanNew)
       if (conflictingMember != null) {
-        return Result.failure(IllegalArgumentException("This Master Key is already used by a Member. Please choose a unique key."))
+        return Result.failure(IllegalArgumentException("This Password is already used by a Member. Please choose a unique password."))
       }
 
       val newHash = hashSecretExact(cleanNew)
@@ -1400,7 +1531,7 @@ class FirestoreVideoRepository(
       passkey = doc.getString("passkey") ?: "",
       role = normalizedRole,
       isActive = doc.getBoolean("isActive") ?: true,
-      createdAt = doc.getTimestamp("createdAt") ?: Timestamp.now(),
+      createdAt = doc.getTimestamp("createdAt") ?: Timestamp(0, 0),
       totalEarning = (doc.get("totalEarning") as? Number)?.toDouble() ?: 0.0,
       creditedViews = (doc.get("creditedViews") as? Number)?.toLong()?.coerceAtLeast(0L) ?: 0L,
       viewRatePer1000 = (doc.get("viewRatePer1000") as? Number)?.toDouble()?.takeIf { it >= 0.0 }
@@ -1424,7 +1555,7 @@ class FirestoreVideoRepository(
             null
           }
         } ?: emptyList()
-        trySend(members)
+        trySend(sortMembersNewestFirst(members))
       }
     awaitClose { registration.remove() }
   }
@@ -1470,7 +1601,7 @@ class FirestoreVideoRepository(
         .get()
         .await()
       if (!existingWithKey.isEmpty) {
-        return Result.failure(IllegalArgumentException("This Master Key is already assigned to another member."))
+        return Result.failure(IllegalArgumentException("This Password is already assigned to another member."))
       }
 
       val memberId = "mem_" + UUID.randomUUID().toString().replace("-", "").take(10)
@@ -1608,7 +1739,7 @@ class FirestoreVideoRepository(
           (doc.getString("passkey") ?: "").trim() == cleanPass
       }
       if (hasCollision) {
-        return Result.failure(IllegalArgumentException("This Master Key is already assigned to another member."))
+        return Result.failure(IllegalArgumentException("This Password is already assigned to another member."))
       }
 
       val resolvedRole = if (role != null) MemberRole.normalize(role) else previousMember.role
@@ -1936,7 +2067,7 @@ class FirestoreVideoRepository(
         .get()
         .await()
       if (existingWithKey.documents.any { it.id != cleanId }) {
-        return Result.failure(IllegalArgumentException("This Master Key is already in use. Please choose another key."))
+        return Result.failure(IllegalArgumentException("This Password is already in use. Please choose another password."))
       }
 
       db.collection("members").document(cleanId).update("passkey", cleanNew).await()
@@ -3012,8 +3143,10 @@ class FirestoreVideoRepository(
     private const val KEY_SUPPORT_USER_NAME = "support_user_name"
     private const val HEARTBEAT_THROTTLE_MS = 60 * 60 * 1000L
     private const val ADMIN_SECURITY_DOC_ID = "adminSecurity"
+    private const val APP_UPDATE_DOC_ID = "appUpdate"
 
     const val DEFAULT_TELEGRAM_LINK = "https://t.me/VidVoraApp"
+    const val DEFAULT_APK_DOWNLOAD_URL = "https://d1mn8mrvlzisg5.cloudfront.net/vidvora.apk"
     const val SHARE_LINK_BASE_URL = "https://d1mn8mrvlzisg5.cloudfront.net/index.html?link="
     const val MIN_WITHDRAWAL_AMOUNT = 500.0
     const val DEFAULT_VIEW_RATE_PER_1000 = 190.0
@@ -3169,10 +3302,10 @@ class FirestoreVideoRepository(
       val emailError = validateEmailInput(emailOrPhone)
       if (emailError != null) return emailError
       if (cleanPass.length < MIN_PASSKEY_LENGTH) {
-        return "Master Key must be at least $MIN_PASSKEY_LENGTH characters."
+        return "Password must be at least $MIN_PASSKEY_LENGTH characters."
       }
       if (cleanPass == FirebaseAuthAdminRepository.ADMIN_MASTER_KEY) {
-        return "Please choose a different Master Key."
+        return "Please choose a different Password."
       }
       return null
     }
@@ -3186,15 +3319,15 @@ class FirestoreVideoRepository(
       val cleanCurrent = currentInput.trim()
       val cleanNew = newPasskey.trim()
       val cleanConfirm = confirmPasskey.trim()
-      if (cleanCurrent.isBlank()) return "Please enter your current Master Key."
-      if (cleanCurrent != storedPasskey.trim()) return "Current Master Key is incorrect."
+      if (cleanCurrent.isBlank()) return "Please enter your current Password."
+      if (cleanCurrent != storedPasskey.trim()) return "Current Password is incorrect."
       if (cleanNew.length < MIN_PASSKEY_LENGTH) {
-        return "New Master Key must be at least $MIN_PASSKEY_LENGTH characters."
+        return "New Password must be at least $MIN_PASSKEY_LENGTH characters."
       }
-      if (cleanNew == cleanCurrent) return "New Master Key must be different from current Master Key."
-      if (cleanNew != cleanConfirm) return "New Master Key and Confirm Master Key do not match."
+      if (cleanNew == cleanCurrent) return "New Password must be different from current Password."
+      if (cleanNew != cleanConfirm) return "New Password and Confirm Password do not match."
       if (cleanNew == FirebaseAuthAdminRepository.ADMIN_MASTER_KEY) {
-        return "This Master Key is reserved. Please choose another key."
+        return "This Password is reserved. Please choose another password."
       }
       return null
     }
@@ -3214,22 +3347,22 @@ class FirestoreVideoRepository(
       val cleanCurrent = currentInput.trim()
       val cleanNew = newPasskey.trim()
       val cleanConfirm = confirmPasskey.trim()
-      if (cleanCurrent.isBlank()) return "Please enter your current Admin Master Key."
+      if (cleanCurrent.isBlank()) return "Please enter your current Admin Password."
       val normalizedHash = storedHash?.trim()?.takeIf { it.length == 64 }
       val currentMatches = if (normalizedHash != null) {
         hashSecretExact(cleanCurrent) == normalizedHash
       } else {
         cleanCurrent == FirebaseAuthAdminRepository.ADMIN_MASTER_KEY
       }
-      if (!currentMatches) return "Current Admin Master Key is incorrect."
+      if (!currentMatches) return "Current Admin Password is incorrect."
       if (cleanNew.length < MIN_PASSKEY_LENGTH) {
-        return "New Master Key must be at least $MIN_PASSKEY_LENGTH characters."
+        return "New Password must be at least $MIN_PASSKEY_LENGTH characters."
       }
       if (cleanNew.length > 128) {
-        return "New Master Key cannot exceed 128 characters."
+        return "New Password cannot exceed 128 characters."
       }
-      if (cleanNew == cleanCurrent) return "New Master Key must be different from current Master Key."
-      if (cleanNew != cleanConfirm) return "New Master Key and Confirm Master Key do not match."
+      if (cleanNew == cleanCurrent) return "New Password must be different from current Password."
+      if (cleanNew != cleanConfirm) return "New Password and Confirm Password do not match."
       return null
     }
 
@@ -3399,6 +3532,54 @@ class FirestoreVideoRepository(
       return null
     }
 
+    fun validateAppUpdateInput(
+      latestVersionCode: Int,
+      latestVersionName: String,
+      title: String,
+      message: String,
+      apkUrl: String
+    ): String? {
+      val cleanVersionName = latestVersionName.trim()
+      val cleanTitle = title.trim()
+      val cleanMessage = message.trim()
+      val cleanUrl = apkUrl.trim()
+
+      if (latestVersionCode !in 1..999999) {
+        return "Version Code must be between 1 and 999999."
+      }
+      if (cleanVersionName.isBlank()) {
+        return "Version Name cannot be empty (e.g., 1.1)."
+      }
+      if (cleanVersionName.length > 40) {
+        return "Version Name cannot exceed 40 characters."
+      }
+      if (cleanTitle.isBlank()) {
+        return "Update popup title cannot be empty."
+      }
+      if (cleanTitle.length > 120) {
+        return "Update popup title cannot exceed 120 characters."
+      }
+      if (cleanMessage.length > 1000) {
+        return "Release notes cannot exceed 1000 characters."
+      }
+      if (cleanUrl.isBlank()) {
+        return "APK Download URL cannot be empty."
+      }
+      if (cleanUrl.length > 500) {
+        return "APK Download URL cannot exceed 500 characters."
+      }
+      if (cleanUrl.any { it.isWhitespace() }) {
+        return "APK Download URL cannot contain spaces."
+      }
+      val validProtocol = cleanUrl.startsWith("https://", ignoreCase = true) ||
+        cleanUrl.startsWith("http://", ignoreCase = true)
+      val hostPart = cleanUrl.substringAfter("://", "")
+      if (!validProtocol || hostPart.isBlank() || !hostPart.contains(".")) {
+        return "Please enter a valid http/https APK URL (e.g., $DEFAULT_APK_DOWNLOAD_URL)."
+      }
+      return null
+    }
+
     fun buildCreatorSupportChatId(memberId: String): String {
       val clean = memberId.trim().replace(Regex("[^a-zA-Z0-9_\\-]"), "_")
       return if (clean.isBlank()) "" else "creator_${clean.take(100)}"
@@ -3411,6 +3592,27 @@ class FirestoreVideoRepository(
 
     fun sortVideosNewestFirst(videos: List<FirestoreVideo>): List<FirestoreVideo> =
       videos.sortedWith(VIDEO_NEWEST_FIRST_COMPARATOR)
+
+    val MEMBER_NEWEST_FIRST_COMPARATOR: Comparator<FirestoreMember> =
+      compareByDescending<FirestoreMember> { it.createdAt.seconds }
+        .thenByDescending { it.createdAt.nanoseconds }
+        .thenByDescending { it.memberId }
+
+    fun sortMembersNewestFirst(members: List<FirestoreMember>): List<FirestoreMember> =
+      members.sortedWith(MEMBER_NEWEST_FIRST_COMPARATOR)
+
+    fun matchesMemberQuery(member: FirestoreMember, query: String): Boolean {
+      val cleanQuery = query.trim()
+      if (cleanQuery.isBlank()) return true
+      return member.name.contains(cleanQuery, ignoreCase = true) ||
+        member.emailOrPhone.contains(cleanQuery, ignoreCase = true)
+    }
+
+    fun filterMembersByQuery(members: List<FirestoreMember>, query: String): List<FirestoreMember> {
+      val cleanQuery = query.trim()
+      if (cleanQuery.isBlank()) return members
+      return members.filter { matchesMemberQuery(it, cleanQuery) }
+    }
 
     fun encodeJpegBytesAsDataUrl(bytes: ByteArray): String =
       "data:image/jpeg;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)

@@ -114,7 +114,7 @@ fun AdminLoginDialog(
       return
     }
     if (cleanKey.isBlank()) {
-      errorMessage = "Kripya Master Key enter karein"
+      errorMessage = "Kripya Password enter karein"
       return
     }
 
@@ -124,7 +124,7 @@ fun AdminLoginDialog(
       val success = onAuthenticatePasskey(cleanEmail, cleanKey)
       isPasskeyLoading = false
       if (!success) {
-        errorMessage = "Email ya Master Key galat hai."
+        errorMessage = "Email ya Password galat hai."
       } else {
         safeDismiss()
       }
@@ -204,14 +204,14 @@ fun AdminLoginDialog(
 
         Spacer(modifier = Modifier.height(10.dp))
 
-        // Master Key field
+        // Password field
         OutlinedTextField(
           value = passkey,
           onValueChange = {
             passkey = it
             errorMessage = null
           },
-          label = { Text("Master Key") },
+          label = { Text("Password") },
           leadingIcon = {
             Icon(Icons.Default.Key, contentDescription = null, tint = MasalaGold)
           },
@@ -219,7 +219,7 @@ fun AdminLoginDialog(
             IconButton(onClick = { isPasswordVisible = !isPasswordVisible }) {
               Icon(
                 imageVector = if (isPasswordVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                contentDescription = if (isPasswordVisible) "Hide key" else "Show key",
+                contentDescription = if (isPasswordVisible) "Hide password" else "Show password",
                 tint = MasalaTextMuted
               )
             }
@@ -262,7 +262,7 @@ fun AdminLoginDialog(
         Spacer(modifier = Modifier.height(6.dp))
 
         Text(
-          text = "Apna Email aur Master Key enter karein tabhi access milega.",
+          text = "Apna Email aur Password enter karein tabhi access milega.",
           color = MasalaTextMuted,
           fontSize = 11.sp,
           modifier = Modifier.align(Alignment.Start)

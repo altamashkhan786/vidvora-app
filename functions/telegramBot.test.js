@@ -864,3 +864,352 @@ test("handleTelegramUpdate allows direct Master Key login and switching accounts
     global.fetch = origFetch;
   }
 });
+
+function buildFakeTelegramBotFileId({
+  typeId = 4,
+  dcId = 5,
+  fileReference = Buffer.from([1, 2, 3, 4, 5]),
+  id = 9876543210123456n,
+  accessHash = 1122334455667788n,
+}) {
+  const chunks = [];
+  const head = Buffer.alloc(8);
+  head.writeUInt32LE((typeId | (1 << 25)) >>> 0, 0);
+  head.writeInt32LE(dcId, 4);
+  chunks.push(head);
+
+  const lenBuf = Buffer.from([fileReference.length]);
+  const totalLen = 1 + fileReference.length;
+  const padLen = (4 - (totalLen % 4)) % 4;
+  chunks.push(lenBuf, fileReference, Buffer.alloc(padLen));
+
+  const ids = Buffer.alloc(16);
+  ids.writeBigInt64LE(id, 0);
+  ids.writeBigInt64LE(accessHash, 8);
+  chunks.push(ids);
+
+  chunks.push(Buffer.from([35, 4])); // subVersion=35, majorVersion=4
+  const raw = Buffer.concat(chunks);
+
+  // Zero-byte RLE encode (matching Telegram Bot API file_id encoding)
+  const encoded = [];
+  for (let i = 0; i < raw.length; i += 1) {
+    if (raw[i] === 0x00) {
+      let count = 0;
+      while (i + count < raw.length && raw[i + count] === 0x00 && count < 255) {
+        count += 1;
+      }
+      encoded.push(0x00, count);
+      i += count - 1;
+    } else {
+      encoded.push(raw[i]);
+    }
+  }
+  return Buffer.from(encoded)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+test("decodeTelegramBotFileId extracts dcId, id, accessHash, and fileReference cleanly", () => {
+  const { decodeTelegramBotFileId } = require("./telegramBot");
+  const fakeRef = Buffer.from("ref_bytes_123");
+  const fileId = buildFakeTelegramBotFileId({
+    typeId: 4,
+    dcId: 5,
+    fileReference: fakeRef,
+    id: 123456789012345n,
+    accessHash: -4455667788990011n,
+  });
+
+  const decoded = decodeTelegramBotFileId(fileId);
+  assert.ok(decoded);
+  assert.equal(decoded.typeId, 4);
+  assert.equal(decoded.dcId, 5);
+  assert.equal(decoded.id, "123456789012345");
+  assert.equal(decoded.accessHash, "-4455667788990011");
+  assert.equal(Buffer.compare(decoded.fileReference, fakeRef), 0);
+});
+
+test("handleTelegramUpdate gives clear MTProto 2GB setup guide for >20MB video when apiId/apiHash missing", async () => {
+  const { handleTelegramUpdate } = require("./telegramBot");
+
+  const mockDb = {
+    collection: (name) => {
+      if (name === "appConfig") {
+        return {
+          doc: (id) => ({
+            get: async () =>
+              id === "telegramBot"
+                ? { exists: true, data: () => ({ botToken: "123:TESTTOKEN" }) }
+                : { exists: false, data: () => ({}) },
+          }),
+        };
+      }
+      if (name === "telegramBotSessions") {
+        return {
+          doc: () => ({
+            get: async () => ({ exists: true, data: () => ({ memberId: "admin", memberName: "Admin" }) }),
+          }),
+        };
+      }
+      return { doc: () => ({ get: async () => ({ exists: false }) }) };
+    },
+  };
+
+  const sentCalls = [];
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    const method = String(url).split("/").pop();
+    const body = typeof opts?.body === "string" ? JSON.parse(opts.body) : {};
+    sentCalls.push({ method, body });
+    return { ok: true, json: async () => ({ ok: true, result: { message_id: 99 } }) };
+  };
+
+  try {
+    const res = await handleTelegramUpdate({
+      update: {
+        message: {
+          message_id: 101,
+          chat: { id: 777 },
+          from: { id: "admin_user" },
+          video: {
+            file_id: "BAAC_LARGE_NO_MTPROTO",
+            file_size: 45 * 1024 * 1024,
+            mime_type: "video/mp4",
+          },
+          caption: "Large Action Movie",
+        },
+      },
+      db: mockDb,
+      storage: null,
+      functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+      playbackSecret: "sec",
+    });
+
+    assert.equal(res.ok, false);
+    assert.equal(res.reason, "file_too_big");
+    const editCall = sentCalls.find((c) => c.method === "editMessageText");
+    assert.ok(editCall);
+    assert.ok(editCall.body.text.includes("TELEGRAM_API_ID"));
+    assert.ok(editCall.body.text.includes("TELEGRAM_API_HASH"));
+    assert.ok(editCall.body.text.includes("2 GB"));
+  } finally {
+    global.fetch = origFetch;
+  }
+});
+
+test("handleTelegramUpdate publishes 150MB video immediately via MTProto mode & handleStreamPublicVideo streams HTTP 206 byte ranges", async () => {
+  const { PassThrough } = require("stream");
+  const { handleTelegramUpdate, handleStreamPublicVideo, MTPROTO_CHUNK_SIZE } = require("./telegramBot");
+
+  // Generate real 1x1 JPEG bytes for thumbnail
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "vidvora-mtproto-test-"));
+  let thumbBytes;
+  try {
+    const jpgPath = path.join(tmpDir, "thumb.jpg");
+    await execFileAsync("ffmpeg", ["-y", "-f", "lavfi", "-i", "color=c=blue:s=64x64", "-vframes", "1", jpgPath]);
+    thumbBytes = await fs.promises.readFile(jpgPath);
+  } finally {
+    await fs.promises.rm(tmpDir, { recursive: true, force: true });
+  }
+
+  const largeFileSize = 150 * 1024 * 1024;
+  const largeFileId = buildFakeTelegramBotFileId({
+    typeId: 4,
+    dcId: 5,
+    fileReference: Buffer.from("large_video_ref"),
+    id: 555666777888n,
+    accessHash: 999888777666n,
+  });
+
+  const videosStore = new Map();
+  const accessLinksStore = new Map();
+
+  const mockDb = {
+    collection: (name) => {
+      if (name === "appConfig") {
+        return {
+          doc: (id) => ({
+            get: async () =>
+              id === "telegramBot"
+                ? {
+                    exists: true,
+                    data: () => ({
+                      botToken: "123:TESTTOKEN",
+                      apiId: 2040,
+                      apiHash: "abcdef1234567890abcdef1234567890",
+                    }),
+                  }
+                : { exists: false, data: () => ({}) },
+          }),
+        };
+      }
+      if (name === "telegramBotSessions") {
+        return {
+          doc: () => ({
+            get: async () => ({
+              exists: true,
+              data: () => ({ memberId: "admin", memberName: "Admin", uploadCount: 0 }),
+            }),
+            set: async () => {},
+          }),
+        };
+      }
+      if (name === "videos") {
+        return {
+          doc: (id) => ({
+            get: async () => (videosStore.has(id) ? { exists: true, data: () => videosStore.get(id) } : { exists: false }),
+            set: async (payload) => {
+              videosStore.set(id, payload);
+            },
+          }),
+        };
+      }
+      if (name === "accessLinks") {
+        return {
+          doc: (id) => ({
+            set: async (payload) => {
+              accessLinksStore.set(id, payload);
+            },
+          }),
+        };
+      }
+      return { doc: () => ({ get: async () => ({ exists: false }) }) };
+    },
+  };
+
+  const sentTelegram = [];
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    if (u.endsWith("/getFile")) {
+      return {
+        ok: true,
+        json: async () => ({ ok: true, result: { file_path: "thumbnails/t1.jpg" } }),
+      };
+    }
+    if (u.includes("/file/bot")) {
+      return {
+        ok: true,
+        arrayBuffer: async () => thumbBytes,
+      };
+    }
+    const method = u.split("/").pop();
+    const body = typeof opts.body === "string" ? JSON.parse(opts.body) : { formData: true };
+    sentTelegram.push({ method, body });
+    return { ok: true, json: async () => ({ ok: true, result: { message_id: 222 } }) };
+  };
+
+  let uploadResult;
+  try {
+    uploadResult = await handleTelegramUpdate({
+      update: {
+        message: {
+          message_id: 300,
+          chat: { id: 888999 },
+          from: { id: "admin_user" },
+          video: {
+            file_id: largeFileId,
+            file_size: largeFileSize,
+            mime_type: "video/mp4",
+            thumbnail: { file_id: "THUMB_SMALL_ID" },
+          },
+          caption: "Full HD 150MB Movie",
+        },
+      },
+      db: mockDb,
+      storage: null,
+      functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+      playbackSecret: "mtproto-secret",
+    });
+
+    assert.equal(uploadResult.ok, true);
+    const savedDoc = videosStore.get(uploadResult.videoId);
+    assert.ok(savedDoc);
+    assert.equal(savedDoc.tgFileId, largeFileId);
+    assert.equal(savedDoc.tgFileSize, largeFileSize);
+    assert.equal(savedDoc.tgChatId, "888999");
+    assert.equal(savedDoc.tgMessageId, 300);
+    assert.ok(String(savedDoc.thumbnailPath || "").startsWith("data:image/jpeg;base64,"));
+    assert.ok(sentTelegram.some((c) => c.method === "sendPhoto"));
+  } finally {
+    global.fetch = origFetch;
+  }
+
+  // Now verify HTTP 206 MTProto range streaming starting inside chunk #1 (>512 KB)
+  const targetUrl = new URL(videosStore.get(uploadResult.videoId).storagePath);
+  const sig = targetUrl.searchParams.get("sig");
+
+  const fakeMtprotoChunk = Buffer.alloc(MTPROTO_CHUNK_SIZE);
+  for (let i = 0; i < MTPROTO_CHUNK_SIZE; i += 1) {
+    fakeMtprotoChunk[i] = i % 256;
+  }
+
+  const fakeTelegramLib = {
+    StringSession: class {},
+    Api: {
+      InputDocumentFileLocation: class {
+        constructor(params) {
+          Object.assign(this, params);
+        }
+      },
+    },
+    bigInt: require("big-integer"),
+    TelegramClient: class {
+      async start() {}
+      setLogLevel() {}
+      iterDownload({ offset }) {
+        assert.equal(Number(offset.toString()), MTPROTO_CHUNK_SIZE);
+        return (async function* () {
+          yield fakeMtprotoChunk;
+        })();
+      }
+    },
+  };
+
+  const makeMockRes = () => {
+    const stream = new PassThrough();
+    const chunks = [];
+    let statusCode = 0;
+    let headers = {};
+    const done = new Promise((resolve) => {
+      stream.on("data", (c) => chunks.push(c));
+      stream.on("end", () => resolve({ statusCode, headers, body: Buffer.concat(chunks) }));
+    });
+    stream.writeHead = (code, hdrs) => {
+      statusCode = code;
+      headers = hdrs || {};
+    };
+    const origEnd = stream.end.bind(stream);
+    stream.end = (chunk, ...rest) => {
+      if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      return origEnd(...rest);
+    };
+    return { res: stream, done };
+  };
+
+  const rangeStart = MTPROTO_CHUNK_SIZE + 100;
+  const rangeEnd = MTPROTO_CHUNK_SIZE + 115;
+  const rangeCall = makeMockRes();
+  await handleStreamPublicVideo({
+    videoId: uploadResult.videoId,
+    kind: "video",
+    sig,
+    method: "GET",
+    rangeHeader: `bytes=${rangeStart}-${rangeEnd}`,
+    res: rangeCall.res,
+    db: mockDb,
+    storage: null,
+    playbackSecret: "mtproto-secret",
+    telegramLibOverride: fakeTelegramLib,
+  });
+
+  const streamed = await rangeCall.done;
+  assert.equal(streamed.statusCode, 206);
+  assert.equal(streamed.headers["Content-Type"], "video/mp4");
+  assert.equal(streamed.headers["Content-Range"], `bytes ${rangeStart}-${rangeEnd}/${largeFileSize}`);
+  assert.equal(streamed.headers["Content-Length"], 16);
+  assert.equal(Buffer.compare(streamed.body, fakeMtprotoChunk.subarray(100, 116)), 0);
+});

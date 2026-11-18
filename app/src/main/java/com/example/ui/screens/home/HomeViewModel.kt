@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.local.WatchHistoryEntity
+import com.example.data.model.AppUpdateConfig
 import com.example.data.model.FirestoreNotification
 import com.example.data.model.FirestoreSupportChat
 import com.example.data.model.FirestoreSupportMessage
@@ -73,6 +74,34 @@ class HomeViewModel(
         serverRefreshedTelegramConfig.tryEmit(fresh)
       }
     }
+  }
+
+  private val serverRefreshedAppUpdateConfig = MutableSharedFlow<AppUpdateConfig>(extraBufferCapacity = 1)
+
+  val appUpdateConfig: StateFlow<AppUpdateConfig> = merge(
+    firestoreVideoRepository.getAppUpdateConfigFlow()
+      .catch { emit(AppUpdateConfig()) },
+    serverRefreshedAppUpdateConfig
+  ).stateIn(
+    viewModelScope,
+    SharingStarted.Eagerly,
+    AppUpdateConfig()
+  )
+
+  private val _dismissedUpdateVersionCode = MutableStateFlow<Int?>(null)
+  val dismissedUpdateVersionCode: StateFlow<Int?> = _dismissedUpdateVersionCode.asStateFlow()
+
+  fun refreshAppUpdateConfigFromServer() {
+    viewModelScope.launch {
+      val fresh = firestoreVideoRepository.fetchAppUpdateConfigFromServer()
+      if (fresh != null) {
+        serverRefreshedAppUpdateConfig.tryEmit(fresh)
+      }
+    }
+  }
+
+  fun dismissOptionalUpdate(versionCode: Int) {
+    _dismissedUpdateVersionCode.value = versionCode
   }
 
   val telegramLink: StateFlow<String> = telegramConfig

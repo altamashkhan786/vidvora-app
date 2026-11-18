@@ -8,6 +8,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -364,21 +365,24 @@ private fun CreatorWithdrawalHistoryRow(request: FirestoreWithdrawalRequest) {
 @Composable
 fun CreatorWithdrawalDialog(
   availableBalance: Double,
+  savedUpiId: String = "",
   onDismiss: () -> Unit,
   onSubmit: (amount: Double, upiId: String, onDone: (Boolean, String?) -> Unit) -> Unit
 ) {
-  var upiId by remember { mutableStateOf("") }
-  var amountText by remember {
-    mutableStateOf(
-      if (availableBalance >= FirestoreVideoRepository.MIN_WITHDRAWAL_AMOUNT) {
-        availableBalance.toLong().toString()
-      } else {
-        "500"
-      }
-    )
+  var upiId by remember(savedUpiId) { mutableStateOf(savedUpiId.trim()) }
+  val maxFloor = availableBalance.toLong().coerceAtLeast(FirestoreVideoRepository.MIN_WITHDRAWAL_AMOUNT.toLong())
+  var amountText by remember(availableBalance) {
+    mutableStateOf(maxFloor.toString())
   }
   var isSubmitting by remember { mutableStateOf(false) }
   var errorMsg by remember { mutableStateOf<String?>(null) }
+
+  val quickAmounts = remember(availableBalance) {
+    val maxLong = availableBalance.toLong()
+    val presets = listOf(500L, 1000L, 2000L, 5000L).filter { it <= maxLong }
+    (presets + listOf(maxLong)).distinct().filter { it >= 500L }
+  }
+  val currentAmountValue = amountText.trim().toLongOrNull()
 
   Dialog(onDismissRequest = { if (!isSubmitting) onDismiss() }) {
     Surface(
@@ -389,9 +393,13 @@ fun CreatorWithdrawalDialog(
         .fillMaxWidth()
         .testTag("creator_withdrawal_dialog")
     ) {
-      Column(modifier = Modifier.padding(20.dp)) {
+      Column(
+        modifier = Modifier
+          .padding(20.dp)
+          .verticalScroll(rememberScrollState())
+      ) {
         Text(
-          text = "Withdraw Earnings",
+          text = "Easy UPI Withdrawal",
           color = MasalaTextPrimary,
           fontSize = 18.sp,
           fontWeight = FontWeight.Bold
@@ -406,19 +414,57 @@ fun CreatorWithdrawalDialog(
 
         Spacer(modifier = Modifier.height(14.dp))
 
-        OutlinedTextField(
-          value = upiId,
-          onValueChange = { upiId = it; errorMsg = null },
-          label = { Text("Your UPI ID *") },
-          singleLine = true,
-          enabled = !isSubmitting,
-          modifier = Modifier
-            .fillMaxWidth()
-            .testTag("withdraw_upi_input"),
-          colors = payoutTextFieldColors()
+        Text(
+          text = "1. Amount chunein",
+          color = MasalaTextSecondary,
+          fontSize = 11.sp,
+          fontWeight = FontWeight.Bold
         )
+        Spacer(modifier = Modifier.height(6.dp))
 
-        Spacer(modifier = Modifier.height(10.dp))
+        if (quickAmounts.isNotEmpty()) {
+          Row(
+            modifier = Modifier
+              .fillMaxWidth()
+              .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+          ) {
+            quickAmounts.forEach { preset ->
+              val isAllOption = preset == availableBalance.toLong()
+              val isSelected = currentAmountValue == preset
+              FilterChip(
+                selected = isSelected,
+                onClick = {
+                  if (!isSubmitting) {
+                    amountText = preset.toString()
+                    errorMsg = null
+                  }
+                },
+                label = {
+                  Text(
+                    text = if (isAllOption) "All ₹$preset" else "₹$preset",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                  )
+                },
+                colors = FilterChipDefaults.filterChipColors(
+                  selectedContainerColor = MasalaGold.copy(alpha = 0.22f),
+                  selectedLabelColor = MasalaGold,
+                  containerColor = MasalaSurfaceVariant,
+                  labelColor = MasalaTextPrimary
+                ),
+                border = FilterChipDefaults.filterChipBorder(
+                  enabled = true,
+                  selected = isSelected,
+                  borderColor = MasalaCardBorder,
+                  selectedBorderColor = MasalaGold
+                ),
+                modifier = Modifier.testTag("withdraw_quick_amount_$preset")
+              )
+            }
+          }
+          Spacer(modifier = Modifier.height(8.dp))
+        }
 
         OutlinedTextField(
           value = amountText,
@@ -430,7 +476,7 @@ fun CreatorWithdrawalDialog(
           keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
           trailingIcon = {
             Text(
-              text = "MAX",
+              text = "ALL",
               color = MasalaGold,
               fontSize = 11.sp,
               fontWeight = FontWeight.Bold,
@@ -448,12 +494,64 @@ fun CreatorWithdrawalDialog(
           colors = payoutTextFieldColors()
         )
 
+        Spacer(modifier = Modifier.height(14.dp))
+
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.SpaceBetween,
+          verticalAlignment = Alignment.CenterVertically
+        ) {
+          Text(
+            text = "2. Apni UPI ID daalein",
+            color = MasalaTextSecondary,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold
+          )
+          if (savedUpiId.isNotBlank() && upiId.trim() == savedUpiId.trim()) {
+            Text(
+              text = "Last UPI auto-filled ✓",
+              color = MasalaSuccess,
+              fontSize = 10.sp,
+              fontWeight = FontWeight.Bold
+            )
+          }
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+
+        OutlinedTextField(
+          value = upiId,
+          onValueChange = { upiId = it; errorMsg = null },
+          label = { Text("UPI ID *") },
+          placeholder = { Text("Example: 9876543210@ybl") },
+          singleLine = true,
+          enabled = !isSubmitting,
+          trailingIcon = {
+            if (upiId.isNotEmpty()) {
+              IconButton(
+                onClick = { upiId = ""; errorMsg = null },
+                enabled = !isSubmitting
+              ) {
+                Icon(
+                  imageVector = Icons.Default.Close,
+                  contentDescription = "Clear UPI ID",
+                  tint = MasalaTextMuted,
+                  modifier = Modifier.size(16.dp)
+                )
+              }
+            }
+          },
+          modifier = Modifier
+            .fillMaxWidth()
+            .testTag("withdraw_upi_input"),
+          colors = payoutTextFieldColors()
+        )
+
         if (errorMsg != null) {
           Text(
             text = errorMsg ?: "",
             color = MasalaError,
             fontSize = 12.sp,
-            modifier = Modifier.padding(top = 6.dp)
+            modifier = Modifier.padding(top = 8.dp)
           )
         }
 
@@ -470,20 +568,21 @@ fun CreatorWithdrawalDialog(
           ) {
             Text("Cancel")
           }
+          val parsedPreview = amountText.trim().toDoubleOrNull()
           Button(
             onClick = {
               val cleanUpi = upiId.trim()
               val parsedAmount = amountText.trim().toDoubleOrNull()
-              if (!FirestoreVideoRepository.isValidUpiId(cleanUpi)) {
-                errorMsg = "Sahi UPI ID daalein (jaise name@ybl)"
-                return@Button
-              }
               if (parsedAmount == null || parsedAmount < FirestoreVideoRepository.MIN_WITHDRAWAL_AMOUNT) {
                 errorMsg = "Minimum withdrawal ₹500 hai"
                 return@Button
               }
               if (parsedAmount > availableBalance + 0.001) {
                 errorMsg = "Available balance (${formatInr(availableBalance)}) se zyada nahi nikal sakte"
+                return@Button
+              }
+              if (!FirestoreVideoRepository.isValidUpiId(cleanUpi)) {
+                errorMsg = "Sahi UPI ID daalein (jaise name@ybl)"
                 return@Button
               }
               isSubmitting = true
@@ -502,7 +601,14 @@ fun CreatorWithdrawalDialog(
               .weight(1f)
               .testTag("withdraw_submit_button")
           ) {
-            Text(if (isSubmitting) "Sending..." else "Request Payout", fontWeight = FontWeight.Bold)
+            Text(
+              text = when {
+                isSubmitting -> "Sending..."
+                parsedPreview != null && parsedPreview >= 500.0 -> "Withdraw ${formatInr(parsedPreview)}"
+                else -> "Withdraw Now"
+              },
+              fontWeight = FontWeight.Bold
+            )
           }
         }
       }

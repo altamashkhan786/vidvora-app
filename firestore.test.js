@@ -392,6 +392,56 @@ test("appConfig validates main, 5 built-in categories, and admin customCategorie
   await assertSucceeds(configRef.get());
 });
 
+test("appConfig/appUpdate validates apkUrl protocol, versionCode >= 1, and allows valid config", async () => {
+  const db = testEnv.unauthenticatedContext().firestore();
+  const updateRef = db.collection("appConfig").doc("appUpdate");
+  const pastTime = new Date(Date.now() - 1000);
+
+  // Reject non-http apkUrl
+  await assertFails(
+    updateRef.set({
+      isEnabled: true,
+      latestVersionCode: 2,
+      latestVersionName: "1.1",
+      title: "Update Available",
+      message: "Bug fixes",
+      apkUrl: "ftp://example.com/vidvora.apk",
+      isForceUpdate: false,
+      updatedAt: pastTime,
+    })
+  );
+
+  // Reject versionCode <= 0
+  await assertFails(
+    updateRef.set({
+      isEnabled: true,
+      latestVersionCode: 0,
+      latestVersionName: "1.0",
+      title: "Update Available",
+      message: "Bug fixes",
+      apkUrl: "https://d1mn8mrvlzisg5.cloudfront.net/vidvora.apk",
+      isForceUpdate: false,
+      updatedAt: pastTime,
+    })
+  );
+
+  // Allow valid self-hosted update config
+  await assertSucceeds(
+    updateRef.set({
+      isEnabled: true,
+      latestVersionCode: 2,
+      latestVersionName: "1.1",
+      title: "VidVora 1.1 Available",
+      message: "Faster streaming and UI improvements.",
+      apkUrl: "https://d1mn8mrvlzisg5.cloudfront.net/vidvora.apk",
+      isForceUpdate: true,
+      updatedAt: pastTime,
+    })
+  );
+
+  await assertSucceeds(updateRef.get());
+});
+
 test("supportChats and messages enforce valid schema, user chat start, admin reply, and immutability", async () => {
   const db = testEnv.unauthenticatedContext().firestore();
   const pastTime = new Date(Date.now() - 2000);

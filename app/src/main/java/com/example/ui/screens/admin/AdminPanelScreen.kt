@@ -12,6 +12,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.rememberCoroutineScope
+import com.example.BuildConfig
 import com.example.data.repository.FirebaseAuthAdminRepository
 import com.example.util.VideoShareHelper
 import kotlinx.coroutines.launch
@@ -68,6 +69,7 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Smartphone
@@ -237,9 +239,11 @@ fun AdminPanelScreen(
   var editingVideo by remember { mutableStateOf<FirestoreVideo?>(null) }
   var deletingVideoId by remember { mutableStateOf<String?>(null) }
   var deletingMemberId by remember { mutableStateOf<String?>(null) }
+  var memberSearchQuery by remember { mutableStateOf("") }
   var showLoginDialogOnRestricted by remember { mutableStateOf(false) }
   val telegramLink by viewModel.telegramLink.collectAsState()
   val telegramCreatorBotLink by viewModel.telegramCreatorBotLink.collectAsState()
+  val telegramFinanceBotLink by viewModel.telegramFinanceBotLink.collectAsState()
   val shareLinkBaseUrl by viewModel.shareLinkBaseUrl.collectAsState()
   val hasCustomAdminMasterKey by viewModel.hasCustomAdminMasterKey.collectAsState()
   val telegramCategoryLinks by viewModel.telegramCategoryLinks.collectAsState()
@@ -251,7 +255,9 @@ fun AdminPanelScreen(
   val unreadSupportChatsCount by viewModel.unreadSupportChatsCount.collectAsState()
   val myCreatorSupportChat by viewModel.myCreatorSupportChat.collectAsState()
   val myCreatorSupportMessages by viewModel.myCreatorSupportMessages.collectAsState()
+  val appUpdateConfig by viewModel.appUpdateConfig.collectAsState()
   var showTelegramDialog by remember { mutableStateOf(false) }
+  var showAppUpdateDialog by remember { mutableStateOf(false) }
   var showCreatorSupportDialog by remember { mutableStateOf(false) }
   var showCreatorEventsDialog by remember { mutableStateOf(false) }
   var showCreateEventDialog by remember { mutableStateOf(false) }
@@ -260,6 +266,7 @@ fun AdminPanelScreen(
   var supportStatusFilter by remember { mutableStateOf("ALL") }
   var activeSupportChatId by remember { mutableStateOf<String?>(null) }
   val listState = rememberLazyListState()
+  val coroutineScope = rememberCoroutineScope()
   var lastKnownVideosHeaderIndex by remember { androidx.compose.runtime.mutableIntStateOf(-1) }
 
   LaunchedEffect(toastMessage) {
@@ -392,7 +399,7 @@ fun AdminPanelScreen(
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-              text = "Please enter your Email and Master Key to access the video upload and analytics dashboard.",
+              text = "Please enter your Email and Password to access the video upload and analytics dashboard.",
               color = MasalaTextSecondary,
               fontSize = 13.sp,
               textAlign = androidx.compose.ui.text.style.TextAlign.Center,
@@ -586,7 +593,7 @@ fun AdminPanelScreen(
             ) {
               Icon(
                 imageVector = Icons.Default.Key,
-                contentDescription = "Change Master Key",
+                contentDescription = "Change Password",
                 tint = MasalaGold
               )
             }
@@ -767,9 +774,9 @@ fun AdminPanelScreen(
                   Column {
                     Text(
                       text = when {
-                        isSuperAdmin -> "Superadmin Master Key"
-                        isDelegatedAdmin -> "Admin Master Key"
-                        else -> "Creator Master Key"
+                        isSuperAdmin -> "Superadmin Password"
+                        isDelegatedAdmin -> "Admin Password"
+                        else -> "Creator Password"
                       },
                       color = MasalaTextPrimary,
                       fontSize = 13.sp,
@@ -777,9 +784,9 @@ fun AdminPanelScreen(
                     )
                     Text(
                       text = when {
-                        isSuperAdmin && hasCustomAdminMasterKey -> "Custom Admin Key active • Tap to update anytime"
-                        isSuperAdmin -> "Update your Admin login Master Key anytime"
-                        else -> "Update your login Master Key anytime"
+                        isSuperAdmin && hasCustomAdminMasterKey -> "Custom Admin Password active • Tap to update anytime"
+                        isSuperAdmin -> "Update your Admin login Password anytime"
+                        else -> "Update your login Password anytime"
                       },
                       color = MasalaTextSecondary,
                       fontSize = 11.sp
@@ -792,16 +799,29 @@ fun AdminPanelScreen(
                 OutlinedButton(
                   onClick = { showChangeMasterKeyDialog = true },
                   shape = RoundedCornerShape(8.dp),
+                  contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                   border = androidx.compose.foundation.BorderStroke(1.dp, MasalaGold.copy(alpha = 0.65f)),
                   colors = ButtonDefaults.outlinedButtonColors(contentColor = MasalaGold),
                   modifier = Modifier.testTag("creator_change_master_key_button")
                 ) {
                   Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(14.dp))
                   Spacer(modifier = Modifier.width(4.dp))
-                  Text("Change Key", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                  Text("Change Password", fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
                 }
               }
             }
+          }
+        }
+
+        // Self-Hosted In-App Update Control Card (front & center for Superadmin & Admins)
+        if (isSuperAdmin || isDelegatedAdmin || canManageTelegram) {
+          item {
+            AdminAppUpdateCard(
+              config = appUpdateConfig,
+              currentAppVersionCode = BuildConfig.VERSION_CODE,
+              currentAppVersionName = BuildConfig.VERSION_NAME,
+              onEditClick = { showAppUpdateDialog = true }
+            )
           }
         }
 
@@ -839,6 +859,31 @@ fun AdminPanelScreen(
                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 clipboard.setPrimaryClip(ClipData.newPlainText("Bot Login Command", cmd))
                 Toast.makeText(context, "Copied /login command! Paste it in Telegram Bot.", Toast.LENGTH_SHORT).show()
+              },
+              onOpenBot = { cleanBotUrl ->
+                try {
+                  context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(cleanBotUrl)))
+                } catch (e: Exception) {
+                  Toast.makeText(context, "Could not open Telegram: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+              },
+              onConfigureBot = { showTelegramDialog = true }
+            )
+          }
+        }
+
+        // Telegram Creator Finance Bot Quick Card (for Creators checking earnings/withdrawals & Admins managing payouts)
+        if (canViewEarnings || canRequestWithdrawal || canManagePayouts || canManageTelegram) {
+          item {
+            TelegramFinanceBotCard(
+              botLink = telegramFinanceBotLink,
+              memberPasskey = activeMember?.passkey,
+              isSuperAdmin = isSuperAdmin,
+              canConfigureBot = canManageTelegram,
+              onCopyLoginCommand = { cmd ->
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("Finance Bot Login Command", cmd))
+                Toast.makeText(context, "Copied /login command! Paste it in Finance Bot.", Toast.LENGTH_SHORT).show()
               },
               onOpenBot = { cleanBotUrl ->
                 try {
@@ -1455,6 +1500,69 @@ fun AdminPanelScreen(
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("Add Member (Admin / Creator)", fontWeight = FontWeight.Bold, fontSize = 14.sp)
                   }
+
+                  Spacer(modifier = Modifier.height(10.dp))
+
+                  OutlinedTextField(
+                    value = memberSearchQuery,
+                    onValueChange = { memberSearchQuery = it },
+                    placeholder = {
+                      Text(
+                        text = "Search creator by name or Gmail...",
+                        fontSize = 13.sp,
+                        color = MasalaTextMuted
+                      )
+                    },
+                    leadingIcon = {
+                      Icon(
+                        imageVector = Icons.Default.Search,
+                        contentDescription = "Search creators",
+                        tint = MasalaGold
+                      )
+                    },
+                    trailingIcon = {
+                      if (memberSearchQuery.isNotEmpty()) {
+                        IconButton(
+                          onClick = { memberSearchQuery = "" },
+                          modifier = Modifier.testTag("clear_member_search_button")
+                        ) {
+                          Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Clear search",
+                            tint = MasalaTextSecondary
+                          )
+                        }
+                      }
+                    },
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp),
+                    colors = defaultTextFieldColors(),
+                    modifier = Modifier
+                      .fillMaxWidth()
+                      .testTag("member_search_input")
+                  )
+
+                  if (memberSearchQuery.isNotBlank()) {
+                    val matchCount = memberStatsList.count {
+                      FirestoreVideoRepository.matchesMemberQuery(it.member, memberSearchQuery)
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                      text = "Showing $matchCount of ${memberStatsList.size} creators",
+                      color = MasalaGold,
+                      fontSize = 11.sp,
+                      fontWeight = FontWeight.SemiBold,
+                      modifier = Modifier.testTag("member_search_count")
+                    )
+                  }
+                }
+              }
+
+              val filteredMemberStatsList = if (memberSearchQuery.isBlank()) {
+                memberStatsList
+              } else {
+                memberStatsList.filter { stats ->
+                  FirestoreVideoRepository.matchesMemberQuery(stats.member, memberSearchQuery)
                 }
               }
 
@@ -1485,8 +1593,51 @@ fun AdminPanelScreen(
                     }
                   }
                 }
+              } else if (filteredMemberStatsList.isEmpty()) {
+                item {
+                  Card(
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = MasalaSurface),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, MasalaCardBorder),
+                    modifier = Modifier
+                      .fillMaxWidth()
+                      .testTag("member_search_empty_card")
+                  ) {
+                    Column(
+                      modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(24.dp),
+                      horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                      Icon(Icons.Default.Search, contentDescription = null, tint = MasalaGold, modifier = Modifier.size(38.dp))
+                      Spacer(modifier = Modifier.height(10.dp))
+                      Text(
+                        text = "No Creator Found",
+                        color = MasalaTextPrimary,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 15.sp
+                      )
+                      Spacer(modifier = Modifier.height(6.dp))
+                      Text(
+                        text = "No creator matches \"${memberSearchQuery.trim()}\". Try another name or Gmail address.",
+                        color = MasalaTextSecondary,
+                        fontSize = 12.sp,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                      )
+                      Spacer(modifier = Modifier.height(12.dp))
+                      OutlinedButton(
+                        onClick = { memberSearchQuery = "" },
+                        border = androidx.compose.foundation.BorderStroke(1.dp, MasalaGold.copy(alpha = 0.65f)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = MasalaGold),
+                        shape = RoundedCornerShape(8.dp)
+                      ) {
+                        Text("Clear Search", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                      }
+                    }
+                  }
+                }
               } else {
-                items(memberStatsList, key = { it.member.memberId }) { stats ->
+                items(filteredMemberStatsList, key = { it.member.memberId }) { stats ->
                   MemberCard(
                     stats = stats,
                     canManageEarning = canManagePayouts,
@@ -1497,9 +1648,9 @@ fun AdminPanelScreen(
                     onDelete = { deletingMemberId = stats.member.memberId },
                     onCopyPasskey = {
                       val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                      val clip = ClipData.newPlainText("Master Key", stats.member.passkey)
+                      val clip = ClipData.newPlainText("Password", stats.member.passkey)
                       clipboard.setPrimaryClip(clip)
-                      Toast.makeText(context, "Master Key copied for ${stats.member.name}", Toast.LENGTH_SHORT).show()
+                      Toast.makeText(context, "Password copied for ${stats.member.name}", Toast.LENGTH_SHORT).show()
                     }
                   )
                 }
@@ -1891,7 +2042,11 @@ fun AdminPanelScreen(
         ) { success, err ->
           onDone(success, err)
           if (success) {
+            memberSearchQuery = ""
             showAddMemberDialog = false
+            coroutineScope.launch {
+              listState.animateScrollToItem(0)
+            }
           }
         }
       }
@@ -2051,13 +2206,14 @@ fun AdminPanelScreen(
     EditTelegramLinkDialog(
       currentLink = telegramLink,
       currentCreatorBotLink = telegramCreatorBotLink,
+      currentFinanceBotLink = telegramFinanceBotLink,
       currentShareLinkBaseUrl = shareLinkBaseUrl,
       currentCategoryLinks = telegramCategoryLinks,
       currentCategoryNames = telegramCategoryNames,
       currentDeletedCategoryKeys = telegramDeletedCategoryKeys,
       currentCustomCategories = telegramCustomCategories,
       onDismiss = { showTelegramDialog = false },
-      onSave = { newMainLink, newBotLink, newShareLinkBaseUrl, newCategoryLinks, newCustomCategories, newCategoryNames, newDeletedKeys, closeAfterSave, statusMsg ->
+      onSave = { newMainLink, newBotLink, newFinanceBotLink, newShareLinkBaseUrl, newCategoryLinks, newCustomCategories, newCategoryNames, newDeletedKeys, closeAfterSave, statusMsg ->
         viewModel.updateTelegramConfig(
           mainLink = newMainLink,
           categoryLinks = newCategoryLinks,
@@ -2065,6 +2221,7 @@ fun AdminPanelScreen(
           categoryNames = newCategoryNames,
           deletedCategoryKeys = newDeletedKeys,
           creatorBotLink = newBotLink,
+          financeBotLink = newFinanceBotLink,
           shareLinkBaseUrl = newShareLinkBaseUrl
         ) { success, err ->
           if (success) {
@@ -2078,6 +2235,32 @@ fun AdminPanelScreen(
             }
           } else {
             Toast.makeText(context, "Failed: $err", Toast.LENGTH_LONG).show()
+          }
+        }
+      }
+    )
+  }
+
+  // Self-Hosted In-App Update Configuration Dialog
+  if (showAppUpdateDialog) {
+    EditAppUpdateDialog(
+      currentConfig = appUpdateConfig,
+      currentAppVersionCode = BuildConfig.VERSION_CODE,
+      currentAppVersionName = BuildConfig.VERSION_NAME,
+      onDismiss = { showAppUpdateDialog = false },
+      onSave = { updatedConfig, onDone ->
+        viewModel.updateAppUpdateConfig(
+          isEnabled = updatedConfig.isEnabled,
+          latestVersionCode = updatedConfig.latestVersionCode,
+          latestVersionName = updatedConfig.latestVersionName,
+          title = updatedConfig.title,
+          message = updatedConfig.message,
+          apkUrl = updatedConfig.apkUrl,
+          isForceUpdate = updatedConfig.isForceUpdate
+        ) { success, err ->
+          onDone(success, err)
+          if (success) {
+            showAppUpdateDialog = false
           }
         }
       }
@@ -2218,8 +2401,12 @@ fun AdminPanelScreen(
 
   // Creator UPI Withdrawal Dialog
   if (showWithdrawDialog) {
+    val lastSavedUpi = remember(myWithdrawalRequests) {
+      myWithdrawalRequests.firstOrNull { it.upiId.isNotBlank() }?.upiId.orEmpty()
+    }
     CreatorWithdrawalDialog(
       availableBalance = myEarningSummary.availableBalance,
+      savedUpiId = lastSavedUpi,
       onDismiss = { showWithdrawDialog = false },
       onSubmit = { amount, upiId, onDone ->
         viewModel.requestCreatorWithdrawal(amount, upiId, onDone)
@@ -2523,7 +2710,7 @@ private fun MemberCard(
           Icon(Icons.Default.Key, contentDescription = null, tint = MasalaGold, modifier = Modifier.size(14.dp))
           Spacer(modifier = Modifier.width(6.dp))
           Text(
-            text = "Master Key: ${stats.member.passkey}",
+            text = "Password: ${stats.member.passkey}",
             color = MasalaGold,
             fontSize = 11.sp,
             fontFamily = FontFamily.Monospace,
@@ -2532,7 +2719,7 @@ private fun MemberCard(
         }
 
         IconButton(onClick = onCopyPasskey, modifier = Modifier.size(28.dp)) {
-          Icon(Icons.Default.ContentCopy, contentDescription = "Copy Master Key", tint = MasalaTextSecondary, modifier = Modifier.size(15.dp))
+          Icon(Icons.Default.ContentCopy, contentDescription = "Copy Password", tint = MasalaTextSecondary, modifier = Modifier.size(15.dp))
         }
       }
 
@@ -3674,7 +3861,7 @@ private fun AddMemberDialog(
         OutlinedTextField(
           value = passkey,
           onValueChange = { passkey = it; errorMessage = null },
-          label = { Text("Master Key *") },
+          label = { Text("Password *") },
           singleLine = true,
           enabled = !isSaving,
           modifier = Modifier.fillMaxWidth(),
@@ -4089,9 +4276,129 @@ private fun TelegramUploadBotCard(
 }
 
 @Composable
+private fun TelegramFinanceBotCard(
+  botLink: String,
+  memberPasskey: String?,
+  isSuperAdmin: Boolean,
+  canConfigureBot: Boolean,
+  onCopyLoginCommand: (String) -> Unit,
+  onOpenBot: (String) -> Unit,
+  onConfigureBot: () -> Unit
+) {
+  val cleanBotUrl = FirestoreVideoRepository.normalizeTelegramUrl(botLink)
+  val isBotConfigured = cleanBotUrl.isNotBlank()
+  val financeAccent = MasalaSuccess
+
+  Card(
+    shape = RoundedCornerShape(16.dp),
+    colors = CardDefaults.cardColors(containerColor = MasalaSurface),
+    border = androidx.compose.foundation.BorderStroke(1.dp, financeAccent.copy(alpha = 0.45f)),
+    modifier = Modifier
+      .fillMaxWidth()
+      .testTag("telegram_finance_bot_card")
+  ) {
+    Column(
+      modifier = Modifier
+        .fillMaxWidth()
+        .padding(14.dp),
+      verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+      ) {
+        Box(
+          modifier = Modifier
+            .size(38.dp)
+            .clip(CircleShape)
+            .background(financeAccent.copy(alpha = 0.18f)),
+          contentAlignment = Alignment.Center
+        ) {
+          Icon(
+            imageVector = Icons.Default.AccountBalanceWallet,
+            contentDescription = null,
+            tint = financeAccent,
+            modifier = Modifier.size(20.dp)
+          )
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+          Text(
+            text = "Telegram Finance Bot (Earnings & UPI Payout)",
+            color = MasalaTextPrimary,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold
+          )
+          Text(
+            text = if (isSuperAdmin) {
+              "Creators: /balance, /withdraw, /history • Admin: /pending, /approve"
+            } else {
+              "Check live ₹ balance, video views & request ₹500+ UPI withdrawals directly on Telegram"
+            },
+            color = MasalaTextSecondary,
+            fontSize = 11.sp
+          )
+        }
+      }
+
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+      ) {
+        if (!memberPasskey.isNullOrBlank()) {
+          OutlinedButton(
+            onClick = { onCopyLoginCommand("/login ${memberPasskey.trim()}") },
+            shape = RoundedCornerShape(8.dp),
+            border = androidx.compose.foundation.BorderStroke(1.dp, MasalaGold.copy(alpha = 0.65f)),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = MasalaGold),
+            modifier = Modifier
+              .weight(1f)
+              .testTag("copy_finance_bot_login_cmd_button")
+          ) {
+            Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(14.dp))
+            Spacer(modifier = Modifier.width(5.dp))
+            Text("Copy /login", fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+          }
+        }
+
+        if (isBotConfigured) {
+          Button(
+            onClick = { onOpenBot(cleanBotUrl) },
+            colors = ButtonDefaults.buttonColors(containerColor = financeAccent, contentColor = Color.White),
+            shape = RoundedCornerShape(8.dp),
+            modifier = Modifier
+              .weight(1f)
+              .testTag("open_finance_bot_button")
+          ) {
+            Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(14.dp))
+            Spacer(modifier = Modifier.width(5.dp))
+            Text("Open Finance Bot", fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+          }
+        } else if (canConfigureBot) {
+          OutlinedButton(
+            onClick = onConfigureBot,
+            shape = RoundedCornerShape(8.dp),
+            border = androidx.compose.foundation.BorderStroke(1.dp, financeAccent.copy(alpha = 0.7f)),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = financeAccent),
+            modifier = Modifier
+              .weight(1f)
+              .testTag("configure_finance_bot_button")
+          ) {
+            Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(14.dp))
+            Spacer(modifier = Modifier.width(5.dp))
+            Text("Set Finance Bot", fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+          }
+        }
+      }
+    }
+  }
+}
+
+@Composable
 private fun EditTelegramLinkDialog(
   currentLink: String,
   currentCreatorBotLink: String,
+  currentFinanceBotLink: String,
   currentShareLinkBaseUrl: String,
   currentCategoryLinks: Map<String, String>,
   currentCategoryNames: Map<String, String>,
@@ -4101,6 +4408,7 @@ private fun EditTelegramLinkDialog(
   onSave: (
     mainLink: String,
     creatorBotLink: String,
+    financeBotLink: String,
     shareLinkBaseUrl: String,
     categoryLinks: Map<String, String>,
     customCategories: List<TelegramCategoryItem>,
@@ -4112,6 +4420,7 @@ private fun EditTelegramLinkDialog(
 ) {
   var linkInput by remember { mutableStateOf(currentLink) }
   var creatorBotLinkInput by remember { mutableStateOf(currentCreatorBotLink) }
+  var financeBotLinkInput by remember { mutableStateOf(currentFinanceBotLink) }
   var sharePreviewBaseInput by remember { mutableStateOf(currentShareLinkBaseUrl) }
   var deletedBuiltInKeys by remember { mutableStateOf(currentDeletedCategoryKeys.toSet()) }
   val categoryInputs = remember {
@@ -4182,11 +4491,13 @@ private fun EditTelegramLinkDialog(
       }
     }
     val cleanBotValue = FirestoreVideoRepository.normalizeTelegramUrl(creatorBotLinkInput)
+    val cleanFinanceBotValue = FirestoreVideoRepository.normalizeTelegramUrl(financeBotLinkInput)
     val cleanSharePreviewBase = FirestoreVideoRepository.normalizeShareLinkBaseUrl(sharePreviewBaseInput)
     formError = null
     onSave(
       mainValue,
       cleanBotValue,
+      cleanFinanceBotValue,
       cleanSharePreviewBase,
       categoryInputs.toMap(),
       overrideCustomCategories,
@@ -4453,6 +4764,28 @@ private fun EditTelegramLinkDialog(
             modifier = Modifier
               .fillMaxWidth()
               .testTag("telegram_creator_bot_input")
+          )
+
+          OutlinedTextField(
+            value = financeBotLinkInput,
+            onValueChange = { financeBotLinkInput = it },
+            label = { Text("Creator Finance Bot Link (Earnings & UPI)") },
+            placeholder = { Text("https://t.me/YourVidVoraFinanceBot", fontSize = 12.sp) },
+            singleLine = true,
+            shape = RoundedCornerShape(12.dp),
+            colors = OutlinedTextFieldDefaults.colors(
+              focusedBorderColor = MasalaSuccess,
+              unfocusedBorderColor = MasalaCardBorder,
+              focusedTextColor = MasalaTextPrimary,
+              unfocusedTextColor = MasalaTextPrimary,
+              focusedContainerColor = MasalaSurfaceVariant,
+              unfocusedContainerColor = MasalaSurfaceVariant,
+              focusedLabelColor = MasalaSuccess,
+              unfocusedLabelColor = MasalaTextMuted
+            ),
+            modifier = Modifier
+              .fillMaxWidth()
+              .testTag("telegram_finance_bot_input")
           )
 
           OutlinedTextField(
@@ -5437,7 +5770,7 @@ private fun EditMemberDialog(
         OutlinedTextField(
           value = passkey,
           onValueChange = { passkey = it; errorMessage = null },
-          label = { Text("Master Key *") },
+          label = { Text("Password *") },
           singleLine = true,
           enabled = !isSaving,
           colors = defaultTextFieldColors(),
@@ -5611,7 +5944,7 @@ private fun ChangeMasterKeyDialog(
             }
             Spacer(modifier = Modifier.width(10.dp))
             Text(
-              text = if (isSuperAdminMode) "Change Admin Master Key" else "Change Master Key",
+              text = if (isSuperAdminMode) "Change Admin Password" else "Change Password",
               color = MasalaTextPrimary,
               fontSize = 16.sp,
               fontWeight = FontWeight.Bold
@@ -5621,7 +5954,7 @@ private fun ChangeMasterKeyDialog(
           IconButton(onClick = { showKeys = !showKeys }) {
             Icon(
               imageVector = if (showKeys) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-              contentDescription = if (showKeys) "Hide keys" else "Show keys",
+              contentDescription = if (showKeys) "Hide passwords" else "Show passwords",
               tint = MasalaTextSecondary
             )
           }
@@ -5631,9 +5964,9 @@ private fun ChangeMasterKeyDialog(
 
         Text(
           text = if (isSuperAdminMode) {
-            "Enter your current Admin Master Key and set a new key (min 4 chars) for ${FirebaseAuthAdminRepository.ADMIN_EMAIL}. Syncs across Admin Portal & Telegram Bot."
+            "Enter your current Admin Password and set a new password (min 4 chars) for ${FirebaseAuthAdminRepository.ADMIN_EMAIL}. Syncs across Admin Portal & Telegram Bot."
           } else {
-            "Enter your current Master Key and set a new Master Key (minimum 4 characters). Use the new key next time you sign in."
+            "Enter your current Password and set a new Password (minimum 4 characters). Use the new password next time you sign in."
           },
           color = MasalaTextSecondary,
           fontSize = 12.sp,
@@ -5645,7 +5978,7 @@ private fun ChangeMasterKeyDialog(
         OutlinedTextField(
           value = currentKey,
           onValueChange = { currentKey = it; errorMessage = null },
-          label = { Text("Current Master Key *") },
+          label = { Text("Current Password *") },
           singleLine = true,
           enabled = !isSubmitting,
           visualTransformation = visualTransform,
@@ -5660,7 +5993,7 @@ private fun ChangeMasterKeyDialog(
         OutlinedTextField(
           value = newKey,
           onValueChange = { newKey = it; errorMessage = null },
-          label = { Text("New Master Key *") },
+          label = { Text("New Password *") },
           singleLine = true,
           enabled = !isSubmitting,
           visualTransformation = visualTransform,
@@ -5675,7 +6008,7 @@ private fun ChangeMasterKeyDialog(
         OutlinedTextField(
           value = confirmKey,
           onValueChange = { confirmKey = it; errorMessage = null },
-          label = { Text("Confirm New Master Key *") },
+          label = { Text("Confirm New Password *") },
           singleLine = true,
           enabled = !isSubmitting,
           visualTransformation = visualTransform,
@@ -5710,26 +6043,26 @@ private fun ChangeMasterKeyDialog(
           Button(
             onClick = {
               if (currentKey.trim().isBlank()) {
-                errorMessage = "Please enter your current Master Key."
+                errorMessage = "Please enter your current Password."
                 return@Button
               }
               if (newKey.trim().length < FirestoreVideoRepository.MIN_PASSKEY_LENGTH) {
-                errorMessage = "New Master Key must be at least ${FirestoreVideoRepository.MIN_PASSKEY_LENGTH} characters."
+                errorMessage = "New Password must be at least ${FirestoreVideoRepository.MIN_PASSKEY_LENGTH} characters."
                 return@Button
               }
               if (newKey.trim() == currentKey.trim()) {
-                errorMessage = "New Master Key must be different from current Master Key."
+                errorMessage = "New Password must be different from current Password."
                 return@Button
               }
               if (newKey.trim() != confirmKey.trim()) {
-                errorMessage = "New Master Key and Confirm Master Key do not match."
+                errorMessage = "New Password and Confirm Password do not match."
                 return@Button
               }
               isSubmitting = true
               onSubmit(currentKey.trim(), newKey.trim(), confirmKey.trim()) { success, err ->
                 isSubmitting = false
                 if (!success) {
-                  errorMessage = err ?: "Failed to change Master Key"
+                  errorMessage = err ?: "Failed to change Password"
                 }
               }
             },
@@ -5739,7 +6072,7 @@ private fun ChangeMasterKeyDialog(
               .weight(1f)
               .testTag("creator_save_key_button")
           ) {
-            Text(if (isSubmitting) "Updating..." else "Update Key", fontWeight = FontWeight.Bold)
+            Text(if (isSubmitting) "Updating..." else "Update Password", fontWeight = FontWeight.Bold)
           }
         }
       }

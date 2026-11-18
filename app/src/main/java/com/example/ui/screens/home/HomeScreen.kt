@@ -12,6 +12,7 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.rememberCoroutineScope
+import com.example.BuildConfig
 import com.example.util.VideoShareHelper
 import kotlinx.coroutines.launch
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
@@ -132,6 +133,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 fun HomeScreen(
   viewModel: HomeViewModel,
   adManager: AdManager? = null,
+  isAutoOpeningDeepLink: Boolean = false,
   onNavigateToPlayer: (VideoToken) -> Unit,
   onNavigateToAdmin: () -> Unit
 ) {
@@ -161,6 +163,8 @@ fun HomeScreen(
   val supportMessages by viewModel.supportMessages.collectAsState()
   val supportUserName by viewModel.supportUserName.collectAsState()
   val notifications by viewModel.notifications.collectAsState()
+  val appUpdateConfig by viewModel.appUpdateConfig.collectAsState()
+  val dismissedUpdateVersionCode by viewModel.dismissedUpdateVersionCode.collectAsState()
   val isAdFreeSession by (adManager?.isAdFreeSessionActive ?: remember { MutableStateFlow(false) }).collectAsState()
   val isRewardedReady by (adManager?.isRewardedReadyFlow ?: remember { MutableStateFlow(false) }).collectAsState()
 
@@ -176,6 +180,7 @@ fun HomeScreen(
 
   LaunchedEffect(Unit) {
     viewModel.initSupportChat(context)
+    viewModel.refreshAppUpdateConfigFromServer()
   }
 
   val notificationPermissionLauncher = rememberLauncherForActivityResult(
@@ -187,9 +192,9 @@ fun HomeScreen(
     }
   }
 
-  // Request POST_NOTIFICATIONS once after startup frame settles (Android 13+)
-  LaunchedEffect(Unit) {
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !notificationPermissionGranted) {
+  // Request POST_NOTIFICATIONS once after startup frame settles when not mid-deep-link (Android 13+)
+  LaunchedEffect(isAutoOpeningDeepLink) {
+    if (!isAutoOpeningDeepLink && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !notificationPermissionGranted) {
       kotlinx.coroutines.delay(1200L)
       notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
@@ -1218,6 +1223,19 @@ fun HomeScreen(
         } else {
           showSupportChatDialog = false
         }
+      }
+    )
+  }
+
+  val shouldShowUpdatePopup = appUpdateConfig.shouldPromptUpdate(BuildConfig.VERSION_CODE) &&
+    (appUpdateConfig.isForceUpdate || dismissedUpdateVersionCode != appUpdateConfig.latestVersionCode)
+
+  if (shouldShowUpdatePopup) {
+    AppUpdateDialog(
+      config = appUpdateConfig,
+      currentVersionName = BuildConfig.VERSION_NAME,
+      onDismissOptional = {
+        viewModel.dismissOptionalUpdate(appUpdateConfig.latestVersionCode)
       }
     )
   }

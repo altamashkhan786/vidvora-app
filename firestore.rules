@@ -215,15 +215,30 @@ service cloud.firestore {
     }
 
     function isValidAppConfig(data) {
-      return data.keys().hasOnly(['telegramLink', 'creatorBotLink', 'shareLinkBaseUrl', 'categoryLinks', 'categoryNames', 'deletedCategoryKeys', 'customCategories', 'adminMasterKeyHash', 'updatedAt']) &&
+      return data.keys().hasOnly(['telegramLink', 'creatorBotLink', 'financeBotLink', 'shareLinkBaseUrl', 'categoryLinks', 'categoryNames', 'deletedCategoryKeys', 'customCategories', 'adminMasterKeyHash', 'updatedAt']) &&
         (!('telegramLink' in data) || (data.telegramLink is string && data.telegramLink.size() <= 500)) &&
         (!('creatorBotLink' in data) || (data.creatorBotLink is string && data.creatorBotLink.size() <= 500)) &&
+        (!('financeBotLink' in data) || (data.financeBotLink is string && data.financeBotLink.size() <= 500)) &&
         (!('shareLinkBaseUrl' in data) || (data.shareLinkBaseUrl is string && data.shareLinkBaseUrl.size() <= 500)) &&
         (!('categoryLinks' in data) || isValidTelegramCategoryMap(data.categoryLinks)) &&
         (!('categoryNames' in data) || isValidTelegramCategoryNameMap(data.categoryNames)) &&
         (!('deletedCategoryKeys' in data) || isValidDeletedCategoryKeysList(data.deletedCategoryKeys)) &&
         (!('customCategories' in data) || isValidCustomCategoriesList(data.customCategories)) &&
         (!('adminMasterKeyHash' in data) || (data.adminMasterKeyHash is string && (data.adminMasterKeyHash.size() == 64 || data.adminMasterKeyHash.size() == 0))) &&
+        (!('updatedAt' in data) || data.updatedAt is timestamp);
+    }
+
+    function isValidAppUpdateConfig(data) {
+      return data.keys().hasAll(['isEnabled', 'latestVersionCode', 'latestVersionName', 'title', 'message', 'apkUrl', 'isForceUpdate']) &&
+        data.keys().hasOnly(['isEnabled', 'latestVersionCode', 'latestVersionName', 'title', 'message', 'apkUrl', 'isForceUpdate', 'updatedAt']) &&
+        data.isEnabled is bool &&
+        data.latestVersionCode is int && data.latestVersionCode >= 1 && data.latestVersionCode <= 999999 &&
+        data.latestVersionName is string && data.latestVersionName.size() > 0 && data.latestVersionName.size() <= 40 &&
+        data.title is string && data.title.size() > 0 && data.title.size() <= 120 &&
+        data.message is string && data.message.size() <= 1000 &&
+        data.apkUrl is string && data.apkUrl.size() > 0 && data.apkUrl.size() <= 500 &&
+        data.apkUrl.matches('^https?://.*') &&
+        data.isForceUpdate is bool &&
         (!('updatedAt' in data) || data.updatedAt is timestamp);
     }
 
@@ -255,11 +270,12 @@ service cloud.firestore {
         data.createdAt is timestamp && data.createdAt <= request.time;
     }
 
-    // App Configuration (Telegram channel links, announcements):
-    // Public read so all users get current main and category links
+    // App Configuration (Telegram channel links, announcements, and self-hosted app update settings):
+    // Public read so all users get current main/category links and in-app update prompts
     match /appConfig/{configId} {
       allow read: if true;
-      allow write: if isAdmin() || isValidAppConfig(request.resource.data);
+      allow write: if isAdmin() ||
+        (configId == 'appUpdate' ? isValidAppUpdateConfig(request.resource.data) : isValidAppConfig(request.resource.data));
     }
 
     // Broadcast Notifications Collection:

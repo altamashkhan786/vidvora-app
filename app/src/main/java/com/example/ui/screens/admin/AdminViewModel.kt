@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.model.AppInstallStats
+import com.example.data.model.AppUpdateConfig
 import com.example.data.model.CreatorEmailChangeResult
 import com.example.data.model.EarningSummary
 import com.example.data.model.FirestoreAccessLink
@@ -218,7 +219,7 @@ class AdminViewModel(
 
   val memberStatsList: StateFlow<List<MemberStats>> =
     combine(members, videos, allWithdrawalRequests) { memberList, videoList, requests ->
-      memberList.map { m ->
+      FirestoreVideoRepository.sortMembersNewestFirst(memberList).map { m ->
         val mVideos = FirestoreVideoRepository.sortVideosNewestFirst(
           videoList.filter { it.uploadedBy == m.memberId }
         )
@@ -282,6 +283,10 @@ class AdminViewModel(
     .map { it.creatorBotLink }
     .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "")
 
+  val telegramFinanceBotLink: StateFlow<String> = telegramConfig
+    .map { it.financeBotLink }
+    .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "")
+
   val shareLinkBaseUrl: StateFlow<String> = telegramConfig
     .map { it.shareLinkBaseUrl }
     .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "")
@@ -313,6 +318,7 @@ class AdminViewModel(
     categoryNames: Map<String, String> = emptyMap(),
     deletedCategoryKeys: List<String> = emptyList(),
     creatorBotLink: String = "",
+    financeBotLink: String = "",
     shareLinkBaseUrl: String = "",
     onComplete: (Boolean, String?) -> Unit
   ) {
@@ -328,6 +334,7 @@ class AdminViewModel(
         categoryNames = categoryNames,
         deletedCategoryKeys = deletedCategoryKeys,
         creatorBotLink = creatorBotLink,
+        financeBotLink = financeBotLink,
         shareLinkBaseUrl = shareLinkBaseUrl
       )
       if (result.isSuccess) {
@@ -349,6 +356,51 @@ class AdminViewModel(
         onComplete(true, null)
       } else {
         onComplete(false, result.exceptionOrNull()?.message ?: "Failed to update Telegram link")
+      }
+    }
+  }
+
+  val appUpdateConfig: StateFlow<AppUpdateConfig> = firestoreVideoRepository.getAppUpdateConfigFlow()
+    .catch { emit(AppUpdateConfig()) }
+    .stateIn(
+      viewModelScope,
+      SharingStarted.WhileSubscribed(5000),
+      AppUpdateConfig()
+    )
+
+  fun updateAppUpdateConfig(
+    isEnabled: Boolean,
+    latestVersionCode: Int,
+    latestVersionName: String,
+    title: String,
+    message: String,
+    apkUrl: String,
+    isForceUpdate: Boolean,
+    onComplete: (Boolean, String?) -> Unit
+  ) {
+    if (!isSuperAdmin.value && !isDelegatedAdmin.value && !canPerform(MemberOption.MANAGE_TELEGRAM)) {
+      onComplete(false, "Only Admins can update App Update settings.")
+      return
+    }
+    viewModelScope.launch {
+      val result = firestoreVideoRepository.updateAppUpdateConfig(
+        isEnabled = isEnabled,
+        latestVersionCode = latestVersionCode,
+        latestVersionName = latestVersionName,
+        title = title,
+        message = message,
+        apkUrl = apkUrl,
+        isForceUpdate = isForceUpdate
+      )
+      if (result.isSuccess) {
+        _toastMessage.value = if (isEnabled) {
+          "In-app update v${latestVersionName.trim()} (Build $latestVersionCode) published!"
+        } else {
+          "In-app update popup disabled."
+        }
+        onComplete(true, null)
+      } else {
+        onComplete(false, result.exceptionOrNull()?.message ?: "Failed to save update settings")
       }
     }
   }
@@ -783,10 +835,10 @@ class AdminViewModel(
         val newHash = result.getOrNull()
         if (result.isSuccess && newHash != null) {
           adminAuthRepository.cacheSuperadminKeyHash(newHash)
-          _toastMessage.value = "Admin Master Key updated successfully!"
+          _toastMessage.value = "Admin Password updated successfully!"
           onResult(true, null)
         } else {
-          val err = result.exceptionOrNull()?.message ?: "Failed to update Admin Master Key"
+          val err = result.exceptionOrNull()?.message ?: "Failed to update Admin Password"
           onResult(false, err)
         }
       }
@@ -795,7 +847,7 @@ class AdminViewModel(
 
     val member = liveCurrentMember.value ?: currentMember.value
     if (member == null || !canPerform(MemberOption.CHANGE_MASTER_KEY)) {
-      onResult(false, "You do not have permission to change Master Key.")
+      onResult(false, "You do not have permission to change Password.")
       return
     }
     viewModelScope.launch {
@@ -808,10 +860,10 @@ class AdminViewModel(
       val updated = result.getOrNull()
       if (result.isSuccess && updated != null) {
         adminAuthRepository.updateCurrentMember(updated)
-        _toastMessage.value = "Master Key updated successfully!"
+        _toastMessage.value = "Password updated successfully!"
         onResult(true, null)
       } else {
-        val err = result.exceptionOrNull()?.message ?: "Failed to update Master Key"
+        val err = result.exceptionOrNull()?.message ?: "Failed to update Password"
         onResult(false, err)
       }
     }

@@ -55,6 +55,8 @@ import androidx.compose.material.icons.filled.BrightnessLow
 import androidx.compose.material.icons.filled.BrightnessMedium
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.FastForward
+import androidx.compose.material.icons.filled.FastRewind
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
@@ -216,6 +218,19 @@ fun PlayerScreen(
   var isGestureDragging by remember { mutableStateOf(false) }
   var videoScale by remember(video.streamUrl) { mutableFloatStateOf(1f) }
   var videoOffset by remember(video.streamUrl) { mutableStateOf(Offset.Zero) }
+
+  // Double-tap seek HUD state (Left double-tap = -5s, Right double-tap = +5s)
+  var seekHudTrigger by remember { mutableIntStateOf(0) }
+  var seekHudSeconds by remember { mutableIntStateOf(0) }
+  var seekHudIsRight by remember { mutableStateOf(true) }
+
+  // Auto-hide double-tap seek HUD
+  LaunchedEffect(seekHudTrigger) {
+    if (seekHudTrigger > 0) {
+      delay(750)
+      seekHudSeconds = 0
+    }
+  }
 
   // Clamp zoom pan offset whenever orientation or container dimensions change
   LaunchedEffect(isLandscape) {
@@ -594,9 +609,21 @@ fun PlayerScreen(
       .fillMaxSize()
       .background(Color.Black)
       .clipToBounds()
-      .pointerInput(Unit) {
+      .pointerInput(exoPlayer) {
         detectTapGestures(
-          onTap = { isControlsVisible = !isControlsVisible }
+          onTap = { isControlsVisible = !isControlsVisible },
+          onDoubleTap = { offset ->
+            val isRightSide = offset.x >= (size.width / 2f)
+            val deltaSeconds = if (isRightSide) 5 else -5
+            seekBy(deltaSeconds * 1000L)
+            seekHudSeconds = if (seekHudSeconds != 0 && seekHudIsRight == isRightSide) {
+              seekHudSeconds + deltaSeconds
+            } else {
+              deltaSeconds
+            }
+            seekHudIsRight = isRightSide
+            seekHudTrigger++
+          }
         )
       }
       .pointerInput(exoPlayer, audioManager, maxStreamVolume) {
@@ -772,6 +799,42 @@ fun PlayerScreen(
           strokeWidth = 3.5.dp,
           modifier = Modifier.size(44.dp)
         )
+      }
+    }
+
+    // Double-Tap Seek Feedback Badge (Left = -5s, Right = +5s)
+    AnimatedVisibility(
+      visible = seekHudSeconds != 0,
+      enter = fadeIn(),
+      exit = fadeOut(),
+      modifier = Modifier
+        .align(if (seekHudIsRight) Alignment.CenterEnd else Alignment.CenterStart)
+        .padding(horizontal = 36.dp)
+    ) {
+      Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = Color.Black.copy(alpha = 0.72f),
+        border = BorderStroke(1.dp, MasalaGold.copy(alpha = 0.6f)),
+        modifier = Modifier.testTag("player_double_tap_seek_hud")
+      ) {
+        Column(
+          modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp),
+          horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+          Icon(
+            imageVector = if (seekHudIsRight) Icons.Default.FastForward else Icons.Default.FastRewind,
+            contentDescription = if (seekHudIsRight) "Forward 5 seconds" else "Rewind 5 seconds",
+            tint = MasalaGold,
+            modifier = Modifier.size(28.dp)
+          )
+          Spacer(modifier = Modifier.height(4.dp))
+          Text(
+            text = if (seekHudSeconds > 0) "+${seekHudSeconds}s" else "${seekHudSeconds}s",
+            color = Color.White,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Bold
+          )
+        }
       }
     }
 

@@ -159,7 +159,7 @@ fun ChangeCreatorEmailDialog(
             overflow = TextOverflow.Ellipsis
           )
           Text(
-            text = "Master Key: ${member.passkey}",
+            text = "Password: ${member.passkey}",
             color = MasalaGold,
             fontSize = 11.sp,
             fontFamily = FontFamily.Monospace,
@@ -238,7 +238,7 @@ fun ChangeCreatorEmailDialog(
             )
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-              text = "Account '${target.name}' (${target.emailOrPhone}) pehle se maujood hai. Save karne par purane account ke sabhi ${memberStats.videoCount} videos, ${member.creditedViews} views, ${formatInr(memberStats.earningSummary.totalEarning)} earning aur payout history '${target.name}' (Key: ${target.passkey}) mein transfer ho jayenge.",
+              text = "Account '${target.name}' (${target.emailOrPhone}) pehle se maujood hai. Save karne par purane account ke sabhi ${memberStats.videoCount} videos, ${member.creditedViews} views, ${formatInr(memberStats.earningSummary.totalEarning)} earning aur payout history '${target.name}' (Password: ${target.passkey}) mein transfer ho jayenge.",
               color = MasalaTextPrimary,
               fontSize = 11.sp,
               lineHeight = 15.sp
@@ -262,7 +262,7 @@ fun ChangeCreatorEmailDialog(
             )
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-              text = "Email change hone ke baad creator apne New Email + Master Key se login karega to uska purana sara video data, views, ₹ earning aur UPI payouts turant new email par dikhega.",
+              text = "Email change hone ke baad creator apne New Email + Password se login karega to uska purana sara video data, views, ₹ earning aur UPI payouts turant new email par dikhega.",
               color = MasalaTextPrimary,
               fontSize = 11.sp,
               lineHeight = 15.sp

@@ -9,6 +9,10 @@ const {
   handleStreamPublicVideo,
 } = require("./telegramBot");
 const {
+  resolveFinanceBotRuntimeConfig,
+  handleFinanceTelegramUpdate,
+} = require("./financeBot");
+const {
   handleSharePageRequest,
   handleShareThumbnailRequest,
 } = require("./sharePreview");
@@ -403,6 +407,47 @@ exports.telegramWebhook = onRequest(
     } catch (error) {
       console.error("telegramWebhook error:", error);
       // Respond 200 to Telegram after logging to avoid infinite webhook retry storms
+      res.status(200).json({ ok: false, error: error.message });
+    }
+  }
+);
+
+/**
+ * 4b. financeTelegramWebhook (Telegram Creator Finance Bot Webhook)
+ * Allows Creators to check earnings, request UPI withdrawals (>= 500 INR), and track payout history,
+ * and allows Admins to inspect pending payouts and approve/process/reject them.
+ */
+exports.financeTelegramWebhook = onRequest(
+  {
+    cors: false,
+    memory: "512MiB",
+    timeoutSeconds: 120,
+    maxInstances: 10,
+  },
+  async (req, res) => {
+    if (req.method !== "POST") {
+      res.status(200).send("VidVora Creator Finance Bot Webhook Active");
+      return;
+    }
+
+    try {
+      const { webhookSecret } = await resolveFinanceBotRuntimeConfig(db);
+      if (webhookSecret) {
+        const incomingSecret = String(req.get("X-Telegram-Bot-Api-Secret-Token") || "").trim();
+        if (incomingSecret !== webhookSecret) {
+          res.status(401).send("Unauthorized webhook secret");
+          return;
+        }
+      }
+
+      const result = await handleFinanceTelegramUpdate({
+        update: req.body,
+        db,
+      });
+
+      res.status(200).json(result);
+    } catch (error) {
+      console.error("financeTelegramWebhook error:", error);
       res.status(200).json({ ok: false, error: error.message });
     }
   }

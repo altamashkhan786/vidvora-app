@@ -8,6 +8,10 @@ const {
   handleStreamPublicVideo,
 } = require("./telegramBot");
 const {
+  resolveFinanceBotRuntimeConfig,
+  handleFinanceTelegramUpdate,
+} = require("./financeBot");
+const {
   handleSharePageRequest,
   handleShareThumbnailRequest,
 } = require("./sharePreview");
@@ -86,7 +90,14 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === "GET" && (pathname === "/health" || (pathname === "/" && !hasWatchParam))) {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true, service: "VidVora Telegram Bot & Share Preview Server" }));
+    res.end(
+      JSON.stringify({
+        ok: true,
+        service: "VidVora Telegram Bot, Finance Bot & Share Preview Server",
+        uploadBotConfigured: Boolean((process.env.TELEGRAM_BOT_TOKEN || "").trim()),
+        financeBotConfigured: Boolean((process.env.FINANCE_BOT_TOKEN || "").trim()),
+      })
+    );
     return;
   }
 
@@ -180,6 +191,40 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (pathname === "/financeTelegramWebhook" || pathname === "/financeWebhook") {
+    if (req.method !== "POST") {
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end("VidVora Creator Finance Bot Webhook Active");
+      return;
+    }
+
+    try {
+      const { webhookSecret } = await resolveFinanceBotRuntimeConfig(db);
+      if (webhookSecret) {
+        const incomingSecret = String(req.headers["x-telegram-bot-api-secret-token"] || "").trim();
+        if (incomingSecret !== webhookSecret) {
+          res.writeHead(401, { "Content-Type": "text/plain" });
+          res.end("Unauthorized webhook secret");
+          return;
+        }
+      }
+
+      const body = await readJsonBody(req);
+      const result = await handleFinanceTelegramUpdate({
+        update: body,
+        db,
+      });
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    } catch (err) {
+      console.error("Standalone financeTelegramWebhook error:", err);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: err.message }));
+    }
+    return;
+  }
+
   if ((req.method === "GET" || req.method === "HEAD") && pathname === "/streamPublicVideo") {
     try {
       await handleStreamPublicVideo({
@@ -207,21 +252,13 @@ const server = http.createServer(async (req, res) => {
   res.end("Not found");
 });
 
-async function autoRegisterTelegramWebhook() {
+async function registerSingleWebhook({ label, botToken, apiBase, webhookSecret, desiredWebhookUrl }) {
   try {
-    const publicBase = (process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "")
-      .trim()
-      .replace(/\/+$/, "");
-    if (!/^https:\/\//i.test(publicBase)) return;
-
-    const { botToken, apiBase, webhookSecret } = await resolveBotRuntimeConfig(db);
     if (!botToken) return;
-
-    const desiredWebhookUrl = `${publicBase}/telegramWebhook`;
     const infoRes = await fetch(`${apiBase}/bot${botToken}/getWebhookInfo`);
     const infoData = await infoRes.json().catch(() => ({}));
     if (infoData.ok && infoData.result && infoData.result.url === desiredWebhookUrl) {
-      console.log(`Telegram webhook already active: ${desiredWebhookUrl}`);
+      console.log(`${label} webhook already active: ${desiredWebhookUrl}`);
       return;
     }
 
@@ -239,10 +276,39 @@ async function autoRegisterTelegramWebhook() {
     });
     const setData = await setRes.json().catch(() => ({}));
     if (setData.ok) {
-      console.log(`Telegram webhook auto-registered: ${desiredWebhookUrl}`);
+      console.log(`${label} webhook auto-registered: ${desiredWebhookUrl}`);
     } else {
-      console.warn("Telegram webhook auto-register failed:", setData.description || "Unknown error");
+      console.warn(`${label} webhook auto-register failed:`, setData.description || "Unknown error");
     }
+  } catch (err) {
+    console.warn(`${label} webhook auto-register skipped:`, err.message);
+  }
+}
+
+async function autoRegisterTelegramWebhook() {
+  try {
+    const publicBase = (process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "")
+      .trim()
+      .replace(/\/+$/, "");
+    if (!/^https:\/\//i.test(publicBase)) return;
+
+    const uploadCfg = await resolveBotRuntimeConfig(db);
+    await registerSingleWebhook({
+      label: "Creator Upload Bot",
+      botToken: uploadCfg.botToken,
+      apiBase: uploadCfg.apiBase,
+      webhookSecret: uploadCfg.webhookSecret,
+      desiredWebhookUrl: `${publicBase}/telegramWebhook`,
+    });
+
+    const financeCfg = await resolveFinanceBotRuntimeConfig(db);
+    await registerSingleWebhook({
+      label: "Creator Finance Bot",
+      botToken: financeCfg.botToken,
+      apiBase: financeCfg.apiBase,
+      webhookSecret: financeCfg.webhookSecret,
+      desiredWebhookUrl: `${publicBase}/financeTelegramWebhook`,
+    });
   } catch (err) {
     console.warn("Telegram webhook auto-register skipped:", err.message);
   }

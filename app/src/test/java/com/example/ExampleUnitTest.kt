@@ -615,6 +615,8 @@ class ExampleUnitTest {
 
     val config = com.example.data.model.TelegramConfig(
       mainLink = "https://t.me/VidVoraApp",
+      creatorBotLink = "https://t.me/VidVoraUploadBot",
+      financeBotLink = "https://t.me/VidVoraFinanceBot",
       categoryLinks = mapOf(
         com.example.data.model.TelegramChannelCategory.SOUTH_MOVIE.key to "https://t.me/south",
         com.example.data.model.TelegramChannelCategory.ADULT_CONTENT.key to "https://t.me/adult"
@@ -631,6 +633,8 @@ class ExampleUnitTest {
         )
       )
     )
+    assertEquals("https://t.me/VidVoraUploadBot", config.creatorBotLink)
+    assertEquals("https://t.me/VidVoraFinanceBot", config.financeBotLink)
     val all = config.allCategories()
     assertEquals(5, all.size)
     assertEquals("Pakistani Drama", all[0].name)
@@ -893,5 +897,108 @@ class ExampleUnitTest {
     // Verify ShareVideoRequest carries no title field and dismiss resets state cleanly
     com.example.util.VideoShareHelper.dismissShareDialog()
     org.junit.Assert.assertNull(com.example.util.VideoShareHelper.pendingShareRequest.value)
+  }
+
+  @Test
+  fun appUpdateConfig_promptAndValidationChecks() {
+    val disabled = com.example.data.model.AppUpdateConfig(
+      isEnabled = false,
+      latestVersionCode = 5,
+      apkUrl = "https://d1mn8mrvlzisg5.cloudfront.net/vidvora.apk"
+    )
+    org.junit.Assert.assertFalse(disabled.shouldPromptUpdate(currentVersionCode = 1))
+
+    val sameOrOlderBuild = com.example.data.model.AppUpdateConfig(
+      isEnabled = true,
+      latestVersionCode = 2,
+      apkUrl = "https://d1mn8mrvlzisg5.cloudfront.net/vidvora.apk"
+    )
+    org.junit.Assert.assertFalse(sameOrOlderBuild.shouldPromptUpdate(currentVersionCode = 2))
+    org.junit.Assert.assertFalse(sameOrOlderBuild.shouldPromptUpdate(currentVersionCode = 3))
+
+    val activeNewerUpdate = com.example.data.model.AppUpdateConfig(
+      isEnabled = true,
+      latestVersionCode = 3,
+      latestVersionName = "1.2",
+      apkUrl = "https://d1mn8mrvlzisg5.cloudfront.net/vidvora.apk"
+    )
+    assertTrue(activeNewerUpdate.shouldPromptUpdate(currentVersionCode = 2))
+
+    // Validation checks
+    assertNotNull(
+      com.example.data.repository.FirestoreVideoRepository.validateAppUpdateInput(
+        latestVersionCode = 0,
+        latestVersionName = "1.1",
+        title = "Update",
+        message = "Notes",
+        apkUrl = "https://d1mn8mrvlzisg5.cloudfront.net/vidvora.apk"
+      )
+    )
+    assertNotNull(
+      com.example.data.repository.FirestoreVideoRepository.validateAppUpdateInput(
+        latestVersionCode = 2,
+        latestVersionName = "",
+        title = "Update",
+        message = "Notes",
+        apkUrl = "https://d1mn8mrvlzisg5.cloudfront.net/vidvora.apk"
+      )
+    )
+    assertNotNull(
+      com.example.data.repository.FirestoreVideoRepository.validateAppUpdateInput(
+        latestVersionCode = 2,
+        latestVersionName = "1.1",
+        title = "Update",
+        message = "Notes",
+        apkUrl = "ftp://bad-scheme.com/vidvora.apk"
+      )
+    )
+    org.junit.Assert.assertNull(
+      com.example.data.repository.FirestoreVideoRepository.validateAppUpdateInput(
+        latestVersionCode = 2,
+        latestVersionName = "1.1",
+        title = "VidVora 1.1 Available",
+        message = "Faster playback and bug fixes",
+        apkUrl = "https://d1mn8mrvlzisg5.cloudfront.net/vidvora.apk"
+      )
+    )
+  }
+
+  @Test
+  fun memberSortingAndSearch_placesNewestCreatorFirstAndFiltersByNameOrEmail() {
+    val oldest = com.example.data.model.FirestoreMember(
+      memberId = "mem_oldest",
+      name = "Rohan Sharma",
+      emailOrPhone = "rohan.creator@gmail.com",
+      passkey = "PASS-1",
+      createdAt = com.google.firebase.Timestamp(1_750_000_000L, 0)
+    )
+    val middle = com.example.data.model.FirestoreMember(
+      memberId = "mem_middle",
+      name = "Aman Verma",
+      emailOrPhone = "aman.verma@gmail.com",
+      passkey = "PASS-2",
+      createdAt = com.google.firebase.Timestamp(1_750_000_100L, 0)
+    )
+    val newest = com.example.data.model.FirestoreMember(
+      memberId = "mem_newest",
+      name = "Zoya Khan",
+      emailOrPhone = "zoya.official@gmail.com",
+      passkey = "PASS-3",
+      createdAt = com.google.firebase.Timestamp(1_750_000_250L, 0)
+    )
+
+    val sorted = com.example.data.repository.FirestoreVideoRepository.sortMembersNewestFirst(
+      listOf(oldest, newest, middle)
+    )
+    assertEquals(listOf("mem_newest", "mem_middle", "mem_oldest"), sorted.map { it.memberId })
+
+    val byName = com.example.data.repository.FirestoreVideoRepository.filterMembersByQuery(sorted, "rohan")
+    assertEquals(listOf("mem_oldest"), byName.map { it.memberId })
+
+    val byEmail = com.example.data.repository.FirestoreVideoRepository.filterMembersByQuery(sorted, "AMAN.VERMA@GMAIL.COM")
+    assertEquals(listOf("mem_middle"), byEmail.map { it.memberId })
+
+    val allMatches = com.example.data.repository.FirestoreVideoRepository.filterMembersByQuery(sorted, "@gmail.com")
+    assertEquals(listOf("mem_newest", "mem_middle", "mem_oldest"), allMatches.map { it.memberId })
   }
 }
