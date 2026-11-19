@@ -513,7 +513,38 @@ async function createFiveSecondPreviewAndThumbnail({
   const MAX_COPY_CLIP_BYTES = 6 * 1024 * 1024;
   let clipReady = false;
 
-  // Fast & ultra-low-RAM path (~12 MB): stream-copy first 5 seconds cleanly from keyframe 0
+  const extractHdThumb = async (source, seekSec) => {
+    const args = ["-y", "-threads", "1"];
+    if (seekSec > 0) {
+      args.push("-ss", String(seekSec));
+    }
+    args.push(
+      "-i",
+      source,
+      "-vframes",
+      "1",
+      "-vf",
+      "scale='min(720,iw)':-2:flags=bilinear",
+      "-q:v",
+      "3",
+      outputThumbPath
+    );
+    await execFileAsync(ffmpegBin, args, { timeout: 25_000, killSignal: "SIGKILL", maxBuffer: 2 * 1024 * 1024 });
+  };
+
+  // 1. Extract crisp HD thumbnail FIRST (~0.3s, very low RAM) so even if 5-sec clip encoding fails/times out,
+  //    we ALWAYS have a real video thumbnail ready!
+  try {
+    await extractHdThumb(inputPathOrUrl, startSec);
+  } catch (_) {
+    try {
+      await extractHdThumb(inputPathOrUrl, 0);
+    } catch (_) {
+      // Will retry from generated preview clip if clip succeeds
+    }
+  }
+
+  // 2. Fast & ultra-low-RAM 5-sec clip path (~12 MB): stream-copy first 5 seconds cleanly from keyframe 0
   try {
     await execFileAsync(
       ffmpegBin,
@@ -545,7 +576,7 @@ async function createFiveSecondPreviewAndThumbnail({
     await fs.promises.unlink(outputClipPath).catch(() => {});
   }
 
-  // Fallback: ultra-low-memory x264 transcode (safe for Render 512MB Free tier)
+  // 3. Fallback: ultra-low-memory x264 transcode (safe for Render 512MB Free tier)
   if (!clipReady) {
     const baseArgs = [
       "-y",
@@ -585,43 +616,30 @@ async function createFiveSecondPreviewAndThumbnail({
         [...baseArgs, "-c:a", "aac", "-b:a", "64k", outputClipPath],
         { timeout: 45_000, killSignal: "SIGKILL", maxBuffer: 3 * 1024 * 1024 }
       );
+      clipReady = fs.existsSync(outputClipPath) && fs.statSync(outputClipPath).size > 0;
     } catch (_) {
-      // Retry without audio track (handles silent videos or incompatible audio codecs)
-      await execFileAsync(
-        ffmpegBin,
-        [...baseArgs, "-an", outputClipPath],
-        { timeout: 45_000, killSignal: "SIGKILL", maxBuffer: 3 * 1024 * 1024 }
-      );
+      try {
+        // Retry without audio track (handles silent videos or incompatible audio codecs)
+        await execFileAsync(
+          ffmpegBin,
+          [...baseArgs, "-an", outputClipPath],
+          { timeout: 45_000, killSignal: "SIGKILL", maxBuffer: 3 * 1024 * 1024 }
+        );
+        clipReady = fs.existsSync(outputClipPath) && fs.statSync(outputClipPath).size > 0;
+      } catch (transcodeErr) {
+        await fs.promises.unlink(outputClipPath).catch(() => {});
+        console.warn("5-sec clip transcode failed (keeping thumbnail):", transcodeErr?.message || transcodeErr);
+      }
     }
   }
 
-  const extractHdThumb = async (source, seekSec) => {
-    const args = ["-y", "-threads", "1"];
-    if (seekSec > 0) {
-      args.push("-ss", String(seekSec));
-    }
-    args.push(
-      "-i",
-      source,
-      "-vframes",
-      "1",
-      "-vf",
-      "scale='min(720,iw)':-2:flags=bilinear",
-      "-q:v",
-      "3",
-      outputThumbPath
-    );
-    await execFileAsync(ffmpegBin, args, { timeout: 25_000, killSignal: "SIGKILL", maxBuffer: 2 * 1024 * 1024 });
-  };
-
-  try {
-    await extractHdThumb(inputPathOrUrl, startSec);
-  } catch (_) {
+  // 4. If initial thumbnail extraction failed earlier, retry from frame 0 of generated clip
+  const thumbAlreadyReady = fs.existsSync(outputThumbPath) && fs.statSync(outputThumbPath).size > 0;
+  if (!thumbAlreadyReady && clipReady && fs.existsSync(outputClipPath)) {
     try {
-      await extractHdThumb(inputPathOrUrl, 0);
-    } catch (_) {
-      // Fallback thumbnail from frame 0 of generated preview clip
       await extractHdThumb(outputClipPath, 0);
+    } catch (_) {
+      // Non-fatal — caller will fall back to Telegram's built-in video thumbnail
     }
   }
 
@@ -744,31 +762,49 @@ async function sendTelegramVideoClip(apiBase, botToken, { chatId, clipPath, capt
   const replyMarkup = JSON.stringify({
     inline_keyboard: [[{ text: "▶️ Watch Full Video on VidVora", url: watchUrl }]],
   });
-  return telegramMultipartCall(apiBase, botToken, "sendVideo", () => {
-    const form = new FormData();
-    form.append("chat_id", String(chatId));
-    form.append("caption", caption);
-    form.append("parse_mode", "HTML");
-    if (replyToMessageId) {
-      form.append("reply_to_message_id", String(replyToMessageId));
+  const sendWithReply = (replyId) =>
+    telegramMultipartCall(apiBase, botToken, "sendVideo", () => {
+      const form = new FormData();
+      form.append("chat_id", String(chatId));
+      form.append("caption", caption);
+      form.append("parse_mode", "HTML");
+      if (replyId) {
+        form.append("reply_to_message_id", String(replyId));
+      }
+      form.append("reply_markup", replyMarkup);
+      form.append("video", new Blob([clipBuffer], { type: "video/mp4" }), "vidvora_preview_5s.mp4");
+      return form;
+    });
+  try {
+    return await sendWithReply(replyToMessageId);
+  } catch (err) {
+    if (replyToMessageId && /reply|replied|message.*not found/i.test(String(err?.message || ""))) {
+      return await sendWithReply(null);
     }
-    form.append("reply_markup", replyMarkup);
-    form.append("video", new Blob([clipBuffer], { type: "video/mp4" }), "vidvora_preview_5s.mp4");
-    return form;
-  });
+    throw err;
+  }
 }
 
 async function sendTelegramVideoByFileId(apiBase, botToken, { chatId, fileId, caption, watchUrl, replyToMessageId }) {
-  return telegramApiJson(apiBase, botToken, "sendVideo", {
-    chat_id: chatId,
-    video: String(fileId),
-    caption,
-    parse_mode: "HTML",
-    ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {}),
-    reply_markup: {
-      inline_keyboard: [[{ text: "▶️ Watch Full Video on VidVora", url: watchUrl }]],
-    },
-  });
+  const sendWithReply = (replyId) =>
+    telegramApiJson(apiBase, botToken, "sendVideo", {
+      chat_id: chatId,
+      video: String(fileId),
+      caption,
+      parse_mode: "HTML",
+      ...(replyId ? { reply_to_message_id: replyId } : {}),
+      reply_markup: {
+        inline_keyboard: [[{ text: "▶️ Watch Full Video on VidVora", url: watchUrl }]],
+      },
+    });
+  try {
+    return await sendWithReply(replyToMessageId);
+  } catch (err) {
+    if (replyToMessageId && /reply|replied|message.*not found/i.test(String(err?.message || ""))) {
+      return await sendWithReply(null);
+    }
+    throw err;
+  }
 }
 
 async function sendTelegramPhoto(apiBase, botToken, { chatId, imagePathOrUri, caption, watchUrl, replyToMessageId }) {
@@ -780,53 +816,78 @@ async function sendTelegramPhoto(apiBase, botToken, { chatId, imagePathOrUri, ca
     inline_keyboard: [[{ text: "▶️ Watch Full Video on VidVora", url: watchUrl }]],
   });
 
+  const uploadPhotoBuffer = async (imgBuffer, mime = "image/jpeg", ext = "jpg") => {
+    const sendWithReply = (replyId) =>
+      telegramMultipartCall(apiBase, botToken, "sendPhoto", () => {
+        const form = new FormData();
+        form.append("chat_id", String(chatId));
+        form.append("caption", caption);
+        form.append("parse_mode", "HTML");
+        if (replyId) {
+          form.append("reply_to_message_id", String(replyId));
+        }
+        form.append("reply_markup", replyMarkup);
+        form.append("photo", new Blob([imgBuffer], { type: mime }), `vidvora_thumb.${ext}`);
+        return form;
+      });
+    try {
+      return await sendWithReply(replyToMessageId);
+    } catch (err) {
+      if (replyToMessageId && /reply|replied|message.*not found/i.test(String(err?.message || ""))) {
+        return await sendWithReply(null);
+      }
+      throw err;
+    }
+  };
+
   const dataUriMatch = cleanImg.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)$/i);
   if (dataUriMatch) {
     const mime = dataUriMatch[1].toLowerCase() === "image/jpg" ? "image/jpeg" : dataUriMatch[1].toLowerCase();
     const imgBuffer = Buffer.from(dataUriMatch[2].replace(/\s+/g, ""), "base64");
     const ext = mime.includes("png") ? "png" : "jpg";
-    return telegramMultipartCall(apiBase, botToken, "sendPhoto", () => {
-      const form = new FormData();
-      form.append("chat_id", String(chatId));
-      form.append("caption", caption);
-      form.append("parse_mode", "HTML");
-      if (replyToMessageId) {
-        form.append("reply_to_message_id", String(replyToMessageId));
-      }
-      form.append("reply_markup", replyMarkup);
-      form.append("photo", new Blob([imgBuffer], { type: mime }), `vidvora_thumb.${ext}`);
-      return form;
-    });
+    return uploadPhotoBuffer(imgBuffer, mime, ext);
   }
 
   if (!cleanImg.startsWith("http://") && !cleanImg.startsWith("https://") && fs.existsSync(cleanImg)) {
     const imgBuffer = await fs.promises.readFile(cleanImg);
     const ext = cleanImg.toLowerCase().endsWith(".png") ? "png" : "jpg";
     const mime = ext === "png" ? "image/png" : "image/jpeg";
-    return telegramMultipartCall(apiBase, botToken, "sendPhoto", () => {
-      const form = new FormData();
-      form.append("chat_id", String(chatId));
-      form.append("caption", caption);
-      form.append("parse_mode", "HTML");
-      if (replyToMessageId) {
-        form.append("reply_to_message_id", String(replyToMessageId));
-      }
-      form.append("reply_markup", replyMarkup);
-      form.append("photo", new Blob([imgBuffer], { type: mime }), `vidvora_thumb.${ext}`);
-      return form;
-    });
+    return uploadPhotoBuffer(imgBuffer, mime, ext);
   }
 
-  return telegramApiJson(apiBase, botToken, "sendPhoto", {
-    chat_id: chatId,
-    photo: cleanImg,
-    caption,
-    parse_mode: "HTML",
-    ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {}),
-    reply_markup: {
-      inline_keyboard: [[{ text: "▶️ Watch Full Video on VidVora", url: watchUrl }]],
-    },
-  });
+  const sendJsonPhoto = (replyId) =>
+    telegramApiJson(apiBase, botToken, "sendPhoto", {
+      chat_id: chatId,
+      photo: cleanImg,
+      caption,
+      parse_mode: "HTML",
+      ...(replyId ? { reply_to_message_id: replyId } : {}),
+      reply_markup: {
+        inline_keyboard: [[{ text: "▶️ Watch Full Video on VidVora", url: watchUrl }]],
+      },
+    });
+
+  try {
+    return await sendJsonPhoto(replyToMessageId);
+  } catch (err) {
+    const errMsg = String(err?.message || "");
+    if (replyToMessageId && /reply|replied|message.*not found/i.test(errMsg)) {
+      return await sendJsonPhoto(null);
+    }
+    // If Telegram couldn't fetch an HTTP(S) thumbnail URL directly, download it on our server and upload bytes
+    if (/^https?:\/\//i.test(cleanImg)) {
+      const dlRes = await fetch(cleanImg, { redirect: "follow", signal: AbortSignal.timeout(15_000) });
+      if (dlRes.ok) {
+        const contentType = String(dlRes.headers?.get?.("content-type") || "image/jpeg").toLowerCase();
+        const imgBuf = Buffer.from(await dlRes.arrayBuffer());
+        if (imgBuf.length > 0) {
+          const isPng = contentType.includes("png");
+          return await uploadPhotoBuffer(imgBuf, isPng ? "image/png" : "image/jpeg", isPng ? "png" : "jpg");
+        }
+      }
+    }
+    throw err;
+  }
 }
 
 function parseChannelTargetInput(rawInput) {
@@ -1995,13 +2056,15 @@ async function handleTelegramUpdate({
           thumbExists = generated.thumbExists || thumbExists;
         } catch (previewGenErr) {
           console.warn("5-sec preview generation skipped for video:", previewGenErr?.message || previewGenErr);
-          if (!thumbExists) {
-            thumbExists = await fetchTelegramThumb();
-          }
           if (reportedFileSize > BOT_API_MAX_BYTES) {
             mtprotoStreamOnly = true;
           }
         }
+      }
+
+      // Always fall back to Telegram's built-in video thumbnail if ffmpeg didn't produce thumbPath
+      if (!thumbExists) {
+        thumbExists = await fetchTelegramThumb();
       }
 
       const baseHost = functionBaseUrl.replace(/\/+$/, "");
@@ -2217,11 +2280,30 @@ async function handleTelegramUpdate({
       "https://t.me/VideoKaiseDekhe_ar",
     ].join("\n");
 
-    const photoCandidate =
-      forwardedPreviewPhotoFileId ||
-      (fs.existsSync(thumbPath) && fs.statSync(thumbPath).size > 0 ? thumbPath : null) ||
-      fallbackTelegramThumbFileId ||
-      finalThumbPath;
+    const localThumbReady = fs.existsSync(thumbPath) && fs.statSync(thumbPath).size > 0;
+
+    const ensureDownloadedFallbackThumb = async () => {
+      if (fs.existsSync(thumbPath) && fs.statSync(thumbPath).size > 0) {
+        return thumbPath;
+      }
+      if (!fallbackTelegramThumbFileId) return null;
+      try {
+        const thumbInfo = await telegramApiJson(apiBase, botToken, "getFile", {
+          file_id: fallbackTelegramThumbFileId,
+        });
+        if (!thumbInfo?.file_path) return null;
+        const thumbUrl = String(thumbInfo.file_path).startsWith("http")
+          ? thumbInfo.file_path
+          : `${apiBase}/file/bot${botToken}/${thumbInfo.file_path}`;
+        await downloadFileToPath(thumbUrl, thumbPath);
+        if (fs.existsSync(thumbPath) && fs.statSync(thumbPath).size > 0) {
+          return thumbPath;
+        }
+      } catch (dlThumbErr) {
+        console.warn("Fallback Telegram thumbnail download failed:", dlThumbErr?.message || dlThumbErr);
+      }
+      return null;
+    };
 
     const sendFallbackLinkText = async (extraNotice = "") => {
       const htmlText = extraNotice ? `${caption}\n\n${extraNotice}` : caption;
@@ -2259,8 +2341,8 @@ async function handleTelegramUpdate({
             replyToMessageId: replyToMsgId,
           });
           return { posted: true, mode: "video_file_id" };
-        } catch (_) {
-          // Fall through to photo/text
+        } catch (vidErr) {
+          console.warn("sendTelegramVideoByFileId fallback to photo:", vidErr?.message || vidErr);
         }
       } else if (fs.existsSync(clipPath) && fs.statSync(clipPath).size > 0) {
         try {
@@ -2272,23 +2354,48 @@ async function handleTelegramUpdate({
             replyToMessageId: replyToMsgId,
           });
           return { posted: true, mode: "video_clip" };
-        } catch (_) {
-          // Fall through to photo/text
+        } catch (clipErr) {
+          console.warn("sendTelegramVideoClip fallback to photo:", clipErr?.message || clipErr);
         }
       }
 
-      if (photoCandidate) {
+      // Build ordered, valid photo candidates (NEVER pass raw video.thumbnail.file_id directly to sendPhoto!)
+      const photoCandidates = [];
+      if (forwardedPreviewPhotoFileId) photoCandidates.push(forwardedPreviewPhotoFileId);
+      if (localThumbReady) photoCandidates.push(thumbPath);
+      if (finalThumbPath) photoCandidates.push(finalThumbPath);
+
+      for (const candidate of photoCandidates) {
         try {
           await sendTelegramPhoto(apiBase, botToken, {
             chatId: targetChatId,
-            imagePathOrUri: photoCandidate,
+            imagePathOrUri: candidate,
             caption,
             watchUrl,
             replyToMessageId: replyToMsgId,
           });
           return { posted: true, mode: "photo" };
-        } catch (_) {
-          // Fall through to clean text
+        } catch (photoErr) {
+          console.warn("sendTelegramPhoto candidate failed, trying next:", photoErr?.message || photoErr);
+        }
+      }
+
+      // Last-chance photo fallback: download video's Telegram thumbnail bytes via getFile & upload as JPEG
+      if (fallbackTelegramThumbFileId) {
+        const downloadedThumb = await ensureDownloadedFallbackThumb();
+        if (downloadedThumb) {
+          try {
+            await sendTelegramPhoto(apiBase, botToken, {
+              chatId: targetChatId,
+              imagePathOrUri: downloadedThumb,
+              caption,
+              watchUrl,
+              replyToMessageId: replyToMsgId,
+            });
+            return { posted: true, mode: "photo_tg_thumb" };
+          } catch (dlPhotoErr) {
+            console.warn("Downloaded Telegram thumbnail sendPhoto failed:", dlPhotoErr?.message || dlPhotoErr);
+          }
         }
       }
 

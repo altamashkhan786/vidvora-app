@@ -2449,6 +2449,122 @@ test("parseChannelTargetInput, /setchannel, auto-channel post on upload/convert,
   }
 });
 
+test("handleTelegramUpdate uploads local JPEG thumbnail via multipart FormData and retries HTTP thumbnail URLs as multipart", async () => {
+  const { handleTelegramUpdate, hashToken } = require("./telegramBot");
+
+  const srcCode = "GM-HTTPTHUMB1";
+  const srcHash = hashToken(srcCode);
+  const store = new Map([
+    ["appConfig/telegramBot", { botToken: "123:THUMBTEST" }],
+    ["members/mem_th_1", { memberId: "mem_th_1", name: "Thumb Creator", role: "CREATOR", isActive: true }],
+    [
+      "telegramBotSessions/800444",
+      {
+        telegramUserId: "800444",
+        role: "CREATOR",
+        memberId: "mem_th_1",
+        memberName: "Thumb Creator",
+        uploadCount: 0,
+      },
+    ],
+    ["accessLinks/link_th_1", { linkId: "link_th_1", videoId: "vid_th_1", tokenHash: srcHash, isActive: true }],
+    [
+      "videos/vid_th_1",
+      {
+        videoId: "vid_th_1",
+        title: "Thumb Fallback Video",
+        storagePath: "https://vidvora-share-bot.onrender.com/streamPublicVideo?videoId=vid_th_1&sig=abc",
+        thumbnailPath: "https://cdn.example.com/slow_thumb.jpg",
+        isActive: true,
+      },
+    ],
+  ]);
+
+  const mockDb = {
+    collection: (col) => {
+      const makeQuery = (filters = []) => ({
+        where: (field, op, val) => makeQuery([...filters, { field, val }]),
+        limit: () => makeQuery(filters),
+        get: async () => {
+          const matches = [];
+          for (const [k, v] of store.entries()) {
+            if (k.startsWith(`${col}/`) && filters.every((f) => v[f.field] === f.val)) {
+              matches.push({ exists: true, id: k.split("/")[1], data: () => v });
+            }
+          }
+          return { empty: matches.length === 0, docs: matches };
+        },
+      });
+      return {
+        doc: (id) => ({
+          get: async () => {
+            const v = store.get(`${col}/${id}`);
+            return v ? { exists: true, id, data: () => v } : { exists: false, id };
+          },
+          set: async (data, opts) => {
+            const prev = opts?.merge ? store.get(`${col}/${id}`) || {} : {};
+            store.set(`${col}/${id}`, { ...prev, ...data });
+          },
+        }),
+        where: (field, op, val) => makeQuery([{ field, val }]),
+      };
+    },
+  };
+
+  let jsonPhotoFailedOnce = false;
+  let multipartPhotoUploaded = false;
+  const origFetch = global.fetch;
+  global.fetch = async (url, init = {}) => {
+    const urlStr = String(url);
+    if (urlStr === "https://cdn.example.com/slow_thumb.jpg") {
+      return {
+        ok: true,
+        status: 200,
+        headers: new Map([["content-type", "image/jpeg"]]),
+        arrayBuffer: async () => Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]),
+      };
+    }
+    if (urlStr.endsWith("/sendPhoto")) {
+      if (typeof init.body === "string") {
+        // Simulate Telegram rejecting direct HTTP URL fetch
+        jsonPhotoFailedOnce = true;
+        return {
+          ok: false,
+          status: 400,
+          json: async () => ({ ok: false, description: "Bad Request: failed to get HTTP URL content" }),
+        };
+      }
+      // Multipart FormData retry must succeed!
+      multipartPhotoUploaded = true;
+      return { ok: true, status: 200, json: async () => ({ ok: true, result: { message_id: 901 } }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true, result: { message_id: 900 } }) };
+  };
+
+  try {
+    const res = await handleTelegramUpdate({
+      update: {
+        message: {
+          message_id: 10,
+          chat: { id: 800444 },
+          from: { id: 800444 },
+          text: `https://vidvora-share-bot.onrender.com/share?link=${srcCode}`,
+        },
+      },
+      db: mockDb,
+      storage: null,
+      functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+      playbackSecret: "sec",
+    });
+
+    assert.equal(res.ok, true);
+    assert.equal(jsonPhotoFailedOnce, true);
+    assert.equal(multipartPhotoUploaded, true);
+  } finally {
+    global.fetch = origFetch;
+  }
+});
+
 
 
 
