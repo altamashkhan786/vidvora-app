@@ -2267,6 +2267,188 @@ test("handleTelegramUpdate text fallback disables Telegram web page preview so g
   }
 });
 
+test("parseChannelTargetInput, /setchannel, auto-channel post on upload/convert, and /clearchannel work end-to-end", async () => {
+  const {
+    parseChannelTargetInput,
+    extractForwardedChannelInfo,
+    handleTelegramUpdate,
+    hashToken,
+  } = require("./telegramBot");
+
+  assert.deepEqual(parseChannelTargetInput("@VidVoraMovies"), { valid: true, target: "@VidVoraMovies" });
+  assert.deepEqual(parseChannelTargetInput("https://t.me/VidVoraMovies"), { valid: true, target: "@VidVoraMovies" });
+  assert.deepEqual(parseChannelTargetInput("-1001987654321"), { valid: true, target: "-1001987654321" });
+  assert.equal(parseChannelTargetInput("https://t.me/+AbCdEf12345").valid, false);
+  assert.equal(parseChannelTargetInput("https://t.me/+AbCdEf12345").reason, "invite_link");
+
+  assert.deepEqual(
+    extractForwardedChannelInfo({
+      forward_origin: {
+        type: "channel",
+        chat: { id: -100555666777, title: "Private VIP", username: "" },
+      },
+    }),
+    { id: "-100555666777", title: "Private VIP", username: "" }
+  );
+
+  const srcCode = "GM-AUTOPOST1";
+  const srcHash = hashToken(srcCode);
+  const store = new Map([
+    ["appConfig/telegramBot", { botToken: "123:AUTOPOST" }],
+    [
+      "members/mem_ch_1",
+      { memberId: "mem_ch_1", name: "Altamash", role: "CREATOR", isActive: true },
+    ],
+    [
+      "telegramBotSessions/700555",
+      {
+        telegramUserId: "700555",
+        role: "CREATOR",
+        memberId: "mem_ch_1",
+        memberName: "Altamash",
+        uploadCount: 0,
+      },
+    ],
+    [
+      "accessLinks/link_ap_1",
+      { linkId: "link_ap_1", videoId: "vid_ap_1", tokenHash: srcHash, isActive: true },
+    ],
+    [
+      "videos/vid_ap_1",
+      {
+        videoId: "vid_ap_1",
+        title: "Auto Post Movie",
+        storagePath: "https://vidvora-share-bot.onrender.com/streamPublicVideo?videoId=vid_ap_1&sig=xyz",
+        thumbnailPath: "https://cdn.example.com/auto_thumb.jpg",
+        isActive: true,
+      },
+    ],
+  ]);
+
+  const mockDb = {
+    collection: (col) => {
+      const makeQuery = (filters = []) => ({
+        where: (field, op, val) => makeQuery([...filters, { field, val }]),
+        limit: () => makeQuery(filters),
+        get: async () => {
+          const matches = [];
+          for (const [k, v] of store.entries()) {
+            if (k.startsWith(`${col}/`) && filters.every((f) => v[f.field] === f.val)) {
+              matches.push({ exists: true, id: k.split("/")[1], data: () => v });
+            }
+          }
+          return { empty: matches.length === 0, docs: matches };
+        },
+      });
+      return {
+        doc: (id) => ({
+          get: async () => {
+            const v = store.get(`${col}/${id}`);
+            return v ? { exists: true, id, data: () => v } : { exists: false, id };
+          },
+          set: async (data, opts) => {
+            const prev = opts?.merge ? store.get(`${col}/${id}`) || {} : {};
+            store.set(`${col}/${id}`, { ...prev, ...data });
+          },
+        }),
+        where: (field, op, val) => makeQuery([{ field, val }]),
+      };
+    },
+  };
+
+  const apiCalls = [];
+  const origFetch = global.fetch;
+  global.fetch = async (url, init = {}) => {
+    const method = String(url).split("/").pop();
+    const body = typeof init.body === "string" ? JSON.parse(init.body) : {};
+    apiCalls.push({ method, body });
+    if (method === "getChat") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          result: { id: -100999888777, title: "VidVora Official", username: "VidVoraOfficial", type: "channel" },
+        }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true, result: { message_id: 888 } }) };
+  };
+
+  try {
+    // 1. User links channel with /setchannel
+    const setRes = await handleTelegramUpdate({
+      update: {
+        message: {
+          message_id: 1,
+          chat: { id: 700555 },
+          from: { id: 700555 },
+          text: "/setchannel @VidVoraOfficial",
+        },
+      },
+      db: mockDb,
+      storage: null,
+      functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+      playbackSecret: "sec",
+    });
+    assert.equal(setRes.ok, true);
+    assert.equal(setRes.action, "channel_set");
+    assert.equal(setRes.channelId, "-100999888777");
+    assert.equal(store.get("telegramBotSessions/700555").autoPostChannelId, "-100999888777");
+
+    // 2. User sends video/link -> automatically posted to channel (-100999888777) without reply_to_message_id
+    const postRes = await handleTelegramUpdate({
+      update: {
+        message: {
+          message_id: 2,
+          chat: { id: 700555 },
+          from: { id: 700555 },
+          text: `https://vidvora-share-bot.onrender.com/share?link=${srcCode}`,
+        },
+      },
+      db: mockDb,
+      storage: null,
+      functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+      playbackSecret: "sec",
+    });
+    assert.equal(postRes.ok, true);
+    assert.equal(postRes.postedToChannel, "-100999888777");
+
+    const channelPhotoCall = apiCalls.find(
+      (c) => c.method === "sendPhoto" && String(c.body.chat_id) === "-100999888777"
+    );
+    assert.ok(channelPhotoCall, "Expected sendPhoto directly to target channel");
+    assert.equal(channelPhotoCall.body.reply_to_message_id, undefined);
+    assert.ok(channelPhotoCall.body.caption.includes(postRes.rawToken));
+
+    const dmConfirmEdit = apiCalls.find(
+      (c) => c.method === "editMessageText" && String(c.body.chat_id) === "700555" && String(c.body.text).includes("Channel par post ho gaya")
+    );
+    assert.ok(dmConfirmEdit, "Expected DM confirmation message");
+
+    // 3. User disables auto-post with /clearchannel
+    const clearRes = await handleTelegramUpdate({
+      update: {
+        message: {
+          message_id: 3,
+          chat: { id: 700555 },
+          from: { id: 700555 },
+          text: "/clearchannel",
+        },
+      },
+      db: mockDb,
+      storage: null,
+      functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+      playbackSecret: "sec",
+    });
+    assert.equal(clearRes.ok, true);
+    assert.equal(clearRes.action, "channel_cleared");
+    assert.equal(store.get("telegramBotSessions/700555").autoPostChannelId, "");
+  } finally {
+    global.fetch = origFetch;
+  }
+});
+
 
 
 

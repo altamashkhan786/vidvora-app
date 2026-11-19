@@ -799,6 +799,24 @@ async function sendTelegramPhoto(apiBase, botToken, { chatId, imagePathOrUri, ca
     });
   }
 
+  if (!cleanImg.startsWith("http://") && !cleanImg.startsWith("https://") && fs.existsSync(cleanImg)) {
+    const imgBuffer = await fs.promises.readFile(cleanImg);
+    const ext = cleanImg.toLowerCase().endsWith(".png") ? "png" : "jpg";
+    const mime = ext === "png" ? "image/png" : "image/jpeg";
+    return telegramMultipartCall(apiBase, botToken, "sendPhoto", () => {
+      const form = new FormData();
+      form.append("chat_id", String(chatId));
+      form.append("caption", caption);
+      form.append("parse_mode", "HTML");
+      if (replyToMessageId) {
+        form.append("reply_to_message_id", String(replyToMessageId));
+      }
+      form.append("reply_markup", replyMarkup);
+      form.append("photo", new Blob([imgBuffer], { type: mime }), `vidvora_thumb.${ext}`);
+      return form;
+    });
+  }
+
   return telegramApiJson(apiBase, botToken, "sendPhoto", {
     chat_id: chatId,
     photo: cleanImg,
@@ -809,6 +827,43 @@ async function sendTelegramPhoto(apiBase, botToken, { chatId, imagePathOrUri, ca
       inline_keyboard: [[{ text: "▶️ Watch Full Video on VidVora", url: watchUrl }]],
     },
   });
+}
+
+function parseChannelTargetInput(rawInput) {
+  const clean = String(rawInput || "").trim();
+  if (!clean) return { valid: false, reason: "empty" };
+  if (/^(?:https?:\/\/)?(?:www\.)?(?:t\.me|telegram\.me)\/(?:\+|joinchat\/)/i.test(clean)) {
+    return { valid: false, reason: "invite_link" };
+  }
+  const numericMatch = clean.match(/^(-100\d{5,20})$/);
+  if (numericMatch) {
+    return { valid: true, target: numericMatch[1] };
+  }
+  const urlMatch = clean.match(/^(?:https?:\/\/)?(?:www\.)?(?:t\.me|telegram\.me)\/([a-zA-Z0-9_]{4,64})(?:\/.*)?$/i);
+  if (urlMatch) {
+    return { valid: true, target: `@${urlMatch[1]}` };
+  }
+  const handleMatch = clean.match(/^@?([a-zA-Z][a-zA-Z0-9_]{3,63})$/);
+  if (handleMatch) {
+    return { valid: true, target: `@${handleMatch[1]}` };
+  }
+  return { valid: false, reason: "invalid_format" };
+}
+
+function extractForwardedChannelInfo(message) {
+  const originChat =
+    message?.forward_origin?.type === "channel" && message.forward_origin.chat
+      ? message.forward_origin.chat
+      : null;
+  const legacyChat =
+    message?.forward_from_chat?.type === "channel" ? message.forward_from_chat : null;
+  const ch = originChat || legacyChat;
+  if (!ch || !ch.id) return null;
+  return {
+    id: String(ch.id),
+    title: String(ch.title || ch.username || ch.id),
+    username: ch.username ? String(ch.username) : "",
+  };
 }
 
 async function writeFetchResponseToFile(res, destPath) {
@@ -1390,15 +1445,20 @@ async function handleTelegramUpdate({
   if (/^\/start(?:@\w+)?/i.test(textBody) || /^\/help(?:@\w+)?/i.test(textBody)) {
     await replyText(
       [
-        "🎬 *VidVora Creator Auto-Upload & Link Converter Bot*",
+        "🎬 *VidVora Creator Auto-Upload & Channel Auto-Post Bot*",
         "",
-        "1️⃣ Link your VidVora Creator / Admin account:",
-        "_(Just send your Password directly)_",
+        "1️⃣ Apna VidVora Creator / Admin account link karein:",
+        "_(Bas apna Password seedha yahan bhej dein)_",
         "",
-        "2️⃣ *Batch Forward / Upload:* Telegram channel se 1 ya 10–50 *video files* ek saath select karke yahan forward karein (ya direct `.mp4`/`.m3u8` URL bhejein).",
-        "3️⃣ *Convert VidVora Link:* Kisi VidVora Share Link ko paste ya forward karein.",
+        "2️⃣ *Auto-Channel Post Set Karein (Optional):*",
+        "• Bot ko apne Telegram Channel me *Admin (Post Messages)* banayein.",
+        "• Phir bhejein: `/setchannel @YourChannelUsername`",
+        "_(Private channel ke liye channel ka koi bhi text message yahan forward karein)_",
         "",
-        "Commands: `/status` • `/logout` • `/convert`",
+        "3️⃣ *Video Bhejein → Direct Channel Post:*",
+        "Ab aap 1 ya 10–50 *video files* / *VidVora links* yahan bhejein — bot khud link + preview banakar seedha aapke channel me post kar dega!",
+        "",
+        "Commands: `/setchannel` • `/channel` • `/clearchannel` • `/status` • `/logout`",
       ].join("\n"),
       { parse_mode: "Markdown" }
     );
@@ -1414,7 +1474,7 @@ async function handleTelegramUpdate({
     return { ok: true, action: "logout" };
   }
 
-  if (/^\/status(?:@\w+)?/i.test(textBody)) {
+  const loadCurrentBotSession = async () => {
     let s = getCachedBotSession(db, telegramUserId);
     if (!s) {
       const sessionSnap = await db.collection("telegramBotSessions").doc(telegramUserId).get();
@@ -1423,15 +1483,146 @@ async function handleTelegramUpdate({
         setCachedBotSession(db, telegramUserId, s);
       }
     }
+    return s || null;
+  };
+
+  if (/^\/status(?:@\w+)?/i.test(textBody) || /^\/channel(?:@\w+)?(?:\s|$)/i.test(textBody)) {
+    const s = await loadCurrentBotSession();
     if (!s) {
-      await replyText("❌ Not linked yet. Send `/login YOUR_PASSWORD` first.", { parse_mode: "Markdown" });
+      await replyText("❌ Not linked yet. Send your Creator/Admin Password or `/login YOUR_PASSWORD` first.", {
+        parse_mode: "Markdown",
+      });
       return { ok: true, action: "status_unlinked" };
     }
+    const chId = String(s.autoPostChannelId || "").trim();
+    const chLabel = chId
+      ? `${escapeMarkdown(s.autoPostChannelTitle || chId)}${s.autoPostChannelUsername ? ` (@${escapeMarkdown(s.autoPostChannelUsername)})` : ""}`
+      : "OFF _(Sirf isi bot chat me reply aayega)_";
     await replyText(
-      `✅ Linked Creator: *${escapeMarkdown(s.memberName || "Creator")}*\n📤 Uploads via Bot: *${s.uploadCount || 0}*`,
+      [
+        `✅ Linked Account: *${escapeMarkdown(s.memberName || "Creator")}*`,
+        `📤 Uploads via Bot: *${s.uploadCount || 0}*`,
+        `📢 Auto-Post Channel: *${chLabel}*`,
+        "",
+        chId
+          ? "Band karne ke liye `/clearchannel` bhejein, ya badalne ke liye `/setchannel @NewChannel` bhejein."
+          : "Auto-Post chalu karne ke liye bot ko channel me Admin bana kar bhejein: `/setchannel @YourChannel`",
+      ].join("\n"),
       { parse_mode: "Markdown" }
     );
     return { ok: true, action: "status" };
+  }
+
+  if (/^\/(?:clear|off|stop|remove)channel(?:@\w+)?(?:\s|$)/i.test(textBody)) {
+    const s = await loadCurrentBotSession();
+    if (!s) {
+      await replyText("🔐 Pehle apna VidVora Password bhej kar account link karein.");
+      return { ok: true, action: "auth_required" };
+    }
+    const updated = {
+      ...s,
+      autoPostChannelId: "",
+      autoPostChannelTitle: "",
+      autoPostChannelUsername: "",
+    };
+    await db.collection("telegramBotSessions").doc(telegramUserId).set(
+      {
+        autoPostChannelId: "",
+        autoPostChannelTitle: "",
+        autoPostChannelUsername: "",
+      },
+      { merge: true }
+    );
+    setCachedBotSession(db, telegramUserId, updated);
+    await replyText(
+      "✅ *Auto-Post Channel band kar diya gaya hai.*\n\nAb videos ke link sirf isi bot chat me aayenge. Dobara chalu karne ke liye `/setchannel @YourChannel` bhejein.",
+      { parse_mode: "Markdown" }
+    );
+    return { ok: true, action: "channel_cleared" };
+  }
+
+  if (/^\/setchannel(?:@\w+)?(?:\s|$)/i.test(textBody)) {
+    const s = await loadCurrentBotSession();
+    if (!s) {
+      await replyText("🔐 Pehle apna VidVora Password bhej kar account link karein, phir `/setchannel @YourChannel` bhejein.", {
+        parse_mode: "Markdown",
+      });
+      return { ok: true, action: "auth_required" };
+    }
+    const rawArg = textBody.replace(/^\/setchannel(?:@\w+)?/i, "").trim();
+    const parsedTarget = parseChannelTargetInput(rawArg);
+    if (!parsedTarget.valid) {
+      const extraHint =
+        parsedTarget.reason === "invite_link"
+          ? "⚠️ Invite link (`t.me/+...`) se bot channel connect nahi kar sakta.\n\n*Private Channel* ke liye: Bot ko channel me Admin banayein aur us channel ka koi bhi text message yahan forward kar dein — main khud Channel ID bata dunga!"
+          : [
+              "📢 *Auto-Post Channel Set Karne Ka Tarika:*",
+              "",
+              "1️⃣ Pehle is bot ko apne Telegram Channel me *Admin (Post Messages)* banayein.",
+              "2️⃣ *Public Channel:* `/setchannel @YourChannelUsername` bhejein.",
+              "3️⃣ *Private Channel:* Us channel ka koi bhi text message yahan forward karein (ya `/setchannel -1001234567890` bhejein).",
+            ].join("\n");
+      await replyText(extraHint, { parse_mode: "Markdown" });
+      return { ok: true, action: "setchannel_help" };
+    }
+
+    try {
+      const chatInfo = await telegramApiJson(apiBase, botToken, "getChat", {
+        chat_id: parsedTarget.target,
+      });
+      if (!chatInfo || !chatInfo.id) {
+        throw new Error("Channel not found");
+      }
+      const canonicalId = String(chatInfo.id);
+      const channelTitle = String(chatInfo.title || chatInfo.username || canonicalId);
+      const channelUsername = chatInfo.username ? String(chatInfo.username) : "";
+
+      const updatedSession = {
+        ...s,
+        autoPostChannelId: canonicalId,
+        autoPostChannelTitle: channelTitle,
+        autoPostChannelUsername: channelUsername,
+      };
+      await db.collection("telegramBotSessions").doc(telegramUserId).set(
+        {
+          autoPostChannelId: canonicalId,
+          autoPostChannelTitle: channelTitle,
+          autoPostChannelUsername: channelUsername,
+        },
+        { merge: true }
+      );
+      setCachedBotSession(db, telegramUserId, updatedSession);
+
+      const displayLabel = channelUsername
+        ? `*${escapeMarkdown(channelTitle)}* (@${escapeMarkdown(channelUsername)})`
+        : `*${escapeMarkdown(channelTitle)}* (\`${canonicalId}\`)`;
+      await replyText(
+        [
+          "✅ *Auto-Post Channel Connect Ho Gaya!*",
+          "",
+          `📢 Channel: ${displayLabel}`,
+          "",
+          "Ab jab bhi aap mujhe koi *Video* (ya 10–50 videos ek saath) bhejenge, main khud VidVora link + preview banakar seedha is channel par post kar dunga!",
+          "",
+          "_(Make sure bot is Admin with 'Post Messages' ON in this channel. Band karne ke liye `/clearchannel` bhejein.)_",
+        ].join("\n"),
+        { parse_mode: "Markdown" }
+      );
+      return { ok: true, action: "channel_set", channelId: canonicalId };
+    } catch (chErr) {
+      await replyText(
+        [
+          `❌ Channel connect nahi ho paaya (\`${escapeMarkdown(parsedTarget.target)}\`).`,
+          "",
+          "Check karein:",
+          "1️⃣ Kya aapne is bot ko us channel me *Administrator (Post Messages)* add kiya hai?",
+          "2️⃣ Public channel ka username `@YourChannel` sahi likha hai?",
+          "3️⃣ Private channel hai toh us channel ka koi text message yahan forward karein taaki sahi `-100...` ID mil sake.",
+        ].join("\n"),
+        { parse_mode: "Markdown" }
+      );
+      return { ok: false, action: "channel_set_failed", error: chErr?.message || "getChat failed" };
+    }
   }
 
   const loginCmd = parseLoginCommand(textBody);
@@ -1445,14 +1636,22 @@ async function handleTelegramUpdate({
       await replyText("⛔ Your account does not have Upload Videos permission enabled.");
       return { ok: true, action: "login_forbidden" };
     }
+    const prevSession = await loadCurrentBotSession();
     const newSessionPayload = {
+      ...(prevSession?.autoPostChannelId
+        ? {
+            autoPostChannelId: prevSession.autoPostChannelId,
+            autoPostChannelTitle: prevSession.autoPostChannelTitle || "",
+            autoPostChannelUsername: prevSession.autoPostChannelUsername || "",
+          }
+        : {}),
       telegramUserId,
       chatId: String(chatId),
       memberId: creator.memberId,
       memberName: creator.name,
       role: creator.role || "member",
       linkedAt: new Date(),
-      uploadCount: 0,
+      uploadCount: Number(prevSession?.uploadCount || 0) || 0,
     };
     await db.collection("telegramBotSessions").doc(telegramUserId).set(newSessionPayload, { merge: true });
     setCachedBotSession(db, telegramUserId, newSessionPayload);
@@ -1493,14 +1692,22 @@ async function handleTelegramUpdate({
           await replyText("⛔ Your account does not have Upload Videos permission enabled.");
           return { ok: true, action: "login_forbidden" };
         }
+        const prevDirectSession = await loadCurrentBotSession();
         const directSessionPayload = {
+          ...(prevDirectSession?.autoPostChannelId
+            ? {
+                autoPostChannelId: prevDirectSession.autoPostChannelId,
+                autoPostChannelTitle: prevDirectSession.autoPostChannelTitle || "",
+                autoPostChannelUsername: prevDirectSession.autoPostChannelUsername || "",
+              }
+            : {}),
           telegramUserId,
           chatId: String(chatId),
           memberId: directCreator.memberId,
           memberName: directCreator.name,
           role: directCreator.role || "member",
           linkedAt: new Date(),
-          uploadCount: 0,
+          uploadCount: Number(prevDirectSession?.uploadCount || 0) || 0,
         };
         await db.collection("telegramBotSessions").doc(telegramUserId).set(directSessionPayload, { merge: true });
         setCachedBotSession(db, telegramUserId, directSessionPayload);
@@ -1518,17 +1725,26 @@ async function handleTelegramUpdate({
       }
     }
 
-    let hasExistingSession = Boolean(getCachedBotSession(db, telegramUserId));
-    if (!hasExistingSession) {
-      const existingSession = await db.collection("telegramBotSessions").doc(telegramUserId).get();
-      if (existingSession.exists) {
-        hasExistingSession = true;
-        setCachedBotSession(db, telegramUserId, existingSession.data() || {});
-      }
-    }
+    const existingSessionObj = await loadCurrentBotSession();
+    const hasExistingSession = Boolean(existingSessionObj);
     if (hasExistingSession) {
+      const forwardedChannel = extractForwardedChannelInfo(message);
+      if (forwardedChannel) {
+        const chCmd = `/setchannel ${forwardedChannel.username ? `@${forwardedChannel.username}` : forwardedChannel.id}`;
+        await replyText(
+          [
+            `📢 *Channel Detect Ho Gaya:* ${escapeMarkdown(forwardedChannel.title)}`,
+            `🆔 Channel ID: \`${forwardedChannel.id}\``,
+            "",
+            "Is channel par auto-post chalu karne ke liye (bot ko channel me Admin bana kar) yeh command copy karke bhejein:",
+            `\`${chCmd}\``,
+          ].join("\n"),
+          { parse_mode: "Markdown" }
+        );
+        return { ok: true, action: "channel_detected", channelId: forwardedChannel.id };
+      }
       await replyText(
-        "📹 Send/Batch-Forward *Video files*, a direct `.mp4` link, or any *VidVora Share Link* to convert into your own link.\n_(Account switch karne ke liye valid Password ya `/login YOUR_PASSWORD` bhejein.)_",
+        "📹 Send/Batch-Forward *Video files*, a direct `.mp4` link, or any *VidVora Share Link* to convert into your own link.\n_(Channel auto-post set karne ke liye `/setchannel @YourChannel` bhejein.)_",
         { parse_mode: "Markdown" }
       );
     } else {
@@ -1990,28 +2206,37 @@ async function handleTelegramUpdate({
       inline_keyboard: [[{ text: "▶️ Watch Full Video on VidVora", url: watchUrl }]],
     };
 
-    const sendFallbackLinkText = async () => {
+    const plainFallbackText = [
+      "🎬 VidVora — Watch Video",
+      "",
+      "🔗 Watch Full Video:",
+      watchUrl,
+      "",
+      "वीडियो कैसे देखे / How to play video",
+      "👇👇👇👇",
+      "https://t.me/VideoKaiseDekhe_ar",
+    ].join("\n");
+
+    const photoCandidate =
+      forwardedPreviewPhotoFileId ||
+      (fs.existsSync(thumbPath) && fs.statSync(thumbPath).size > 0 ? thumbPath : null) ||
+      fallbackTelegramThumbFileId ||
+      finalThumbPath;
+
+    const sendFallbackLinkText = async (extraNotice = "") => {
+      const htmlText = extraNotice ? `${caption}\n\n${extraNotice}` : caption;
+      const plainText = extraNotice ? `${plainFallbackText}\n\n${extraNotice}` : plainFallbackText;
       try {
         await telegramApiJson(apiBase, botToken, "editMessageText", {
           chat_id: chatId,
           message_id: statusMsg.message_id,
-          text: caption,
+          text: htmlText,
           parse_mode: "HTML",
           disable_web_page_preview: true,
           link_preview_options: { is_disabled: true },
           reply_markup: watchInlineMarkup,
         });
       } catch (_) {
-        const plainText = [
-          "🎬 VidVora — Watch Video",
-          "",
-          "🔗 Watch Full Video:",
-          watchUrl,
-          "",
-          "वीडियो कैसे देखे / How to play video",
-          "👇👇👇👇",
-          "https://t.me/VideoKaiseDekhe_ar",
-        ].join("\n");
         await telegramApiJson(apiBase, botToken, "editMessageText", {
           chat_id: chatId,
           message_id: statusMsg.message_id,
@@ -2023,67 +2248,123 @@ async function handleTelegramUpdate({
       }
     };
 
-    const trySendPhotoFallbackOrText = async () => {
-      const photoCandidate =
-        forwardedPreviewPhotoFileId ||
-        (fs.existsSync(thumbPath) && fs.statSync(thumbPath).size > 0 ? thumbPath : null) ||
-        fallbackTelegramThumbFileId ||
-        finalThumbPath;
+    const publishPostToTargetChat = async (targetChatId, replyToMsgId) => {
+      if (forwardedPreviewVideoFileId) {
+        try {
+          await sendTelegramVideoByFileId(apiBase, botToken, {
+            chatId: targetChatId,
+            fileId: forwardedPreviewVideoFileId,
+            caption,
+            watchUrl,
+            replyToMessageId: replyToMsgId,
+          });
+          return { posted: true, mode: "video_file_id" };
+        } catch (_) {
+          // Fall through to photo/text
+        }
+      } else if (fs.existsSync(clipPath) && fs.statSync(clipPath).size > 0) {
+        try {
+          await sendTelegramVideoClip(apiBase, botToken, {
+            chatId: targetChatId,
+            clipPath,
+            caption,
+            watchUrl,
+            replyToMessageId: replyToMsgId,
+          });
+          return { posted: true, mode: "video_clip" };
+        } catch (_) {
+          // Fall through to photo/text
+        }
+      }
+
       if (photoCandidate) {
         try {
           await sendTelegramPhoto(apiBase, botToken, {
-            chatId,
+            chatId: targetChatId,
             imagePathOrUri: photoCandidate,
             caption,
             watchUrl,
-            replyToMessageId: message.message_id,
+            replyToMessageId: replyToMsgId,
           });
-          await telegramApiJson(apiBase, botToken, "deleteMessage", {
-            chat_id: chatId,
-            message_id: statusMsg.message_id,
-          }).catch(() => {});
-          return;
+          return { posted: true, mode: "photo" };
         } catch (_) {
-          // Fall through to clean text without generic web preview box
+          // Fall through to clean text
         }
       }
-      await sendFallbackLinkText();
+
+      return { posted: false, mode: "text_fallback" };
     };
 
-    if (forwardedPreviewVideoFileId) {
+    const autoPostChannelId = String(session.autoPostChannelId || "").trim();
+    const autoPostChannelDisplay = session.autoPostChannelUsername
+      ? `${session.autoPostChannelTitle || autoPostChannelId} (@${session.autoPostChannelUsername})`
+      : session.autoPostChannelTitle || autoPostChannelId;
+
+    if (autoPostChannelId) {
+      let channelPosted = false;
+      let channelErrorMsg = "";
       try {
-        await sendTelegramVideoByFileId(apiBase, botToken, {
-          chatId,
-          fileId: forwardedPreviewVideoFileId,
-          caption,
-          watchUrl,
-          replyToMessageId: message.message_id,
-        });
-        await telegramApiJson(apiBase, botToken, "deleteMessage", {
+        const chRes = await publishPostToTargetChat(autoPostChannelId, null);
+        if (chRes.posted) {
+          channelPosted = true;
+        } else {
+          await telegramApiJson(apiBase, botToken, "sendMessage", {
+            chat_id: autoPostChannelId,
+            text: caption,
+            parse_mode: "HTML",
+            disable_web_page_preview: true,
+            link_preview_options: { is_disabled: true },
+            reply_markup: watchInlineMarkup,
+          });
+          channelPosted = true;
+        }
+      } catch (chPostErr) {
+        channelErrorMsg = String(chPostErr?.message || "Channel permission error");
+        console.warn(`Auto-post to channel ${autoPostChannelId} failed:`, channelErrorMsg);
+      }
+
+      if (channelPosted) {
+        const confirmHtml = [
+          "✅ <b>Channel par post ho gaya!</b>",
+          `📢 <b>Channel:</b> ${escapeHtml(autoPostChannelDisplay)}`,
+          `🔗 ${escapeHtml(watchUrl)}`,
+        ].join("\n");
+        await telegramApiJson(apiBase, botToken, "editMessageText", {
           chat_id: chatId,
           message_id: statusMsg.message_id,
+          text: confirmHtml,
+          parse_mode: "HTML",
+          disable_web_page_preview: true,
+          link_preview_options: { is_disabled: true },
+          reply_markup: watchInlineMarkup,
         }).catch(() => {});
-      } catch (_) {
-        await trySendPhotoFallbackOrText();
+        return { ok: true, videoId, linkId, rawToken, postedToChannel: autoPostChannelId };
       }
-    } else if (fs.existsSync(clipPath) && fs.statSync(clipPath).size > 0) {
-      try {
-        await sendTelegramVideoClip(apiBase, botToken, {
-          chatId,
-          clipPath,
-          caption,
-          watchUrl,
-          replyToMessageId: message.message_id,
-        });
-        await telegramApiJson(apiBase, botToken, "deleteMessage", {
+
+      // Channel post failed (e.g. bot removed as Admin) — still deliver link to user DM with warning
+      const dmRes = await publishPostToTargetChat(chatId, message.message_id);
+      if (dmRes.posted) {
+        await telegramApiJson(apiBase, botToken, "editMessageText", {
           chat_id: chatId,
           message_id: statusMsg.message_id,
+          text: `⚠️ Channel (${autoPostChannelDisplay}) par post nahi ho paaya. Check karein ki bot us channel me Admin (Post Messages) hai ya nahi. Link niche bhej diya hai.`,
         }).catch(() => {});
-      } catch (_) {
-        await trySendPhotoFallbackOrText();
+      } else {
+        await sendFallbackLinkText(
+          `⚠️ <i>Channel par auto-post fail hua (${escapeHtml(channelErrorMsg)}). Bot ko channel me Admin banayein.</i>`
+        );
       }
+      return { ok: true, videoId, linkId, rawToken, channelPostError: channelErrorMsg };
+    }
+
+    const dmRes = await publishPostToTargetChat(chatId, message.message_id);
+    if (dmRes.posted) {
+      await telegramApiJson(apiBase, botToken, "deleteMessage", {
+        chat_id: chatId,
+        message_id: statusMsg.message_id,
+      }).catch(() => {});
     } else {
-      await trySendPhotoFallbackOrText();
+      await sendFallbackLinkText();
     }
 
     return { ok: true, videoId, linkId, rawToken };
@@ -2268,22 +2549,36 @@ async function streamTelegramBotVideoFast({
     });
   }
 
+  // If Telegram CDN rejects HEAD (405), answer directly using known fileSize from getFile
+  if (isHead && upstream.status === 405 && resolved.fileSize > 0) {
+    res.writeHead(200, {
+      "Content-Type": "video/mp4",
+      "Accept-Ranges": "bytes",
+      "Content-Length": resolved.fileSize,
+      "Cache-Control": "private, no-cache",
+    });
+    res.end();
+    return;
+  }
+
   if (!upstream.ok && upstream.status !== 206) {
     const err = new Error("Unable to stream video from Telegram.");
     err.statusCode = upstream.status === 416 ? 416 : 502;
     throw err;
   }
 
-  // 3. Fast path: Upstream supports Range (206) or no Range was requested (HEAD / full GET stream)
-  // Pipe bytes straight to ExoPlayer immediately without downloading the entire file first!
+  // 3. Fast path: Upstream supports Range (206), or request starts from byte 0 (bytes=0- / no Range / HEAD)
+  // Pipe bytes straight to ExoPlayer immediately without waiting to download the full file!
   const upstreamContentRange = getHeaderValue(upstream.headers, "content-range");
   const upstreamContentLength = getHeaderValue(upstream.headers, "content-length");
+  const isOpenStartRange = Boolean(rangeHeader) && /^bytes=0-\s*$/i.test(String(rangeHeader).trim());
   const canDirectStream =
     upstream.status === 206 ||
     !rangeHeader ||
+    isOpenStartRange ||
     isHead;
 
-  if (canDirectStream && (isHead || upstream.body || !rangeHeader)) {
+  if (canDirectStream && (isHead || upstream.body || !rangeHeader || isOpenStartRange)) {
     const responseStatus = upstream.status === 206 ? 206 : 200;
     const outHeaders = {
       "Content-Type": "video/mp4",
@@ -2296,7 +2591,7 @@ async function streamTelegramBotVideoFast({
     if (upstreamContentLength) {
       const parsedLen = Number(upstreamContentLength);
       outHeaders["Content-Length"] = Number.isFinite(parsedLen) && parsedLen >= 0 ? parsedLen : upstreamContentLength;
-    } else if (isHead && resolved.fileSize > 0) {
+    } else if (resolved.fileSize > 0 && responseStatus === 200) {
       outHeaders["Content-Length"] = resolved.fileSize;
     }
 
@@ -2317,12 +2612,24 @@ async function streamTelegramBotVideoFast({
         });
       }
       await new Promise((resolveStream) => {
+        let settled = false;
+        const finishOnce = () => {
+          if (settled) return;
+          settled = true;
+          resolveStream();
+        };
         nodeStream.on("error", () => {
           if (!res.writableEnded) res.end();
-          resolveStream();
+          finishOnce();
         });
-        res.on("finish", resolveStream);
-        res.on("close", resolveStream);
+        if (typeof res.on === "function") {
+          res.on("error", () => {
+            if (typeof nodeStream.destroy === "function") nodeStream.destroy();
+            finishOnce();
+          });
+          res.on("finish", finishOnce);
+          res.on("close", finishOnce);
+        }
         nodeStream.pipe(res);
       });
       return;
@@ -2862,6 +3169,8 @@ module.exports = {
   signStreamTarget,
   verifyStreamTarget,
   parseLoginCommand,
+  parseChannelTargetInput,
+  extractForwardedChannelInfo,
   parseTitleAndDescription,
   extractDirectVideoUrlMessage,
   extractVidVoraShareTarget,
