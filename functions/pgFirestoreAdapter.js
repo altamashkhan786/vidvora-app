@@ -202,6 +202,7 @@ const INDEXED_TEXT_FIELDS = new Set([
   "memberId",
   "videoId",
   "emailOrPhone",
+  "storagePath",
 ]);
 
 function createPgFirestoreDb({ connectionString = "", poolOverride = null } = {}) {
@@ -257,6 +258,9 @@ function createPgFirestoreDb({ connectionString = "", poolOverride = null } = {}
         );
         await pool.query(
           `CREATE INDEX IF NOT EXISTS idx_vidvora_docs_video_id ON vidvora_docs (collection, (data->>'videoId'))`
+        );
+        await pool.query(
+          `CREATE INDEX IF NOT EXISTS idx_vidvora_docs_storage_path ON vidvora_docs (collection, (data->>'storagePath'))`
         );
       })().catch((err) => {
         initPromise = null;

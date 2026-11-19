@@ -215,6 +215,59 @@ async function creditVideoViewAndCreator({ targetDb, videoId, uploadedBy, curren
   return true;
 }
 
+const LEGACY_STREAM_VIEW_TTL_MS = 5 * 60 * 1000;
+const MAX_LEGACY_STREAM_VIEW_CACHE = 2000;
+const legacyStreamViewCache = new Map();
+
+function recordLegacyDirectStreamView({ targetDb, shareCode, clientIp }) {
+  const cleanCode = String(shareCode || "").trim().toUpperCase();
+  if (!cleanCode || !targetDb) return;
+  const dedupeKey = `${String(clientIp || "unknown").trim()}|${cleanCode}`;
+  const now = Date.now();
+  const prevTs = legacyStreamViewCache.get(dedupeKey);
+  if (prevTs && now - prevTs < LEGACY_STREAM_VIEW_TTL_MS) {
+    return;
+  }
+  if (legacyStreamViewCache.size >= MAX_LEGACY_STREAM_VIEW_CACHE) {
+    const oldestKey = legacyStreamViewCache.keys().next().value;
+    if (oldestKey !== undefined) legacyStreamViewCache.delete(oldestKey);
+  }
+  legacyStreamViewCache.set(dedupeKey, now);
+
+  // Fire-and-forget view credit so streaming response never delays
+  (async () => {
+    try {
+      const tokenHash = hashToken(cleanCode);
+      const linksSnap = await targetDb
+        .collection("accessLinks")
+        .where("tokenHash", "==", tokenHash)
+        .limit(1)
+        .get();
+      let videoId = "";
+      if (!linksSnap.empty) {
+        const lData = linksSnap.docs[0].data() || {};
+        if (lData.isActive === false) return;
+        videoId = String(lData.videoId || "").trim();
+      } else {
+        videoId = cleanCode;
+      }
+      if (!videoId) return;
+      const vSnap = await targetDb.collection("videos").doc(videoId).get();
+      if (!vSnap.exists) return;
+      const vData = vSnap.data() || {};
+      if (vData.isActive === false) return;
+      await creditVideoViewAndCreator({
+        targetDb,
+        videoId: String(vData.videoId || vSnap.id),
+        uploadedBy: String(vData.uploadedBy || "admin"),
+        currentMemberId: null,
+      });
+    } catch (err) {
+      console.warn("Legacy direct stream view credit skipped:", err?.message || err);
+    }
+  })();
+}
+
 function hashSecretExact(secret) {
   return crypto.createHash("sha256").update(String(secret || "").trim(), "utf8").digest("hex");
 }
@@ -422,11 +475,24 @@ const server = http.createServer(async (req, res) => {
           return;
         }
 
-        const cleanUpper = rawToken.toUpperCase();
-        const keyCandidates = Array.from(new Set([rawToken, rawToken.toLowerCase(), cleanUpper]));
+        let effectiveToken = rawToken;
+        if (/^https?:\/\//i.test(rawToken)) {
+          try {
+            const parsedTokenUrl = new URL(rawToken);
+            const embeddedCode = String(parsedTokenUrl.searchParams.get("vv") || "").trim();
+            if (embeddedCode) {
+              effectiveToken = embeddedCode;
+            }
+          } catch (_) {
+            // Keep rawToken as-is
+          }
+        }
+
+        const cleanUpper = effectiveToken.toUpperCase();
+        const keyCandidates = Array.from(new Set([effectiveToken, effectiveToken.toLowerCase(), cleanUpper]));
         let resolvedVideoSnap = null;
 
-        const tokenHash = hashToken(rawToken);
+        const tokenHash = hashToken(effectiveToken);
         const linksQuery = await db
           .collection("accessLinks")
           .where("tokenHash", "==", tokenHash)
@@ -887,6 +953,20 @@ const server = http.createServer(async (req, res) => {
 
   if ((req.method === "GET" || req.method === "HEAD") && pathname === "/streamPublicVideo") {
     try {
+      const legacyShareCode = String(urlObj.searchParams.get("vv") || "").trim();
+      if (req.method === "GET" && legacyShareCode && db && db.isPostgresAdapter === true) {
+        const clientIp =
+          String(req.headers["x-forwarded-for"] || "")
+            .split(",")[0]
+            .trim() ||
+          req.socket?.remoteAddress ||
+          "unknown";
+        recordLegacyDirectStreamView({
+          targetDb: db,
+          shareCode: legacyShareCode,
+          clientIp,
+        });
+      }
       await handleStreamPublicVideo({
         videoId: urlObj.searchParams.get("videoId"),
         kind: urlObj.searchParams.get("kind"),

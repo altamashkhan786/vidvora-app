@@ -397,6 +397,7 @@ async function resolveShareTarget(db, rawCode) {
       code: cleanCode,
       title: String(vData.title || "VidVora Video").trim() || "VidVora Video",
       description: String(vData.description || "").trim(),
+      storagePath: vData.storagePath ? String(vData.storagePath).trim() : "",
       thumbnailPath: vData.thumbnailPath ? String(vData.thumbnailPath).trim() : "",
       uploaderName: String(vData.uploaderName || "VidVora Creator").trim(),
     };
@@ -559,8 +560,36 @@ async function handleShareThumbnailRequest({
   await sendFallbackBanner(res, fallbackImagePath, method);
 }
 
+function buildDeepLinkTarget(code, target) {
+  const cleanCode = String(code || "").trim();
+  if (!target || !target.found || !target.isActive) {
+    return cleanCode;
+  }
+  const rawStoragePath = String(target.storagePath || "").trim();
+  if (!/^https?:\/\//i.test(rawStoragePath)) {
+    return cleanCode;
+  }
+  // For VidVora's own streamPublicVideo endpoint, attach &vv=<code> so:
+  // 1) Old APKs (without Postgres client) play the direct stream immediately.
+  // 2) New APKs resolve the exact link code (preserving converted creator attribution).
+  // 3) Third-party signed CDN URLs remain untouched so their signatures never break.
+  if (cleanCode && rawStoragePath.includes("/streamPublicVideo")) {
+    try {
+      const parsed = new URL(rawStoragePath);
+      if (!parsed.searchParams.has("vv")) {
+        parsed.searchParams.set("vv", cleanCode);
+      }
+      return parsed.toString();
+    } catch (_) {
+      return rawStoragePath;
+    }
+  }
+  return rawStoragePath;
+}
+
 function buildShareHtml({
   code,
+  deepLinkTarget,
   title,
   description,
   ogImageUrl,
@@ -577,14 +606,16 @@ function buildShareHtml({
   const safeApkUrl = escapeHtml(apkDownloadUrl || DEFAULT_APK_URL);
   const safeCodeDisplay = escapeHtml(code || "VidVora Direct Player");
   const encodedCode = encodeURIComponent(code || "");
+  const effectiveDeepLink = String(deepLinkTarget || code || "").trim();
+  const encodedDeepLink = encodeURIComponent(effectiveDeepLink);
 
-  const customUri = code ? `vidvora://watch?link=${encodedCode}` : "vidvora://watch";
+  const customUri = effectiveDeepLink ? `vidvora://watch?link=${encodedDeepLink}` : "vidvora://watch";
   const intentBase = canonicalUrl.split("?")[0];
   const fallbackPageUrl = code
     ? `${intentBase}?link=${encodedCode}&install=1`
     : `${intentBase}?install=1`;
-  const intentUri = code
-    ? `intent://watch?link=${encodedCode}#Intent;scheme=vidvora;package=com.aistudio.vidvora.vstr;S.browser_fallback_url=${encodeURIComponent(fallbackPageUrl)};end`
+  const intentUri = effectiveDeepLink
+    ? `intent://watch?link=${encodedDeepLink}#Intent;scheme=vidvora;package=com.aistudio.vidvora.vstr;S.browser_fallback_url=${encodeURIComponent(fallbackPageUrl)};end`
     : "intent://watch#Intent;scheme=vidvora;package=com.aistudio.vidvora.vstr;end";
 
   return `<!DOCTYPE html>
@@ -870,18 +901,36 @@ async function handleSharePageRequest({
 
   const code = extractShareCode({ urlObj, codeParam });
   const isInstallFallback = urlObj?.searchParams?.get("install") === "1";
+  const isPostgresDb = Boolean(db && db.isPostgresAdapter === true);
   const skipDbForInstantAndroidOpen = Boolean(
-    code &&
+    !isPostgresDb &&
+      code &&
       !isInstallFallback &&
       /Android/i.test(userAgent || "") &&
       !isSocialCrawlerUserAgent(userAgent)
   );
-  const target =
-    code && !skipDbForInstantAndroidOpen
-      ? await resolveShareTarget(db, code)
-      : { found: false, isActive: false };
+  let target = { found: false, isActive: false };
+  if (code && !skipDbForInstantAndroidOpen) {
+    if (isPostgresDb && !isInstallFallback && /Android/i.test(userAgent || "") && !isSocialCrawlerUserAgent(userAgent)) {
+      // Fast bounded Postgres lookup (instant on LRU cache hit) so old & new APKs both play immediately
+      let timeoutHandle = null;
+      try {
+        target = await Promise.race([
+          resolveShareTarget(db, code),
+          new Promise((resolve) => {
+            timeoutHandle = setTimeout(() => resolve({ found: false, isActive: false }), 3500);
+          }),
+        ]);
+      } finally {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+      }
+    } else {
+      target = await resolveShareTarget(db, code);
+    }
+  }
 
   const activeVideo = Boolean(target && target.found && target.isActive);
+  const deepLinkTarget = isPostgresDb ? buildDeepLinkTarget(code, target) : code;
   const title = "VidVora — Watch Video";
   const description = "Tap to watch this video in VidVora App.";
 
@@ -922,6 +971,7 @@ async function handleSharePageRequest({
 
   const html = buildShareHtml({
     code,
+    deepLinkTarget,
     title,
     description,
     ogImageUrl,
@@ -955,6 +1005,7 @@ module.exports = {
   computeHdTargetDimensions,
   ensureCrispShareImage,
   resolveShareTarget,
+  buildDeepLinkTarget,
   handleShareThumbnailRequest,
   handleSharePageRequest,
   buildShareHtml,

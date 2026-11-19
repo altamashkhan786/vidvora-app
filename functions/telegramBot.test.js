@@ -1857,5 +1857,108 @@ test("handleTelegramUpdate instantly converts forwarded VidVora video post by re
   }
 });
 
+test("handleSharePageRequest resolves Postgres stream URL with vv tag for old+new APK compatibility while protecting inactive links and third-party URLs", async () => {
+  const { handleSharePageRequest, buildDeepLinkTarget } = require("./sharePreview");
+
+  const activeCode = "GM-PGPLAY88";
+  const activeHash = hashToken(activeCode);
+  const streamUrl =
+    "https://vidvora-share-bot.onrender.com/streamPublicVideo?videoId=vid_pg_88&kind=video&sig=abcdef1234";
+
+  const mockPgDb = {
+    isPostgresAdapter: true,
+    collection: (name) => {
+      if (name === "accessLinks") {
+        return {
+          where: (_field, _op, val) => ({
+            limit: () => ({
+              get: async () =>
+                val === activeHash
+                  ? {
+                      empty: false,
+                      docs: [
+                        {
+                          id: "link_pg_88",
+                          exists: true,
+                          data: () => ({ linkId: "link_pg_88", videoId: "vid_pg_88", isActive: true }),
+                        },
+                      ],
+                    }
+                  : { empty: true, docs: [] },
+            }),
+          }),
+          doc: () => ({ get: async () => ({ exists: false }) }),
+        };
+      }
+      if (name === "videos") {
+        return {
+          doc: (id) => ({
+            get: async () =>
+              id === "vid_pg_88"
+                ? {
+                    id: "vid_pg_88",
+                    exists: true,
+                    data: () => ({
+                      videoId: "vid_pg_88",
+                      title: "Neon Postgres Video",
+                      storagePath: streamUrl,
+                      isActive: true,
+                    }),
+                  }
+                : { exists: false },
+          }),
+        };
+      }
+      return { doc: () => ({ get: async () => ({ exists: false }) }) };
+    },
+  };
+
+  const out = { statusCode: 0, headers: {}, chunks: [] };
+  const mockRes = {
+    writeHead(code, headers) {
+      out.statusCode = code;
+      out.headers = headers || {};
+    },
+    end(chunk) {
+      if (chunk) out.chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+    },
+  };
+
+  await handleSharePageRequest({
+    reqUrl: `/share?link=${activeCode}`,
+    hostBaseUrl: "https://vidvora-share-bot.onrender.com",
+    res: mockRes,
+    db: mockPgDb,
+    userAgent: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/126.0.0.0 Mobile Safari/537.36",
+  });
+
+  assert.equal(out.statusCode, 200);
+  const html = Buffer.concat(out.chunks).toString("utf8");
+  const expectedDeepLink = `${streamUrl}&vv=${activeCode}`;
+  assert.ok(
+    html.includes(`intent://watch?link=${encodeURIComponent(expectedDeepLink)}#Intent;scheme=vidvora;package=com.aistudio.vidvora.vstr;`),
+    "Expected Android intent URI to carry direct stream URL with &vv= share code"
+  );
+  // Fallback install URL and copied share link must still stay clean short ?link=GM-...
+  assert.ok(
+    html.includes(encodeURIComponent(`https://vidvora-share-bot.onrender.com/share?link=${activeCode}&install=1`))
+  );
+  assert.ok(html.includes(`var cleanShareUrl = "https://vidvora-share-bot.onrender.com/share?link=${activeCode}"`));
+
+  // Third-party signed URL must NOT be mutated with &vv=
+  const signedCdn = "https://cdn.example.com/movie.mp4?X-Amz-Signature=deadbeef";
+  assert.equal(
+    buildDeepLinkTarget("GM-EXT1", { found: true, isActive: true, storagePath: signedCdn }),
+    signedCdn
+  );
+
+  // Inactive video must never leak storagePath
+  assert.equal(
+    buildDeepLinkTarget("GM-OFF1", { found: true, isActive: false, storagePath: streamUrl }),
+    "GM-OFF1"
+  );
+});
+
+
 
 
