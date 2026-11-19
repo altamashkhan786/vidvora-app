@@ -105,7 +105,7 @@ class FirebaseAuthAdminRepository(
       _isAdminAuthenticated.value = true
       _adminRole.value = "admin (dev)"
       _currentMember.value = null
-      clearPersistedCreatorSession()
+      persistSuperadminSession()
     }
     return isMatch
   }
@@ -139,44 +139,87 @@ class FirebaseAuthAdminRepository(
         _isAdminAuthenticated.value = true
         _adminRole.value = "admin (dev)"
         _currentMember.value = null
-        clearPersistedCreatorSession()
+        persistSuperadminSession()
         return true
       }
     }
 
-    // 2. Check Member passkey & email match in Firestore /members
-    val member = videoRepository.getMemberByPasskey(clean)
+    // 2. Check Member email + password match in Firestore /members (falls back to passkey-only only for legacy members without email)
+    val exactMember = videoRepository.getMemberByEmailAndPasskey(cleanEmail, clean)
+    val member = exactMember ?: videoRepository.getMemberByPasskey(clean)?.takeIf {
+      it.emailOrPhone.trim().isBlank() || it.emailOrPhone.trim().equals(cleanEmail, ignoreCase = true)
+    }
     if (member != null && member.isActive) {
-      val memberEmail = member.emailOrPhone.trim().lowercase()
-      // Require exact case-insensitive email match whenever member email is set
-      val emailMatches = memberEmail.isBlank() || memberEmail == cleanEmail
-      if (emailMatches) {
-        _isAdminAuthenticated.value = true
-        _adminRole.value = if (member.isDelegatedAdmin()) "delegated_admin" else "member"
-        _currentMember.value = member
-        persistCreatorMemberId(member.memberId)
-        Log.i(TAG, "${if (member.isDelegatedAdmin()) "Delegated Admin" else "Creator"} authenticated successfully: ${member.name} (${member.memberId}) with email $cleanEmail")
-        return true
-      }
+      signInMemberDirectly(member)
+      Log.i(TAG, "${if (member.isDelegatedAdmin()) "Delegated Admin" else "Creator"} authenticated successfully: ${member.name} (${member.memberId}) with email $cleanEmail")
+      return true
     }
 
     return false
   }
 
-  private fun persistCreatorMemberId(memberId: String) {
-    creatorPrefs?.edit()?.putString(KEY_ACTIVE_CREATOR_MEMBER_ID, memberId)?.apply()
+  fun signInMemberDirectly(member: FirestoreMember) {
+    val resolvedRole = if (member.isDelegatedAdmin()) "delegated_admin" else "member"
+    _isAdminAuthenticated.value = true
+    _adminRole.value = resolvedRole
+    _currentMember.value = member
+    persistCreatorSession(member.memberId, resolvedRole)
+  }
+
+  suspend fun restorePersistedSession(videoRepository: FirestoreVideoRepository) {
+    val persistedRole = creatorPrefs?.getString(KEY_PERSISTED_ROLE, null)?.trim()
+    val persistedMemberId = creatorPrefs?.getString(KEY_ACTIVE_CREATOR_MEMBER_ID, null)?.trim()
+
+    if (persistedRole == "superadmin") {
+      _isAdminAuthenticated.value = true
+      _adminRole.value = "admin (dev)"
+      _currentMember.value = null
+      return
+    }
+
+    if (!persistedMemberId.isNullOrBlank()) {
+      val liveMember = videoRepository.getMemberById(persistedMemberId)
+      if (liveMember != null && liveMember.isActive) {
+        val resolvedRole = if (liveMember.isDelegatedAdmin()) "delegated_admin" else "member"
+        _isAdminAuthenticated.value = true
+        _adminRole.value = resolvedRole
+        _currentMember.value = liveMember
+        persistCreatorSession(liveMember.memberId, resolvedRole)
+      } else if (liveMember != null && !liveMember.isActive) {
+        clearPersistedCreatorSession()
+      }
+    }
+  }
+
+  private fun persistSuperadminSession() {
+    creatorPrefs?.edit()
+      ?.remove(KEY_ACTIVE_CREATOR_MEMBER_ID)
+      ?.remove(KEY_CREATOR_UPLOADED_VIDEO_IDS)
+      ?.putString(KEY_PERSISTED_ROLE, "superadmin")
+      ?.apply()
+  }
+
+  private fun persistCreatorSession(memberId: String, role: String) {
+    creatorPrefs?.edit()
+      ?.putString(KEY_ACTIVE_CREATOR_MEMBER_ID, memberId)
+      ?.putString(KEY_PERSISTED_ROLE, role)
+      ?.apply()
   }
 
   private fun clearPersistedCreatorSession() {
     creatorPrefs?.edit()
       ?.remove(KEY_ACTIVE_CREATOR_MEMBER_ID)
+      ?.remove(KEY_PERSISTED_ROLE)
       ?.remove(KEY_CREATOR_UPLOADED_VIDEO_IDS)
       ?.apply()
   }
 
   fun updateCurrentMember(updatedMember: FirestoreMember) {
     if (_currentMember.value?.memberId == updatedMember.memberId) {
+      val updatedRole = if (updatedMember.isDelegatedAdmin()) "delegated_admin" else "member"
       _currentMember.value = updatedMember
+      _adminRole.value = updatedRole
+      persistCreatorSession(updatedMember.memberId, updatedRole)
     }
   }
 
@@ -359,6 +402,7 @@ class FirebaseAuthAdminRepository(
     const val ADMIN_MASTER_KEY = "7827128212"
     private const val CREATOR_PREFS_NAME = "vidvora_creator_prefs"
     private const val KEY_ACTIVE_CREATOR_MEMBER_ID = "active_creator_member_id"
+    private const val KEY_PERSISTED_ROLE = "persisted_auth_role"
     private const val KEY_CREATOR_UPLOADED_VIDEO_IDS = "creator_uploaded_video_ids"
     private const val KEY_SUPERADMIN_MASTER_KEY_HASH = "superadmin_master_key_hash"
   }

@@ -1045,4 +1045,49 @@ class ExampleUnitTest {
       com.example.data.repository.FirestoreVideoRepository.computeViewsLast24Hours(merged, nowMs)
     )
   }
+
+  @Test
+  fun selfSignupAuthAndBackendOrigin_resolvesRenderOriginAndCreatorPromotionDefaults() {
+    assertEquals(
+      "https://vidvora-share-bot.onrender.com",
+      com.example.data.repository.FirestoreVideoRepository.DEFAULT_AUTH_BACKEND_BASE_URL
+    )
+    assertEquals(
+      "https://vidvora-share-bot.onrender.com",
+      com.example.data.repository.FirestoreVideoRepository.extractRenderOriginFromShareUrl(
+        "https://vidvora-share-bot.onrender.com/share?link=GM-123"
+      )
+    )
+    assertEquals(
+      "",
+      com.example.data.repository.FirestoreVideoRepository.extractRenderOriginFromShareUrl(
+        "https://d1mn8mrvlzisg5.cloudfront.net/index.html?link=GM-123"
+      )
+    )
+
+    // Fresh self-signed creator starts with Creator role and core Creator options, then can be promoted to Admin
+    val defaultCreator = com.example.data.model.FirestoreMember(
+      memberId = "mem_self_01",
+      name = "Ayaan",
+      emailOrPhone = "ayaan@gmail.com",
+      passkey = "ayaan@99",
+      role = com.example.data.model.MemberRole.CREATOR,
+      allowedOptions = com.example.data.model.MemberOption.defaultKeysForRole(
+        com.example.data.model.MemberRole.CREATOR
+      )
+    )
+    org.junit.Assert.assertFalse(defaultCreator.isDelegatedAdmin())
+    assertTrue(defaultCreator.hasOption(com.example.data.model.MemberOption.UPLOAD_VIDEOS))
+    org.junit.Assert.assertFalse(defaultCreator.hasOption(com.example.data.model.MemberOption.MANAGE_MEMBERS))
+
+    val promotedAdmin = defaultCreator.copy(
+      role = com.example.data.model.MemberRole.ADMIN,
+      allowedOptions = com.example.data.model.MemberOption.defaultKeysForRole(
+        com.example.data.model.MemberRole.ADMIN
+      )
+    )
+    assertTrue(promotedAdmin.isDelegatedAdmin())
+    assertTrue(promotedAdmin.hasOption(com.example.data.model.MemberOption.MANAGE_MEMBERS))
+    assertTrue(promotedAdmin.hasOption(com.example.data.model.MemberOption.MANAGE_PAYOUTS))
+  }
 }

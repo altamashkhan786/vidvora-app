@@ -486,6 +486,22 @@ fun AdminPanelScreen(
           viewModel.signInWithGoogle(context).map {
             showLoginDialogOnRestricted = false
           }
+        },
+        onSendSignupOtp = { name, email, password ->
+          viewModel.sendSignupOtp(name, email, password)
+        },
+        onVerifySignupOtp = { name, email, password, otp ->
+          viewModel.verifySignupOtpAndLogin(name, email, password, otp).onSuccess {
+            showLoginDialogOnRestricted = false
+          }
+        },
+        onSendResetOtp = { email ->
+          viewModel.sendResetPasswordOtp(email)
+        },
+        onVerifyResetOtp = { email, otp, newPassword ->
+          viewModel.verifyResetPasswordOtpAndLogin(email, otp, newPassword).onSuccess {
+            showLoginDialogOnRestricted = false
+          }
         }
       )
     }

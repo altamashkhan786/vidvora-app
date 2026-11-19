@@ -1796,16 +1796,6 @@ class FirestoreVideoRepository(
         )
       }
 
-      // Prevent Master Key collision with another creator member
-      val hasCollision = allMembersSnap.documents.any { doc ->
-        doc.id != targetRef.id &&
-          (doc.getString("memberId") ?: doc.id) != canonicalMemberId &&
-          (doc.getString("passkey") ?: "").trim() == cleanPass
-      }
-      if (hasCollision) {
-        return Result.failure(IllegalArgumentException("This Password is already assigned to another member."))
-      }
-
       val resolvedRole = if (role != null) MemberRole.normalize(role) else previousMember.role
       val updates = hashMapOf<String, Any>(
         "name" to cleanName,
@@ -2129,13 +2119,6 @@ class FirestoreVideoRepository(
       }
 
       val cleanNew = newPasskey.trim()
-      val existingWithKey = db.collection("members")
-        .whereEqualTo("passkey", cleanNew)
-        .get()
-        .await()
-      if (existingWithKey.documents.any { it.id != cleanId }) {
-        return Result.failure(IllegalArgumentException("This Password is already in use. Please choose another password."))
-      }
 
       db.collection("members").document(cleanId).update("passkey", cleanNew).await()
 
@@ -2192,6 +2175,237 @@ class FirestoreVideoRepository(
     } catch (e: Exception) {
       Log.w(TAG, "getMemberByPasskey failed: ${e.message}")
       null
+    }
+  }
+
+  suspend fun getMemberByEmailAndPasskey(email: String, inputKey: String): FirestoreMember? {
+    val cleanEmail = email.trim().lowercase()
+    val cleanKey = inputKey.trim()
+    if (cleanEmail.isBlank() || cleanKey.isBlank()) return null
+    return try {
+      val snap = db.collection("members")
+        .whereEqualTo("passkey", cleanKey)
+        .get()
+        .await()
+      val doc = snap.documents.firstOrNull { d ->
+        (d.getString("emailOrPhone") ?: "").trim().lowercase() == cleanEmail
+      } ?: run {
+        // Fallback scan in case of subtle whitespace in stored emailOrPhone
+        val all = db.collection("members").get().await()
+        all.documents.firstOrNull { d ->
+          (d.getString("emailOrPhone") ?: "").trim().lowercase() == cleanEmail &&
+            (d.getString("passkey") ?: "").trim() == cleanKey
+        }
+      } ?: return null
+
+      val isActive = doc.getBoolean("isActive") ?: false
+      if (!isActive) return null
+      parseMemberDoc(doc)
+    } catch (e: Exception) {
+      Log.w(TAG, "getMemberByEmailAndPasskey failed: ${e.message}")
+      null
+    }
+  }
+
+  suspend fun getMemberById(memberId: String): FirestoreMember? {
+    val cleanId = memberId.trim()
+    if (cleanId.isBlank()) return null
+    return try {
+      val ref = resolveMemberDocRef(cleanId)
+      val doc = ref.get().await()
+      if (!doc.exists()) return null
+      parseMemberDoc(doc)
+    } catch (e: Exception) {
+      Log.w(TAG, "getMemberById failed: ${e.message}")
+      null
+    }
+  }
+
+  private suspend fun resolveAuthBackendBaseUrl(): String {
+    return try {
+      val snap = db.collection("appConfig").document("general").get().await()
+      val explicit = snap.getString("authBackendBaseUrl").orEmpty().trim().trimEnd('/')
+      if (explicit.startsWith("http://", ignoreCase = true) || explicit.startsWith("https://", ignoreCase = true)) {
+        return explicit
+      }
+      val shareBase = snap.getString("shareLinkBaseUrl").orEmpty().trim()
+      extractRenderOriginFromShareUrl(shareBase).ifBlank { DEFAULT_AUTH_BACKEND_BASE_URL }
+    } catch (_: Exception) {
+      DEFAULT_AUTH_BACKEND_BASE_URL
+    }
+  }
+
+  private suspend fun postAuthJson(endpointPath: String, jsonBody: org.json.JSONObject): Pair<Int, org.json.JSONObject> =
+    withContext(Dispatchers.IO) {
+      val baseUrl = resolveAuthBackendBaseUrl().trimEnd('/')
+      val url = URL("$baseUrl$endpointPath")
+      val conn = (url.openConnection() as HttpURLConnection).apply {
+        requestMethod = "POST"
+        connectTimeout = 20_000
+        readTimeout = 35_000
+        doOutput = true
+        setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+        setRequestProperty("Accept", "application/json")
+      }
+      try {
+        conn.outputStream.use { os ->
+          os.write(jsonBody.toString().toByteArray(Charsets.UTF_8))
+        }
+        val code = conn.responseCode
+        val stream = if (code in 200..299) conn.inputStream else (conn.errorStream ?: conn.inputStream)
+        val raw = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+        val parsed = try {
+          if (raw.isNotBlank()) org.json.JSONObject(raw) else org.json.JSONObject()
+        } catch (_: Exception) {
+          org.json.JSONObject().put("error", raw.ifBlank { "Server error ($code)" })
+        }
+        code to parsed
+      } finally {
+        conn.disconnect()
+      }
+    }
+
+  private fun parseMemberJson(memberObj: org.json.JSONObject, fallbackPasskey: String): FirestoreMember {
+    val allowedArr = memberObj.optJSONArray("allowedOptions")
+    val parsedOptions = buildList {
+      if (allowedArr != null) {
+        for (i in 0 until allowedArr.length()) {
+          val k = allowedArr.optString(i).trim()
+          if (k.isNotBlank()) add(k)
+        }
+      }
+    }
+    val role = MemberRole.normalize(memberObj.optString("role", MemberRole.CREATOR))
+    return FirestoreMember(
+      memberId = memberObj.optString("memberId", ""),
+      name = memberObj.optString("name", "Creator"),
+      emailOrPhone = memberObj.optString("emailOrPhone", ""),
+      passkey = memberObj.optString("passkey", "").ifBlank { fallbackPasskey },
+      role = role,
+      isActive = memberObj.optBoolean("isActive", true),
+      createdAt = Timestamp.now(),
+      totalEarning = memberObj.optDouble("totalEarning", 0.0),
+      creditedViews = memberObj.optLong("creditedViews", 0L),
+      viewRatePer1000 = memberObj.optDouble("viewRatePer1000", DEFAULT_VIEW_RATE_PER_1000),
+      allowedOptions = if (parsedOptions.isNotEmpty()) MemberOption.sanitizeKeys(parsedOptions) else MemberOption.defaultKeysForRole(role)
+    )
+  }
+
+  suspend fun sendSignupOtp(name: String, email: String, password: String): Result<String> {
+    val validationErr = validateMemberInput(name, email, password)
+    if (validationErr != null) {
+      return Result.failure(IllegalArgumentException(validationErr))
+    }
+    return try {
+      val payload = org.json.JSONObject()
+        .put("name", name.trim())
+        .put("email", email.trim().lowercase())
+        .put("password", password.trim())
+      val (code, json) = postAuthJson("/auth/send-signup-otp", payload)
+      if (code in 200..299 && json.optBoolean("ok", false)) {
+        Result.success(json.optString("message", "OTP Gmail par bhej diya gaya hai!"))
+      } else {
+        val msg = json.optString("error").ifBlank { "OTP send karne me problem aayi (HTTP $code)." }
+        Result.failure(IllegalStateException(msg))
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "sendSignupOtp failed: ${e.message}", e)
+      Result.failure(IllegalStateException("Server se connect nahi ho paya. Thodi der baad try karein."))
+    }
+  }
+
+  suspend fun verifySignupOtpAndCreateMember(
+    name: String,
+    email: String,
+    password: String,
+    otp: String
+  ): Result<FirestoreMember> {
+    val validationErr = validateMemberInput(name, email, password)
+    if (validationErr != null) {
+      return Result.failure(IllegalArgumentException(validationErr))
+    }
+    val cleanOtp = otp.trim()
+    if (!cleanOtp.matches(Regex("^\\d{6}$"))) {
+      return Result.failure(IllegalArgumentException("Kripya 6-digit numeric OTP enter karein."))
+    }
+    return try {
+      val payload = org.json.JSONObject()
+        .put("name", name.trim())
+        .put("email", email.trim().lowercase())
+        .put("password", password.trim())
+        .put("otp", cleanOtp)
+      val (code, json) = postAuthJson("/auth/verify-signup-otp", payload)
+      if (code in 200..299 && json.optBoolean("ok", false)) {
+        val memberObj = json.optJSONObject("member")
+          ?: return Result.failure(IllegalStateException("Account verified, please sign in on Login tab."))
+        val parsed = parseMemberJson(memberObj, password.trim())
+        val freshFromFirestore = if (parsed.memberId.isNotBlank()) getMemberById(parsed.memberId) else null
+        Result.success(freshFromFirestore ?: parsed)
+      } else {
+        val msg = json.optString("error").ifBlank { "OTP verify nahi ho paya (HTTP $code)." }
+        Result.failure(IllegalStateException(msg))
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "verifySignupOtp failed: ${e.message}", e)
+      Result.failure(IllegalStateException("Server se connect nahi ho paya. Thodi der baad try karein."))
+    }
+  }
+
+  suspend fun sendResetPasswordOtp(email: String): Result<String> {
+    val emailErr = validateEmailInput(email)
+    if (emailErr != null) {
+      return Result.failure(IllegalArgumentException(emailErr))
+    }
+    return try {
+      val payload = org.json.JSONObject()
+        .put("email", email.trim().lowercase())
+      val (code, json) = postAuthJson("/auth/send-reset-otp", payload)
+      if (code in 200..299 && json.optBoolean("ok", false)) {
+        Result.success(json.optString("message", "Reset OTP Gmail par bhej diya gaya hai!"))
+      } else {
+        val msg = json.optString("error").ifBlank { "Reset OTP send nahi ho paya (HTTP $code)." }
+        Result.failure(IllegalStateException(msg))
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "sendResetPasswordOtp failed: ${e.message}", e)
+      Result.failure(IllegalStateException("Server se connect nahi ho paya. Thodi der baad try karein."))
+    }
+  }
+
+  suspend fun verifyResetPasswordOtp(
+    email: String,
+    otp: String,
+    newPassword: String
+  ): Result<FirestoreMember> {
+    val emailErr = validateEmailInput(email)
+    if (emailErr != null) return Result.failure(IllegalArgumentException(emailErr))
+    val cleanPass = newPassword.trim()
+    if (cleanPass.length < MIN_PASSKEY_LENGTH) {
+      return Result.failure(IllegalArgumentException("Password must be at least $MIN_PASSKEY_LENGTH characters."))
+    }
+    val cleanOtp = otp.trim()
+    if (!cleanOtp.matches(Regex("^\\d{6}$"))) {
+      return Result.failure(IllegalArgumentException("Kripya 6-digit numeric OTP enter karein."))
+    }
+    return try {
+      val payload = org.json.JSONObject()
+        .put("email", email.trim().lowercase())
+        .put("otp", cleanOtp)
+        .put("newPassword", cleanPass)
+      val (code, json) = postAuthJson("/auth/verify-reset-otp", payload)
+      if (code in 200..299 && json.optBoolean("ok", false)) {
+        val memberObj = json.optJSONObject("member")
+          ?: return Result.failure(IllegalStateException("Password reset ho gaya, ab Login tab se sign in karein."))
+        val parsed = parseMemberJson(memberObj, cleanPass)
+        val freshFromFirestore = if (parsed.memberId.isNotBlank()) getMemberById(parsed.memberId) else null
+        Result.success(freshFromFirestore ?: parsed)
+      } else {
+        val msg = json.optString("error").ifBlank { "Password reset failed (HTTP $code)." }
+        Result.failure(IllegalStateException(msg))
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "verifyResetPasswordOtp failed: ${e.message}", e)
+      Result.failure(IllegalStateException("Server se connect nahi ho paya. Thodi der baad try karein."))
     }
   }
 
@@ -3215,9 +3429,32 @@ class FirestoreVideoRepository(
     const val DEFAULT_TELEGRAM_LINK = "https://t.me/VidVoraApp"
     const val DEFAULT_APK_DOWNLOAD_URL = "https://d1mn8mrvlzisg5.cloudfront.net/vidvora.apk"
     const val SHARE_LINK_BASE_URL = "https://d1mn8mrvlzisg5.cloudfront.net/index.html?link="
+    const val DEFAULT_AUTH_BACKEND_BASE_URL = "https://vidvora-share-bot.onrender.com"
     const val MIN_WITHDRAWAL_AMOUNT = 500.0
     const val DEFAULT_VIEW_RATE_PER_1000 = 190.0
     const val MIN_PASSKEY_LENGTH = 4
+
+    fun extractRenderOriginFromShareUrl(rawUrl: String): String {
+      val clean = rawUrl.trim()
+      if (clean.isBlank()) return ""
+      return try {
+        val withScheme = if (clean.startsWith("http://", ignoreCase = true) || clean.startsWith("https://", ignoreCase = true)) {
+          clean
+        } else {
+          "https://$clean"
+        }
+        val uri = java.net.URI(withScheme)
+        val host = uri.host.orEmpty().lowercase()
+        if (host.endsWith(".onrender.com")) {
+          val scheme = uri.scheme ?: "https"
+          "$scheme://$host"
+        } else {
+          ""
+        }
+      } catch (_: Exception) {
+        ""
+      }
+    }
 
     const val MAX_CUSTOM_TELEGRAM_CATEGORIES = 40
     const val MAX_CATEGORY_NAME_LENGTH = 60

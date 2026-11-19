@@ -155,6 +155,8 @@ fun HomeScreen(
   val isLoading by viewModel.isLoading.collectAsState()
   val errorMessage by viewModel.errorMessage.collectAsState()
   val isAdminAuthenticated by viewModel.isAdminAuthenticated.collectAsState()
+  val adminRole by viewModel.adminRole.collectAsState()
+  val currentMember by viewModel.currentMember.collectAsState()
   val watchHistory by viewModel.watchHistory.collectAsState()
   val telegramConfig by viewModel.telegramConfig.collectAsState()
   val telegramLink by viewModel.telegramLink.collectAsState()
@@ -281,9 +283,16 @@ fun HomeScreen(
         },
       horizontalAlignment = Alignment.CenterHorizontally
     ) {
-      // Brand Header with Top-Left 3-dot Telegram Menu, Centered Logo and Top-Right Admin lock
+      // Brand Header with Top-Left 3-dot Telegram Menu, Centered Logo and Top-Right Login / Sign Up
+      val headerSignedInLabel = when {
+        !isAdminAuthenticated -> null
+        currentMember == null || adminRole == "admin (dev)" || adminRole == "superadmin" || adminRole == "admin" -> "Admin"
+        currentMember?.isDelegatedAdmin() == true || adminRole == "delegated_admin" -> "Admin"
+        else -> "Creator"
+      }
       VidVoraHeader(
         isAdmin = isAdminAuthenticated,
+        signedInLabel = headerSignedInLabel,
         hasTelegramCategoryLinks = telegramCategories.any { it.link.isNotBlank() },
         onTelegramMenuClick = {
           focusManager.clearFocus()
@@ -1135,7 +1144,7 @@ fun HomeScreen(
     }
   }
 
-  // Admin login dialog when lock icon is pressed
+  // Login / Sign Up portal dialog
   if (showAdminLoginDialog) {
     AdminLoginDialog(
       onDismiss = { showAdminLoginDialog = false },
@@ -1152,6 +1161,21 @@ fun HomeScreen(
             onNavigateToAdmin()
           }
         }
+      },
+      onSendSignupOtp = { name, email, password ->
+        viewModel.sendSignupOtp(name, email, password)
+      },
+      onVerifySignupOtp = { name, email, password, otp ->
+        viewModel.verifySignupOtpAndLogin(name, email, password, otp)
+      },
+      onSendResetOtp = { email ->
+        viewModel.sendResetPasswordOtp(email)
+      },
+      onVerifyResetOtp = { email, otp, newPassword ->
+        viewModel.verifyResetPasswordOtpAndLogin(email, otp, newPassword)
+      },
+      onAuthenticatedNavigate = {
+        onNavigateToAdmin()
       }
     )
   }

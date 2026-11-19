@@ -360,5 +360,11 @@ service cloud.firestore {
                        request.resource.data.createdAt == resource.data.createdAt;
       allow delete: if isAdmin() || isValidId(eventId);
     }
+
+    // Email OTP Codes Collection:
+    // Managed strictly by server-side firebase-admin; no direct client reads or writes permitted
+    match /emailOtpCodes/{emailHash} {
+      allow read, write: if false;
+    }
   }
 }

@@ -415,6 +415,39 @@ class AdminViewModel(
     return adminAuthRepository.authenticateMemberOrAdmin(email, passkey, firestoreVideoRepository)
   }
 
+  suspend fun sendSignupOtp(name: String, email: String, password: String): Result<String> {
+    return firestoreVideoRepository.sendSignupOtp(name, email, password)
+  }
+
+  suspend fun verifySignupOtpAndLogin(
+    name: String,
+    email: String,
+    password: String,
+    otp: String
+  ): Result<FirestoreMember> {
+    val result = firestoreVideoRepository.verifySignupOtpAndCreateMember(name, email, password, otp)
+    result.getOrNull()?.let { member ->
+      adminAuthRepository.signInMemberDirectly(member)
+    }
+    return result
+  }
+
+  suspend fun sendResetPasswordOtp(email: String): Result<String> {
+    return firestoreVideoRepository.sendResetPasswordOtp(email)
+  }
+
+  suspend fun verifyResetPasswordOtpAndLogin(
+    email: String,
+    otp: String,
+    newPassword: String
+  ): Result<FirestoreMember> {
+    val result = firestoreVideoRepository.verifyResetPasswordOtp(email, otp, newPassword)
+    result.getOrNull()?.let { member ->
+      adminAuthRepository.signInMemberDirectly(member)
+    }
+    return result
+  }
+
   suspend fun signInWithGoogle(context: Context): Result<FirebaseUser> {
     return adminAuthRepository.signInWithGoogle(context)
   }

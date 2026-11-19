@@ -48,6 +48,8 @@ class HomeViewModel(
   val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
 
   val isAdminAuthenticated: StateFlow<Boolean> = adminAuthRepository.isAdminAuthenticated
+  val adminRole: StateFlow<String?> = adminAuthRepository.adminRole
+  val currentMember: StateFlow<com.example.data.model.FirestoreMember?> = adminAuthRepository.currentMember
 
   val allVideos: StateFlow<List<VideoToken>> = localVideoRepository.allVideosFlow
     .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -322,6 +324,39 @@ class HomeViewModel(
 
   suspend fun authenticateMemberOrAdmin(email: String, passkey: String): Boolean {
     return adminAuthRepository.authenticateMemberOrAdmin(email, passkey, firestoreVideoRepository)
+  }
+
+  suspend fun sendSignupOtp(name: String, email: String, password: String): Result<String> {
+    return firestoreVideoRepository.sendSignupOtp(name, email, password)
+  }
+
+  suspend fun verifySignupOtpAndLogin(
+    name: String,
+    email: String,
+    password: String,
+    otp: String
+  ): Result<com.example.data.model.FirestoreMember> {
+    val result = firestoreVideoRepository.verifySignupOtpAndCreateMember(name, email, password, otp)
+    result.getOrNull()?.let { member ->
+      adminAuthRepository.signInMemberDirectly(member)
+    }
+    return result
+  }
+
+  suspend fun sendResetPasswordOtp(email: String): Result<String> {
+    return firestoreVideoRepository.sendResetPasswordOtp(email)
+  }
+
+  suspend fun verifyResetPasswordOtpAndLogin(
+    email: String,
+    otp: String,
+    newPassword: String
+  ): Result<com.example.data.model.FirestoreMember> {
+    val result = firestoreVideoRepository.verifyResetPasswordOtp(email, otp, newPassword)
+    result.getOrNull()?.let { member ->
+      adminAuthRepository.signInMemberDirectly(member)
+    }
+    return result
   }
 
   suspend fun signInAdminWithGoogle(context: Context): Result<Unit> {

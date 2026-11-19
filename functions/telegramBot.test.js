@@ -1729,5 +1729,133 @@ test("telegramApiJson automatically waits and retries on Telegram 429 Too Many R
   }
 });
 
+test("isAllowedTelegramVideoMessage accepts muted animation videos and video_note messages", () => {
+  assert.equal(
+    isAllowedTelegramVideoMessage({ animation: { file_id: "anim_1", mime_type: "video/mp4", duration: 21 } }),
+    true
+  );
+  assert.equal(isAllowedTelegramVideoMessage({ video_note: { file_id: "vn_1", duration: 15 } }), true);
+});
+
+test("handleTelegramUpdate instantly converts forwarded VidVora video post by reusing preview file_id with HTML caption", async () => {
+  const { handleTelegramUpdate, hashToken } = require("./telegramBot");
+
+  const sourceToken = "GM-DAVUMPAK";
+  const sourceHash = hashToken(sourceToken);
+  const videosStore = new Map([
+    [
+      "vid_orig_dav",
+      {
+        videoId: "vid_orig_dav",
+        title: "Original Clip",
+        description: "Desc",
+        storagePath: "https://vidvora-share-bot.onrender.com/streamPublicVideo?videoId=vid_orig_dav&sig=abc",
+        thumbnailPath: "data:image/jpeg;base64,/9j/4AAQ",
+        tgFileId: "tg_orig_full_file",
+        isActive: true,
+        totalViews: 10,
+        uploadedBy: "creator_old",
+        uploaderName: "Old Creator",
+      },
+    ],
+  ]);
+
+  const mockDb = {
+    collection: (name) => {
+      if (name === "appConfig") {
+        return {
+          doc: (id) => ({
+            get: async () =>
+              id === "telegramBot"
+                ? { exists: true, data: () => ({ botToken: "123:TEST_TOKEN" }) }
+                : { exists: false, data: () => ({}) },
+          }),
+        };
+      }
+      if (name === "telegramBotSessions") {
+        return {
+          doc: () => ({
+            get: async () => ({
+              exists: true,
+              data: () => ({ memberId: "admin", memberName: "Admin", uploadCount: 5 }),
+            }),
+            set: async () => {},
+          }),
+        };
+      }
+      if (name === "accessLinks") {
+        return {
+          where: (_f, _op, val) => ({
+            limit: () => ({
+              get: async () =>
+                val === sourceHash
+                  ? {
+                      empty: false,
+                      docs: [{ id: "link_orig", exists: true, data: () => ({ videoId: "vid_orig_dav", isActive: true }) }],
+                    }
+                  : { empty: true, docs: [] },
+            }),
+          }),
+          doc: () => ({ get: async () => ({ exists: false }), set: async () => {} }),
+        };
+      }
+      if (name === "videos") {
+        return {
+          doc: (id) => ({
+            get: async () => (videosStore.has(id) ? { id, exists: true, data: () => videosStore.get(id) } : { exists: false }),
+            set: async (payload) => videosStore.set(id, payload),
+          }),
+        };
+      }
+      return { doc: () => ({ get: async () => ({ exists: false }) }) };
+    },
+  };
+
+  const apiCalls = [];
+  const origFetch = global.fetch;
+  global.fetch = async (url, init = {}) => {
+    const method = String(url).split("/").pop();
+    const body = typeof init.body === "string" ? JSON.parse(init.body) : {};
+    apiCalls.push({ method, body });
+    return { ok: true, json: async () => ({ ok: true, result: { message_id: 888 } }) };
+  };
+
+  try {
+    const res = await handleTelegramUpdate({
+      update: {
+        update_id: 999888777,
+        message: {
+          message_id: 401,
+          chat: { id: 123456 },
+          from: { id: "admin_tg" },
+          video: { file_id: "FORWARDED_PREVIEW_CLIP_ID", duration: 5, file_size: 400_000, mime_type: "video/mp4" },
+          caption: "🎬 VidVora — Watch Video\n\n🔗 Watch Full Video:\nhttps://vidvora-share-bot.onrender.com/share?link=GM-DAVUMPAK",
+          reply_markup: {
+            inline_keyboard: [[{ text: "▶️ Watch Full Video on VidVora", url: "https://vidvora-share-bot.onrender.com/share?link=GM-DAVUMPAK" }]],
+          },
+        },
+      },
+      db: mockDb,
+      storage: null,
+      functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+      playbackSecret: "sec",
+    });
+
+    assert.equal(res.ok, true);
+    assert.ok(res.rawToken.startsWith("GM-"));
+    assert.notEqual(res.rawToken, sourceToken);
+
+    const sendVideoCall = apiCalls.find((c) => c.method === "sendVideo");
+    assert.ok(sendVideoCall, "Expected instant sendVideo reusing forwarded preview file_id");
+    assert.equal(sendVideoCall.body.video, "FORWARDED_PREVIEW_CLIP_ID");
+    assert.equal(sendVideoCall.body.parse_mode, "HTML");
+    assert.ok(sendVideoCall.body.caption.includes(res.rawToken));
+    assert.ok(sendVideoCall.body.caption.includes("https://t.me/VideoKaiseDekhe_ar"));
+    assert.ok(!sendVideoCall.body.caption.includes("\\_"));
+  } finally {
+    global.fetch = origFetch;
+  }
+});
+
 
 

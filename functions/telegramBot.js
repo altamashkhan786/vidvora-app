@@ -19,12 +19,27 @@ const { normalizeShareBaseUrl } = require("./sharePreview");
 
 let heavyMediaLockTail = Promise.resolve();
 let heavyMediaPendingCount = 0;
-function withHeavyMediaSlot(taskFn) {
+const HEAVY_MEDIA_TASK_TIMEOUT_MS = 120_000;
+
+function withHeavyMediaSlot(taskFn, timeoutMs = HEAVY_MEDIA_TASK_TIMEOUT_MS) {
   heavyMediaPendingCount += 1;
   const run = async () => {
+    let timer = null;
     try {
-      return await taskFn();
+      const taskPromise = Promise.resolve().then(() => taskFn());
+      if (!timeoutMs || timeoutMs <= 0) {
+        return await taskPromise;
+      }
+      return await Promise.race([
+        taskPromise,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            reject(new Error("Upload task timed out while processing media."));
+          }, timeoutMs);
+        }),
+      ]);
     } finally {
+      if (timer) clearTimeout(timer);
       heavyMediaPendingCount = Math.max(0, heavyMediaPendingCount - 1);
     }
   };
@@ -386,16 +401,40 @@ async function resolveVidVoraSourceVideo(db, rawCode) {
   }
 }
 
-function isAllowedTelegramVideoMessage(message) {
-  if (!message) return false;
-  if (message.video && message.video.file_id) return true;
+function getTelegramVideoMediaObject(message) {
+  if (!message) return null;
+  if (message.video && message.video.file_id) return message.video;
   if (message.document && message.document.file_id) {
     const mime = String(message.document.mime_type || "").toLowerCase();
     const fileName = String(message.document.file_name || "").toLowerCase();
-    if (mime.startsWith("video/")) return true;
-    return /\.(mp4|mkv|mov|webm|m4v|3gp|avi)$/i.test(fileName);
+    if (mime.startsWith("video/") || /\.(mp4|mkv|mov|webm|m4v|3gp|avi)$/i.test(fileName)) {
+      return message.document;
+    }
   }
-  return false;
+  if (message.animation && message.animation.file_id) {
+    const mime = String(message.animation.mime_type || "").toLowerCase();
+    const fileName = String(message.animation.file_name || "").toLowerCase();
+    const duration = Number(message.animation.duration || 0);
+    if (mime.startsWith("video/") || /\.(mp4|mkv|mov|webm|m4v|3gp|avi)$/i.test(fileName) || duration > 0) {
+      return message.animation;
+    }
+  }
+  if (message.video_note && message.video_note.file_id) {
+    return message.video_note;
+  }
+  return null;
+}
+
+function isAllowedTelegramVideoMessage(message) {
+  return Boolean(getTelegramVideoMediaObject(message));
+}
+
+function escapeHtml(str) {
+  return String(str || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 function buildShareMessageCaption({
@@ -405,14 +444,14 @@ function buildShareMessageCaption({
   const effectiveBase = shareLinkBaseUrl || SHARE_LINK_BASE_URL;
   const watchUrl = `${effectiveBase}${rawToken}`;
   const lines = [
-    "🎬 *VidVora — Watch Video*",
+    "🎬 <b>VidVora — Watch Video</b>",
     "",
-    `🔗 *Watch Full Video:*`,
-    watchUrl,
+    "🔗 <b>Watch Full Video:</b>",
+    escapeHtml(watchUrl),
     "",
     "वीडियो कैसे देखे / How to play video",
     "👇👇👇👇",
-    "[https://t.me/VideoKaiseDekhe\\_ar](https://t.me/VideoKaiseDekhe_ar)",
+    "https://t.me/VideoKaiseDekhe_ar",
   ];
   return lines.join("\n");
 }
@@ -436,48 +475,89 @@ async function createFiveSecondPreviewAndThumbnail({
   const numericDuration = Number(durationSeconds) || 0;
   const startSec = numericDuration >= 12 ? 3 : 0;
   const clipDuration = Math.max(1, Math.min(Number(previewSeconds) || DEFAULT_PREVIEW_SECONDS, 10));
+  const MAX_COPY_CLIP_BYTES = 6 * 1024 * 1024;
+  let clipReady = false;
 
-  const baseArgs = [
-    "-y",
-    "-threads",
-    "1",
-    "-ss",
-    String(startSec),
-    "-i",
-    inputPathOrUrl,
-    "-t",
-    String(clipDuration),
-    "-vf",
-    "scale='min(640,iw)':-2",
-    "-c:v",
-    "libx264",
-    "-preset",
-    "ultrafast",
-    "-crf",
-    "28",
-    "-maxrate",
-    "900k",
-    "-bufsize",
-    "900k",
-    "-pix_fmt",
-    "yuv420p",
-    "-movflags",
-    "+faststart",
-  ];
-
+  // Fast & ultra-low-RAM path (~12 MB): stream-copy first 5 seconds cleanly from keyframe 0
   try {
     await execFileAsync(
       ffmpegBin,
-      [...baseArgs, "-c:a", "aac", "-b:a", "96k", outputClipPath],
-      { timeout: 120_000, maxBuffer: 5 * 1024 * 1024 }
+      [
+        "-y",
+        "-threads",
+        "1",
+        "-i",
+        inputPathOrUrl,
+        "-t",
+        String(clipDuration),
+        "-c",
+        "copy",
+        "-movflags",
+        "+faststart",
+        outputClipPath,
+      ],
+      { timeout: 20_000, killSignal: "SIGKILL", maxBuffer: 2 * 1024 * 1024 }
     );
+    if (fs.existsSync(outputClipPath)) {
+      const sz = fs.statSync(outputClipPath).size;
+      if (sz > 1024 && sz <= MAX_COPY_CLIP_BYTES) {
+        clipReady = true;
+      } else {
+        await fs.promises.unlink(outputClipPath).catch(() => {});
+      }
+    }
   } catch (_) {
-    // Retry without audio track (handles silent videos or incompatible audio codecs)
-    await execFileAsync(
-      ffmpegBin,
-      [...baseArgs, "-an", outputClipPath],
-      { timeout: 120_000, maxBuffer: 5 * 1024 * 1024 }
-    );
+    await fs.promises.unlink(outputClipPath).catch(() => {});
+  }
+
+  // Fallback: ultra-low-memory x264 transcode (safe for Render 512MB Free tier)
+  if (!clipReady) {
+    const baseArgs = [
+      "-y",
+      "-threads",
+      "1",
+      "-ss",
+      String(startSec),
+      "-i",
+      inputPathOrUrl,
+      "-t",
+      String(clipDuration),
+      "-vf",
+      "scale='min(480,iw)':-2",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "ultrafast",
+      "-tune",
+      "fastdecode",
+      "-x264-params",
+      "rc-lookahead=8:ref=1:bframes=0:threads=1",
+      "-crf",
+      "30",
+      "-maxrate",
+      "650k",
+      "-bufsize",
+      "650k",
+      "-pix_fmt",
+      "yuv420p",
+      "-movflags",
+      "+faststart",
+    ];
+
+    try {
+      await execFileAsync(
+        ffmpegBin,
+        [...baseArgs, "-c:a", "aac", "-b:a", "64k", outputClipPath],
+        { timeout: 45_000, killSignal: "SIGKILL", maxBuffer: 3 * 1024 * 1024 }
+      );
+    } catch (_) {
+      // Retry without audio track (handles silent videos or incompatible audio codecs)
+      await execFileAsync(
+        ffmpegBin,
+        [...baseArgs, "-an", outputClipPath],
+        { timeout: 45_000, killSignal: "SIGKILL", maxBuffer: 3 * 1024 * 1024 }
+      );
+    }
   }
 
   const extractHdThumb = async (source, seekSec) => {
@@ -491,12 +571,12 @@ async function createFiveSecondPreviewAndThumbnail({
       "-vframes",
       "1",
       "-vf",
-      "scale='min(1280,iw)':-2:flags=bilinear",
+      "scale='min(720,iw)':-2:flags=bilinear",
       "-q:v",
-      "2",
+      "3",
       outputThumbPath
     );
-    await execFileAsync(ffmpegBin, args, { timeout: 60_000, maxBuffer: 4 * 1024 * 1024 });
+    await execFileAsync(ffmpegBin, args, { timeout: 25_000, killSignal: "SIGKILL", maxBuffer: 2 * 1024 * 1024 });
   };
 
   try {
@@ -562,11 +642,15 @@ function parseTelegramRetryAfterMs(data, message) {
 async function telegramApiJson(apiBase, botToken, method, payload, maxRetries = 4) {
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
     try {
-      const res = await fetch(`${apiBase}/bot${botToken}/${method}`, {
+      const fetchOpts = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
-      });
+      };
+      if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+        fetchOpts.signal = AbortSignal.timeout(25_000);
+      }
+      const res = await fetch(`${apiBase}/bot${botToken}/${method}`, fetchOpts);
       const data = await res.json();
       if (!data.ok) {
         const retryWaitMs = parseTelegramRetryAfterMs(data, data.description);
@@ -591,10 +675,14 @@ async function telegramApiJson(apiBase, botToken, method, payload, maxRetries = 
 async function telegramMultipartCall(apiBase, botToken, method, buildForm, maxRetries = 4) {
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
     try {
-      const res = await fetch(`${apiBase}/bot${botToken}/${method}`, {
+      const fetchOpts = {
         method: "POST",
         body: buildForm(),
-      });
+      };
+      if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+        fetchOpts.signal = AbortSignal.timeout(90_000);
+      }
+      const res = await fetch(`${apiBase}/bot${botToken}/${method}`, fetchOpts);
       const data = await res.json();
       if (!data.ok) {
         const retryWaitMs = parseTelegramRetryAfterMs(data, data.description);
@@ -625,13 +713,26 @@ async function sendTelegramVideoClip(apiBase, botToken, { chatId, clipPath, capt
     const form = new FormData();
     form.append("chat_id", String(chatId));
     form.append("caption", caption);
-    form.append("parse_mode", "Markdown");
+    form.append("parse_mode", "HTML");
     if (replyToMessageId) {
       form.append("reply_to_message_id", String(replyToMessageId));
     }
     form.append("reply_markup", replyMarkup);
     form.append("video", new Blob([clipBuffer], { type: "video/mp4" }), "vidvora_preview_5s.mp4");
     return form;
+  });
+}
+
+async function sendTelegramVideoByFileId(apiBase, botToken, { chatId, fileId, caption, watchUrl, replyToMessageId }) {
+  return telegramApiJson(apiBase, botToken, "sendVideo", {
+    chat_id: chatId,
+    video: String(fileId),
+    caption,
+    parse_mode: "HTML",
+    ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {}),
+    reply_markup: {
+      inline_keyboard: [[{ text: "▶️ Watch Full Video on VidVora", url: watchUrl }]],
+    },
   });
 }
 
@@ -653,7 +754,7 @@ async function sendTelegramPhoto(apiBase, botToken, { chatId, imagePathOrUri, ca
       const form = new FormData();
       form.append("chat_id", String(chatId));
       form.append("caption", caption);
-      form.append("parse_mode", "Markdown");
+      form.append("parse_mode", "HTML");
       if (replyToMessageId) {
         form.append("reply_to_message_id", String(replyToMessageId));
       }
@@ -667,7 +768,7 @@ async function sendTelegramPhoto(apiBase, botToken, { chatId, imagePathOrUri, ca
     chat_id: chatId,
     photo: cleanImg,
     caption,
-    parse_mode: "Markdown",
+    parse_mode: "HTML",
     ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {}),
     reply_markup: {
       inline_keyboard: [[{ text: "▶️ Watch Full Video on VidVora", url: watchUrl }]],
@@ -1109,30 +1210,46 @@ async function authenticateCreatorMember(db, emailOrPhone, passkey) {
     };
   }
 
-  const snap = await db.collection("members").where("passkey", "==", cleanKey).limit(10).get();
+  const snap = await db.collection("members").where("passkey", "==", cleanKey).limit(50).get();
   if (snap.empty) return null;
 
   const cleanIdentity = String(emailOrPhone || "").trim().toLowerCase();
+  const activeMatches = [];
   for (const doc of snap.docs) {
     const data = doc.data() || {};
     if (data.isActive !== true) continue;
     if (cleanIdentity && String(data.emailOrPhone || "").trim().toLowerCase() !== cleanIdentity) {
       continue;
     }
-    const allowed = Array.isArray(data.allowedOptions) ? data.allowedOptions : null;
-    const canUpload = !allowed || allowed.includes("UPLOAD_VIDEOS");
-    if (!canUpload) {
-      return { memberId: data.memberId || doc.id, name: data.name || "Creator", canUpload: false };
-    }
+    activeMatches.push({ doc, data });
+  }
+
+  if (activeMatches.length === 0) return null;
+  if (!cleanIdentity && activeMatches.length > 1) {
+    return { ambiguous: true };
+  }
+
+  const { doc, data } = activeMatches[0];
+  const allowed = Array.isArray(data.allowedOptions) ? data.allowedOptions : null;
+  const canUpload = !allowed || allowed.includes("UPLOAD_VIDEOS");
+  if (!canUpload) {
     return {
       memberId: data.memberId || doc.id,
-      name: String(data.name || "Creator").trim() || "Creator",
+      name: data.name || "Creator",
       emailOrPhone: String(data.emailOrPhone || ""),
       role: String(data.role || "member"),
-      canUpload: true,
+      allowedOptions: allowed,
+      canUpload: false,
     };
   }
-  return null;
+  return {
+    memberId: data.memberId || doc.id,
+    name: String(data.name || "Creator").trim() || "Creator",
+    emailOrPhone: String(data.emailOrPhone || ""),
+    role: String(data.role || "member"),
+    allowedOptions: allowed,
+    canUpload: true,
+  };
 }
 
 const processedUpdateIds = new Set();
@@ -1258,12 +1375,19 @@ async function handleTelegramUpdate({
   const vidvoraConvertTarget = extractVidVoraShareTarget(combinedText, message, {
     strictVidVoraOnly: isVideoMsg,
   });
-  const directUrlMsg = !isVideoMsg && !vidvoraConvertTarget ? extractDirectVideoUrlMessage(textBody) : null;
+  const directUrlMsg = !isVideoMsg && !vidvoraConvertTarget ? extractDirectVideoUrlMessage(combinedText) : null;
 
   if (!vidvoraConvertTarget && !isVideoMsg && !directUrlMsg) {
     // Allow beginners to send their Master Key directly (to link or switch accounts) without /login
     if (textBody && !textBody.startsWith("/") && !/\s/.test(textBody) && textBody.length >= 4 && textBody.length <= 80) {
       const directCreator = await authenticateCreatorMember(db, null, textBody);
+      if (directCreator?.ambiguous) {
+        await replyText(
+          "⚠️ Yeh password ek se zyada accounts me use ho raha hai. Apne Gmail ke saath login karein:\n`/login yourmail@gmail.com YOUR_PASSWORD`",
+          { parse_mode: "Markdown" }
+        );
+        return { ok: true, action: "login_ambiguous" };
+      }
       if (directCreator) {
         if (!directCreator.canUpload) {
           await replyText("⛔ Your account does not have Upload Videos permission enabled.");
@@ -1342,7 +1466,8 @@ async function handleTelegramUpdate({
   }
 
   const runMediaOrConvertTask = async () => {
-    const uploadFileSizeBytes = Number((message.video || message.document)?.file_size || 0) || 0;
+    const incomingMediaObj = getTelegramVideoMediaObject(message);
+    const uploadFileSizeBytes = Number(incomingMediaObj?.file_size || 0) || 0;
     const statusMsg = await replyText(
       vidvoraConvertTarget
         ? "🔄 Converting VidVora link to your Creator link..."
@@ -1364,6 +1489,8 @@ async function handleTelegramUpdate({
     let description = "Uploaded via VidVora Telegram Bot";
     let finalStoragePath = "";
     let finalThumbPath = null;
+    let forwardedPreviewVideoFileId = null;
+    let forwardedPreviewPhotoFileId = null;
     let tgFileIdForDoc = null;
     let tgChatIdForDoc = null;
     let tgMessageIdForDoc = null;
@@ -1392,25 +1519,18 @@ async function handleTelegramUpdate({
       tgFileSizeForDoc = Number(source.video.tgFileSize || 0) || 0;
       tgMimeTypeForDoc = source.video.tgMimeType ? String(source.video.tgMimeType) : null;
 
-      if (finalStoragePath && /^https?:\/\//i.test(finalStoragePath)) {
-        try {
-          const clipPromise = createFiveSecondPreviewAndThumbnail({
-            inputPathOrUrl: finalStoragePath,
-            outputClipPath: clipPath,
-            outputThumbPath: thumbPath,
-            durationSeconds: 0,
-            previewSeconds: DEFAULT_PREVIEW_SECONDS,
-          }).catch(() => ({}));
-          await Promise.race([
-            clipPromise,
-            new Promise((resolve) => setTimeout(resolve, 10_000)),
-          ]);
-        } catch (_) {
-          // Preview clip optional for instant link conversion
+      // Instant 0-RAM preview reuse: if the user forwarded a VidVora preview clip or photo post,
+      // reuse its Telegram file_id directly instead of spawning ffmpeg or downloading anything.
+      if (message.video && message.video.file_id) {
+        forwardedPreviewVideoFileId = String(message.video.file_id);
+      } else if (Array.isArray(message.photo) && message.photo.length > 0) {
+        const largestPhoto = message.photo[message.photo.length - 1];
+        if (largestPhoto && largestPhoto.file_id) {
+          forwardedPreviewPhotoFileId = String(largestPhoto.file_id);
         }
       }
     } else if (isVideoMsg) {
-      const mediaObj = message.video || message.document;
+      const mediaObj = incomingMediaObj;
       const fallbackName = mediaObj.file_name || "Creator Video";
       const parsedMeta = parseTitleAndDescription(message.caption, fallbackName);
       title = parsedMeta.title;
@@ -1523,13 +1643,16 @@ async function handleTelegramUpdate({
             inputPathOrUrl: localVideoPath,
             outputClipPath: clipPath,
             outputThumbPath: thumbPath,
-            durationSeconds: message.video?.duration || 0,
+            durationSeconds: mediaObj?.duration || 0,
             previewSeconds: DEFAULT_PREVIEW_SECONDS,
           });
           clipExists = generated.clipExists;
           thumbExists = generated.thumbExists || thumbExists;
         } catch (previewGenErr) {
-          console.warn("5-sec preview generation skipped for large video:", previewGenErr?.message || previewGenErr);
+          console.warn("5-sec preview generation skipped for video:", previewGenErr?.message || previewGenErr);
+          if (!thumbExists) {
+            thumbExists = await fetchTelegramThumb();
+          }
           if (reportedFileSize > BOT_API_MAX_BYTES) {
             mtprotoStreamOnly = true;
           }
@@ -1722,23 +1845,40 @@ async function handleTelegramUpdate({
       inline_keyboard: [[{ text: "▶️ Watch Full Video on VidVora", url: watchUrl }]],
     };
 
-    if (fs.existsSync(clipPath) && fs.statSync(clipPath).size > 0) {
-      await sendTelegramVideoClip(apiBase, botToken, {
-        chatId,
-        clipPath,
-        caption,
-        watchUrl,
-        replyToMessageId: message.message_id,
-      });
-      await telegramApiJson(apiBase, botToken, "deleteMessage", {
-        chat_id: chatId,
-        message_id: statusMsg.message_id,
-      }).catch(() => {});
-    } else if (finalThumbPath) {
+    const sendFallbackLinkText = async () => {
       try {
-        await sendTelegramPhoto(apiBase, botToken, {
+        await telegramApiJson(apiBase, botToken, "editMessageText", {
+          chat_id: chatId,
+          message_id: statusMsg.message_id,
+          text: caption,
+          parse_mode: "HTML",
+          reply_markup: watchInlineMarkup,
+        });
+      } catch (_) {
+        const plainText = [
+          "🎬 VidVora — Watch Video",
+          "",
+          "🔗 Watch Full Video:",
+          watchUrl,
+          "",
+          "वीडियो कैसे देखे / How to play video",
+          "👇👇👇👇",
+          "https://t.me/VideoKaiseDekhe_ar",
+        ].join("\n");
+        await telegramApiJson(apiBase, botToken, "editMessageText", {
+          chat_id: chatId,
+          message_id: statusMsg.message_id,
+          text: plainText,
+          reply_markup: watchInlineMarkup,
+        });
+      }
+    };
+
+    if (forwardedPreviewVideoFileId) {
+      try {
+        await sendTelegramVideoByFileId(apiBase, botToken, {
           chatId,
-          imagePathOrUri: finalThumbPath,
+          fileId: forwardedPreviewVideoFileId,
           caption,
           watchUrl,
           replyToMessageId: message.message_id,
@@ -1748,22 +1888,42 @@ async function handleTelegramUpdate({
           message_id: statusMsg.message_id,
         }).catch(() => {});
       } catch (_) {
-        await telegramApiJson(apiBase, botToken, "editMessageText", {
+        await sendFallbackLinkText();
+      }
+    } else if (fs.existsSync(clipPath) && fs.statSync(clipPath).size > 0) {
+      try {
+        await sendTelegramVideoClip(apiBase, botToken, {
+          chatId,
+          clipPath,
+          caption,
+          watchUrl,
+          replyToMessageId: message.message_id,
+        });
+        await telegramApiJson(apiBase, botToken, "deleteMessage", {
           chat_id: chatId,
           message_id: statusMsg.message_id,
-          text: caption,
-          parse_mode: "Markdown",
-          reply_markup: watchInlineMarkup,
+        }).catch(() => {});
+      } catch (_) {
+        await sendFallbackLinkText();
+      }
+    } else if (forwardedPreviewPhotoFileId || finalThumbPath) {
+      try {
+        await sendTelegramPhoto(apiBase, botToken, {
+          chatId,
+          imagePathOrUri: forwardedPreviewPhotoFileId || finalThumbPath,
+          caption,
+          watchUrl,
+          replyToMessageId: message.message_id,
         });
+        await telegramApiJson(apiBase, botToken, "deleteMessage", {
+          chat_id: chatId,
+          message_id: statusMsg.message_id,
+        }).catch(() => {});
+      } catch (_) {
+        await sendFallbackLinkText();
       }
     } else {
-      await telegramApiJson(apiBase, botToken, "editMessageText", {
-        chat_id: chatId,
-        message_id: statusMsg.message_id,
-        text: caption,
-        parse_mode: "Markdown",
-        reply_markup: watchInlineMarkup,
-      });
+      await sendFallbackLinkText();
     }
 
     return { ok: true, videoId, linkId, rawToken };
@@ -1780,7 +1940,9 @@ async function handleTelegramUpdate({
   }
   };
 
-  return (isVideoMsg || directUrlMsg) ? withHeavyMediaSlot(runMediaOrConvertTask) : runMediaOrConvertTask();
+  return (!vidvoraConvertTarget && (isVideoMsg || directUrlMsg))
+    ? withHeavyMediaSlot(runMediaOrConvertTask)
+    : runMediaOrConvertTask();
 }
 
 const STREAM_CACHE_DIR = path.join(os.tmpdir(), "vidvora-stream-cache");

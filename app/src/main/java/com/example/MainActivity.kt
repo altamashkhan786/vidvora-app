@@ -223,6 +223,10 @@ fun VidVoraApp(
     AdminViewModel(firestoreVideoRepository, localVideoRepository, adminAuthRepository)
   }
 
+  LaunchedEffect(Unit) {
+    adminAuthRepository.restorePersistedSession(firestoreVideoRepository)
+  }
+
   // Handle incoming deep link on launch or onNewIntent (monetized with quick Pre-Play Ad check)
   LaunchedEffect(deepLinkToken) {
     val token = deepLinkToken?.trim()

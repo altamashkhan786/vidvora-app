@@ -620,6 +620,13 @@ async function handleFinanceTelegramUpdate({ update, db }) {
     textBody.length <= 80
   ) {
     const directUser = await authenticateCreatorMember(db, null, textBody);
+    if (directUser?.ambiguous) {
+      await replyText(
+        "⚠️ Yeh password ek se zyada accounts me use ho raha hai. Apne Gmail ke saath login karein:\n`/login yourmail@gmail.com YOUR_PASSWORD`",
+        { parse_mode: "Markdown" }
+      );
+      return { ok: true, action: "login_ambiguous" };
+    }
     if (directUser) {
       if (!hasCreatorFinanceAccess(directUser)) {
         await replyText("⛔ Aapke account par Earnings ya Payout access enabled nahi hai.");
