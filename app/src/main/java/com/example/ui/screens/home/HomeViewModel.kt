@@ -149,9 +149,6 @@ class HomeViewModel(
       try {
         localVideoRepository.initializeSeedsIfEmpty()
       } catch (_: Exception) {}
-      try {
-        firestoreVideoRepository.seedInitialDataIfEmpty()
-      } catch (_: Exception) {}
     }
   }
 

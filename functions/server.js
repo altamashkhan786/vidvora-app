@@ -1,8 +1,11 @@
 const http = require("http");
+const crypto = require("crypto");
 const admin = require("firebase-admin");
-const { getFirestore } = require("firebase-admin/firestore");
+const { getFirestore, FieldValue } = require("firebase-admin/firestore");
 const { getStorage } = require("firebase-admin/storage");
 const {
+  SUPERADMIN_PASSKEY,
+  hashToken,
   resolveBotRuntimeConfig,
   handleTelegramUpdate,
   handleStreamPublicVideo,
@@ -24,6 +27,10 @@ const {
   handleVerifySignupOtp,
   handleVerifyResetOtp,
 } = require("./emailOtp");
+const {
+  createPgFirestoreDb,
+  serializeForRestApi,
+} = require("./pgFirestoreAdapter");
 
 const DATABASE_ID =
   process.env.FIRESTORE_DATABASE_ID ||
@@ -32,6 +39,20 @@ const STORAGE_BUCKET =
   process.env.FIREBASE_STORAGE_BUCKET || "gen-lang-client-0000740810.firebasestorage.app";
 const PLAYBACK_SECRET = process.env.PLAYBACK_SECRET || "vidvora-secure-playback-secret-key-2026";
 const PORT = parseInt(process.env.PORT || "8080", 10);
+const DATABASE_URL = String(process.env.DATABASE_URL || "").trim();
+const EARNING_PER_VIEW_INR = 0.036; // ₹36 per 1,000 views
+
+const ALLOWED_API_COLLECTIONS = new Set([
+  "videos",
+  "accessLinks",
+  "members",
+  "withdrawalRequests",
+  "notifications",
+  "creatorEvents",
+  "appInstalls",
+  "appConfig",
+  "supportChats",
+]);
 
 function resolvePublicHostBaseUrl(req) {
   const configured = (process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "")
@@ -64,7 +85,10 @@ if (!admin.apps.length) {
   }
 }
 
-const db = getFirestore(DATABASE_ID);
+const firestoreDb = getFirestore(DATABASE_ID);
+const pgDb = DATABASE_URL ? createPgFirestoreDb({ connectionString: DATABASE_URL }) : null;
+const db = pgDb || firestoreDb;
+const activeDbBackend = pgDb ? "postgresql" : "firestore";
 const storage = getStorage();
 
 function readJsonBody(req) {
@@ -86,6 +110,193 @@ function readJsonBody(req) {
     });
     req.on("error", reject);
   });
+}
+
+function setCorsHeaders(res, methods = "GET, POST, OPTIONS") {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", methods);
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-VidVora-Key");
+}
+
+function sendJson(res, statusCode, payload) {
+  res.writeHead(statusCode, { "Content-Type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify(payload));
+}
+
+function currentUtcHourBucketKey(nowMs = Date.now()) {
+  const d = new Date(nowMs);
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  return `${yyyy}${mm}${dd}${hh}`;
+}
+
+function decodeRestWritePayload(val, useFirestoreSentinels = false) {
+  if (val === null || val === undefined) return val;
+  if (Array.isArray(val)) {
+    return val.map((item) => decodeRestWritePayload(item, useFirestoreSentinels));
+  }
+  if (typeof val === "object") {
+    if (val.__vidvora_server_ts__ === true) {
+      return useFirestoreSentinels ? FieldValue.serverTimestamp() : new Date();
+    }
+    if (typeof val.__vidvora_ts_ms__ === "number" && Number.isFinite(val.__vidvora_ts_ms__)) {
+      return new Date(val.__vidvora_ts_ms__);
+    }
+    if (typeof val.__vidvora_inc__ === "number" && Number.isFinite(val.__vidvora_inc__)) {
+      return useFirestoreSentinels ? FieldValue.increment(val.__vidvora_inc__) : { __vidvora_inc__: val.__vidvora_inc__ };
+    }
+    const out = {};
+    for (const [k, v] of Object.entries(val)) {
+      if (v !== undefined) {
+        out[k] = decodeRestWritePayload(v, useFirestoreSentinels);
+      }
+    }
+    return out;
+  }
+  return val;
+}
+
+function resolveAllowedCollectionRef(targetDb, rawCollection, rawSubpath = "") {
+  const cleanSub = String(rawSubpath || "").trim().replace(/^\/+|\/+$/g, "");
+  if (cleanSub) {
+    const subMatch = cleanSub.match(/^supportChats\/([a-zA-Z0-9_-]+)\/messages$/);
+    if (!subMatch) return null;
+    return targetDb.collection("supportChats").doc(subMatch[1]).collection("messages");
+  }
+  const cleanCol = String(rawCollection || "").trim();
+  if (!ALLOWED_API_COLLECTIONS.has(cleanCol)) return null;
+  return targetDb.collection(cleanCol);
+}
+
+function shouldCountView(uploadedBy, currentMemberId) {
+  const uploader = String(uploadedBy || "").trim();
+  const viewer = String(currentMemberId || "").trim();
+  if (!uploader) return true;
+  if (viewer && uploader.toLowerCase() === viewer.toLowerCase()) return false;
+  return true;
+}
+
+async function creditVideoViewAndCreator({ targetDb, videoId, uploadedBy, currentMemberId }) {
+  if (!shouldCountView(uploadedBy, currentMemberId)) return false;
+  const cleanVideoId = String(videoId || "").trim();
+  if (!cleanVideoId) return false;
+
+  const incOne = targetDb.isPostgresAdapter ? { __vidvora_inc__: 1 } : FieldValue.increment(1);
+
+  try {
+    await targetDb.collection("videos").doc(cleanVideoId).update({ totalViews: incOne });
+  } catch (err) {
+    console.warn("View count increment skipped:", err?.message || err);
+  }
+
+  const uploader = String(uploadedBy || "").trim();
+  if (uploader && uploader.toLowerCase() !== "admin") {
+    const hourKey = currentUtcHourBucketKey();
+    try {
+      const directSnap = await targetDb.collection("members").doc(uploader).get();
+      let memberDocId = directSnap.exists ? uploader : null;
+      if (!memberDocId) {
+        const byField = await targetDb.collection("members").where("memberId", "==", uploader).limit(1).get();
+        if (!byField.empty) {
+          memberDocId = byField.docs[0].id;
+        }
+      }
+      if (memberDocId) {
+        await targetDb.collection("members").doc(memberDocId).update({
+          [`hourlyViews.${hourKey}`]: incOne,
+        });
+      }
+    } catch (err) {
+      console.warn("Creator hourly view tracking skipped:", err?.message || err);
+    }
+  }
+  return true;
+}
+
+function hashSecretExact(secret) {
+  return crypto.createHash("sha256").update(String(secret || "").trim(), "utf8").digest("hex");
+}
+
+async function verifyAdminMigrationKey(rawKey) {
+  const cleanKey = String(rawKey || "").trim();
+  if (!cleanKey) return false;
+  if (cleanKey === SUPERADMIN_PASSKEY) return true;
+  const envKey = String(process.env.ADMIN_MIGRATION_KEY || "").trim();
+  if (envKey && cleanKey === envKey) return true;
+
+  const candidateHash = hashSecretExact(cleanKey);
+  for (const checkDb of [pgDb, firestoreDb].filter(Boolean)) {
+    try {
+      const secSnap = await checkDb.collection("appConfig").doc("adminSecurity").get();
+      const storedHash = String(secSnap.exists ? secSnap.data()?.adminMasterKeyHash || "" : "").trim();
+      if (storedHash && storedHash.toLowerCase() === candidateHash.toLowerCase()) {
+        return true;
+      }
+    } catch (_) {
+      // Ignore if Firestore quota exhausted during key check
+    }
+  }
+  return false;
+}
+
+async function migrateFirestoreToPostgres() {
+  if (!pgDb) {
+    throw new Error("DATABASE_URL is not configured yet. Add your Neon/Supabase PostgreSQL DATABASE_URL in Render Environment Variables first.");
+  }
+  await pgDb.ensureInitialized();
+
+  const collectionsToMigrate = [
+    "appConfig",
+    "members",
+    "videos",
+    "accessLinks",
+    "withdrawalRequests",
+    "notifications",
+    "creatorEvents",
+    "appInstalls",
+    "telegramBotSessions",
+    "telegramFinanceSessions",
+    "supportChats",
+  ];
+
+  const migratedCounts = {};
+  let totalMigrated = 0;
+
+  for (const colName of collectionsToMigrate) {
+    const snap = await firestoreDb.collection(colName).get();
+    let count = 0;
+    for (const doc of snap.docs) {
+      const rawData = doc.data() || {};
+      await pgDb.collection(colName).doc(doc.id).set(rawData, { merge: true });
+      count += 1;
+      totalMigrated += 1;
+
+      if (colName === "supportChats") {
+        const msgSnap = await firestoreDb
+          .collection("supportChats")
+          .doc(doc.id)
+          .collection("messages")
+          .get();
+        let msgCount = 0;
+        for (const msgDoc of msgSnap.docs) {
+          await pgDb
+            .collection("supportChats")
+            .doc(doc.id)
+            .collection("messages")
+            .doc(msgDoc.id)
+            .set(msgDoc.data() || {}, { merge: true });
+          msgCount += 1;
+          totalMigrated += 1;
+        }
+        migratedCounts[`supportChats/${doc.id}/messages`] = msgCount;
+      }
+    }
+    migratedCounts[colName] = count;
+  }
+
+  return { migratedCounts, totalMigrated };
 }
 
 const MAX_MEDIA_QUEUE_PENDING = 500;
@@ -133,6 +344,8 @@ const server = http.createServer(async (req, res) => {
     const healthPayload = {
       ok: true,
       service: "VidVora Telegram Bot, Finance Bot & Share Preview Server",
+      databaseBackend: activeDbBackend,
+      postgresConfigured: Boolean(pgDb),
       uploadBotConfigured: Boolean((process.env.TELEGRAM_BOT_TOKEN || "").trim()),
       financeBotConfigured: Boolean((process.env.FINANCE_BOT_TOKEN || "").trim()),
       mtprotoConfigured: Boolean(
@@ -143,6 +356,15 @@ const server = http.createServer(async (req, res) => {
     };
 
     if (urlObj.searchParams.get("check") === "1") {
+      if (pgDb) {
+        try {
+          await pgDb.healthCheck();
+          healthPayload.databaseConnected = true;
+        } catch (pgErr) {
+          healthPayload.databaseConnected = false;
+          healthPayload.databaseError = pgErr?.message || "PostgreSQL connection check failed";
+        }
+      }
       try {
         const cfg = await resolveBotRuntimeConfig(db);
         healthPayload.uploadBotConfigured = Boolean(cfg.botToken);
@@ -166,8 +388,310 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(healthPayload));
+    sendJson(res, 200, healthPayload);
+    return;
+  }
+
+  // ==================== REST API FOR ANDROID APP (UNLIMITED POSTGRESQL / ZERO FIRESTORE QUOTA) ====================
+  if (pathname.startsWith("/api/")) {
+    setCorsHeaders(res, "GET, POST, OPTIONS");
+    if (req.method === "OPTIONS") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    // 1. Lightweight backend status check
+    if (req.method === "GET" && pathname === "/api/status") {
+      sendJson(res, 200, {
+        ok: true,
+        databaseBackend: activeDbBackend,
+        postgresActive: Boolean(pgDb),
+      });
+      return;
+    }
+
+    // 2. Resolve video link / code and record view + creator earning
+    if (req.method === "POST" && pathname === "/api/resolve-video") {
+      try {
+        const body = await readJsonBody(req);
+        const rawToken = String(body.token || "").trim();
+        const currentMemberId = String(body.currentMemberId || "").trim() || null;
+        if (!rawToken) {
+          sendJson(res, 400, { ok: false, status: "error", error: "Missing token" });
+          return;
+        }
+
+        const cleanUpper = rawToken.toUpperCase();
+        const keyCandidates = Array.from(new Set([rawToken, rawToken.toLowerCase(), cleanUpper]));
+        let resolvedVideoSnap = null;
+
+        const tokenHash = hashToken(rawToken);
+        const linksQuery = await db
+          .collection("accessLinks")
+          .where("tokenHash", "==", tokenHash)
+          .limit(1)
+          .get();
+
+        let linkSnap = !linksQuery.empty ? linksQuery.docs[0] : null;
+        if (!linkSnap) {
+          for (const candidate of keyCandidates) {
+            const snap = await db.collection("accessLinks").doc(candidate).get();
+            if (snap.exists) {
+              linkSnap = snap;
+              break;
+            }
+          }
+        }
+
+        if (linkSnap && linkSnap.exists) {
+          const linkData = linkSnap.data() || {};
+          if (linkData.isActive === false) {
+            sendJson(res, 200, { ok: true, backend: activeDbBackend, status: "deactivated" });
+            return;
+          }
+          if (linkData.expiresAt) {
+            const expMs =
+              typeof linkData.expiresAt.toMillis === "function"
+                ? linkData.expiresAt.toMillis()
+                : new Date(linkData.expiresAt).getTime();
+            if (Number.isFinite(expMs) && expMs < Date.now()) {
+              sendJson(res, 200, { ok: true, backend: activeDbBackend, status: "deactivated" });
+              return;
+            }
+          }
+          const linkedVideoId = String(linkData.videoId || "").trim();
+          if (linkedVideoId) {
+            const vSnap = await db.collection("videos").doc(linkedVideoId).get();
+            if (vSnap.exists) {
+              resolvedVideoSnap = vSnap;
+            }
+          }
+        }
+
+        if (!resolvedVideoSnap) {
+          for (const candidate of keyCandidates) {
+            const vSnap = await db.collection("videos").doc(candidate).get();
+            if (vSnap.exists) {
+              resolvedVideoSnap = vSnap;
+              break;
+            }
+          }
+        }
+
+        if (!resolvedVideoSnap && /^https?:\/\//i.test(rawToken)) {
+          const byUrl = await db
+            .collection("videos")
+            .where("isActive", "==", true)
+            .where("storagePath", "==", rawToken)
+            .limit(1)
+            .get();
+          if (!byUrl.empty) {
+            resolvedVideoSnap = byUrl.docs[0];
+          }
+        }
+
+        if (!resolvedVideoSnap || !resolvedVideoSnap.exists) {
+          sendJson(res, 200, { ok: true, backend: activeDbBackend, status: "not_found" });
+          return;
+        }
+
+        const vData = resolvedVideoSnap.data() || {};
+        const videoId = String(vData.videoId || resolvedVideoSnap.id);
+        if (vData.isActive === false) {
+          sendJson(res, 200, { ok: true, backend: activeDbBackend, status: "deactivated" });
+          return;
+        }
+
+        const uploadedBy = String(vData.uploadedBy || "admin");
+        const didCredit = await creditVideoViewAndCreator({
+          targetDb: db,
+          videoId,
+          uploadedBy,
+          currentMemberId,
+        });
+
+        const currentViews = Number(vData.totalViews || 0) || 0;
+        const serializedVideo = serializeForRestApi({
+          ...vData,
+          videoId,
+          totalViews: didCredit ? currentViews + 1 : currentViews,
+        });
+
+        sendJson(res, 200, {
+          ok: true,
+          backend: activeDbBackend,
+          status: "success",
+          video: serializedVideo,
+        });
+      } catch (err) {
+        console.error("API /api/resolve-video error:", err);
+        sendJson(res, 500, { ok: false, status: "error", error: err?.message || "Resolve error" });
+      }
+      return;
+    }
+
+    // 3. Direct view & creator earning credit (for in-panel Watch button)
+    if (req.method === "POST" && pathname === "/api/credit-view") {
+      try {
+        const body = await readJsonBody(req);
+        const credited = await creditVideoViewAndCreator({
+          targetDb: db,
+          videoId: body.videoId,
+          uploadedBy: body.uploadedBy,
+          currentMemberId: body.currentMemberId,
+        });
+        sendJson(res, 200, { ok: true, backend: activeDbBackend, credited });
+      } catch (err) {
+        console.error("API /api/credit-view error:", err);
+        sendJson(res, 500, { ok: false, error: err?.message || "Credit view failed" });
+      }
+      return;
+    }
+
+    // 4. 1-click Firestore -> PostgreSQL migration (Superadmin protected)
+    if (pathname === "/api/migrate-from-firestore") {
+      try {
+        let adminKey = urlObj.searchParams.get("key") || req.headers["x-vidvora-key"] || "";
+        if (!adminKey && req.method === "POST") {
+          const body = await readJsonBody(req).catch(() => ({}));
+          adminKey = body.key || "";
+        }
+        const authorized = await verifyAdminMigrationKey(adminKey);
+        if (!authorized) {
+          sendJson(res, 403, {
+            ok: false,
+            error: "Invalid Superadmin key. Pass ?key=YOUR_SUPERADMIN_KEY",
+          });
+          return;
+        }
+        const result = await migrateFirestoreToPostgres();
+        sendJson(res, 200, {
+          ok: true,
+          message: "Firestore data successfully copied to PostgreSQL!",
+          ...result,
+        });
+      } catch (err) {
+        console.error("Migration error:", err);
+        const msg = String(err?.message || "Migration failed");
+        const isQuota = /RESOURCE_EXHAUSTED|Quota limit exceeded/i.test(msg);
+        sendJson(res, isQuota ? 429 : 500, {
+          ok: false,
+          error: isQuota
+            ? "Firestore quota abhi reset nahi hua hai. Dopahar ~1:30 PM IST ke baad yeh link dubara kholiyega — aapka saara purana data automatically PostgreSQL me copy ho jayega."
+            : msg,
+        });
+      }
+      return;
+    }
+
+    // 5. Query collection: GET /api/collection/:name
+    const colMatch = pathname.match(/^\/api\/collection\/([^/]+)$/);
+    if (req.method === "GET" && colMatch) {
+      try {
+        const colName = decodeURIComponent(colMatch[1]);
+        const subpath = urlObj.searchParams.get("subpath") || "";
+        const colRef = resolveAllowedCollectionRef(db, colName, subpath);
+        if (!colRef) {
+          sendJson(res, 403, { ok: false, error: "Collection not allowed" });
+          return;
+        }
+
+        let queryRef = colRef;
+        const isActiveParam = urlObj.searchParams.get("isActive");
+        if (isActiveParam === "true" || isActiveParam === "false") {
+          queryRef = queryRef.where("isActive", "==", isActiveParam === "true");
+        }
+        const field1 = urlObj.searchParams.get("field");
+        const value1 = urlObj.searchParams.get("value");
+        if (field1 && value1 !== null) {
+          queryRef = queryRef.where(field1, "==", value1);
+        }
+        const field2 = urlObj.searchParams.get("field2");
+        const value2 = urlObj.searchParams.get("value2");
+        if (field2 && value2 !== null) {
+          queryRef = queryRef.where(field2, "==", value2);
+        }
+        const limitParam = parseInt(urlObj.searchParams.get("limit") || "0", 10);
+        if (Number.isFinite(limitParam) && limitParam > 0) {
+          queryRef = queryRef.limit(Math.min(limitParam, 2000));
+        }
+
+        const snap = await queryRef.get();
+        const docs = snap.docs.map((doc) => ({
+          id: doc.id,
+          data: serializeForRestApi(doc.data() || {}),
+        }));
+        sendJson(res, 200, { ok: true, backend: activeDbBackend, docs });
+      } catch (err) {
+        console.error("API GET collection error:", err);
+        sendJson(res, 500, { ok: false, error: err?.message || "Collection query failed" });
+      }
+      return;
+    }
+
+    // 6. Document read/write: GET/POST /api/doc/:collection/:docId
+    const docMatch = pathname.match(/^\/api\/doc\/([^/]+)\/([^/]+)$/);
+    if (docMatch) {
+      try {
+        const colName = decodeURIComponent(docMatch[1]);
+        const docId = decodeURIComponent(docMatch[2]);
+        const subpath = urlObj.searchParams.get("subpath") || "";
+        const colRef = resolveAllowedCollectionRef(db, colName, subpath);
+        if (!colRef || !docId) {
+          sendJson(res, 403, { ok: false, error: "Collection or document not allowed" });
+          return;
+        }
+        const docRef = colRef.doc(docId);
+
+        if (req.method === "GET") {
+          const snap = await docRef.get();
+          sendJson(res, 200, {
+            ok: true,
+            backend: activeDbBackend,
+            exists: snap.exists,
+            id: snap.id,
+            data: snap.exists ? serializeForRestApi(snap.data() || {}) : null,
+          });
+          return;
+        }
+
+        if (req.method === "POST") {
+          const body = await readJsonBody(req);
+          const action = String(body.action || "set").toLowerCase();
+          const useFirestoreSentinels = !db.isPostgresAdapter;
+
+          if (action === "delete") {
+            if (colName === "supportChats" && !subpath) {
+              const msgs = await docRef.collection("messages").get();
+              for (const msgDoc of msgs.docs) {
+                await docRef.collection("messages").doc(msgDoc.id).delete();
+              }
+            }
+            await docRef.delete();
+            sendJson(res, 200, { ok: true, backend: activeDbBackend, id: docId, action: "delete" });
+            return;
+          }
+
+          const decodedData = decodeRestWritePayload(body.data || {}, useFirestoreSentinels);
+          if (action === "merge") {
+            await docRef.set(decodedData, { merge: true });
+          } else if (action === "update") {
+            await docRef.update(decodedData);
+          } else {
+            await docRef.set(decodedData);
+          }
+          sendJson(res, 200, { ok: true, backend: activeDbBackend, id: docId, action });
+          return;
+        }
+      } catch (err) {
+        console.error("API doc error:", err);
+        sendJson(res, 500, { ok: false, error: err?.message || "Document operation failed" });
+      }
+      return;
+    }
+
+    sendJson(res, 404, { ok: false, error: "API route not found" });
     return;
   }
 
@@ -277,7 +801,6 @@ const server = http.createServer(async (req, res) => {
       const isMediaUpload = Boolean(msgVideoLike && !isVidVoraConvert);
 
       if (isMediaUpload) {
-        // Respond 200 OK immediately so Telegram never retries, and serialize heavy uploads 1-by-1 to stay under 512MB RAM
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, accepted: true, async: true, queued: mediaQueueDepth + 1 }));
         enqueueTelegramMediaTask(() =>
@@ -293,9 +816,14 @@ const server = http.createServer(async (req, res) => {
           try {
             const cfg = await resolveBotRuntimeConfig(db);
             if (cfg.botToken && msg?.chat?.id) {
+              const rawMsg = String(bgErr?.message || "");
+              const isQuota = /RESOURCE_EXHAUSTED|Quota limit exceeded/i.test(rawMsg);
+              const friendlyText = isQuota
+                ? "⚠️ Aaj ka Firebase Firestore Free Daily Quota (50,000 reads/day) poora ho gaya hai.\n\nUnlimited FREE chalane ke liye Render Environment me Neon PostgreSQL ka DATABASE_URL add karein."
+                : `❌ Video processing error: ${rawMsg || "Please try sending the video again."}`;
               await telegramApiJson(cfg.apiBase, cfg.botToken, "sendMessage", {
                 chat_id: msg.chat.id,
-                text: `❌ Video processing error: ${bgErr?.message || "Please try sending the video again."}`,
+                text: friendlyText,
               });
             }
           } catch (_) {
@@ -387,17 +915,14 @@ const server = http.createServer(async (req, res) => {
     pathname === "/auth/send-reset-otp" ||
     pathname === "/auth/verify-reset-otp"
   ) {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    setCorsHeaders(res, "POST, OPTIONS");
     if (req.method === "OPTIONS") {
       res.writeHead(204);
       res.end();
       return;
     }
     if (req.method !== "POST") {
-      res.writeHead(405, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: false, error: "Method not allowed. Use POST." }));
+      sendJson(res, 405, { ok: false, error: "Method not allowed. Use POST." });
       return;
     }
     try {
@@ -430,12 +955,10 @@ const server = http.createServer(async (req, res) => {
           playbackSecret: PLAYBACK_SECRET,
         });
       }
-      res.writeHead(result.statusCode || 200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(result.payload));
+      sendJson(res, result.statusCode || 200, result.payload);
     } catch (err) {
       console.error("Auth OTP endpoint error:", err);
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: false, error: err?.message || "Internal auth error" }));
+      sendJson(res, 500, { ok: false, error: err?.message || "Internal auth error" });
     }
     return;
   }
@@ -512,6 +1035,12 @@ async function autoRegisterTelegramWebhook() {
 }
 
 server.listen(PORT, () => {
-  console.log(`VidVora Telegram Bot server listening on port ${PORT}`);
+  console.log(`VidVora server listening on port ${PORT} (databaseBackend=${activeDbBackend})`);
+  if (pgDb) {
+    pgDb
+      .ensureInitialized()
+      .then(() => console.log("PostgreSQL vidvora_docs schema ready."))
+      .catch((err) => console.error("PostgreSQL schema init warning:", err?.message || err));
+  }
   autoRegisterTelegramWebhook();
 });

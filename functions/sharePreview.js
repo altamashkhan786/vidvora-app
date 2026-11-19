@@ -11,6 +11,19 @@ const DEFAULT_APK_URL = "https://d1mn8mrvlzisg5.cloudfront.net/vidvora.apk";
 const DEFAULT_FALLBACK_BANNER_PATH = path.join(__dirname, "vidvora-og-banner.png");
 const MAX_CRISP_THUMB_CACHE = 64;
 const crispThumbCache = new Map();
+const SHARE_TARGET_CACHE_TTL_MS = 10 * 60 * 1000;
+const MAX_SHARE_TARGET_CACHE = 500;
+const shareTargetCacheByDb = new WeakMap();
+
+function getShareTargetCacheForDb(db) {
+  if (!db || typeof db !== "object") return null;
+  let map = shareTargetCacheByDb.get(db);
+  if (!map) {
+    map = new Map();
+    shareTargetCacheByDb.set(db, map);
+  }
+  return map;
+}
 
 function getFfmpegBinary() {
   try {
@@ -306,6 +319,15 @@ async function resolveShareTarget(db, rawCode) {
     return { found: false, isActive: false, code: cleanCode };
   }
 
+  const cacheMap = getShareTargetCacheForDb(db);
+  const cacheKey = cleanCode.toUpperCase();
+  if (cacheMap) {
+    const cached = cacheMap.get(cacheKey);
+    if (cached && Date.now() - cached.cachedAt < SHARE_TARGET_CACHE_TTL_MS) {
+      return cached.value;
+    }
+  }
+
   let linkDoc = null;
   let videoId = "";
 
@@ -367,7 +389,7 @@ async function resolveShareTarget(db, rawCode) {
     }
     const vData = vidDoc.data() || {};
     const isActive = linkIsActive && vData.isActive === true;
-    return {
+    const resolved = {
       found: true,
       isActive,
       videoId: vidDoc.id || vData.videoId || videoId,
@@ -378,6 +400,14 @@ async function resolveShareTarget(db, rawCode) {
       thumbnailPath: vData.thumbnailPath ? String(vData.thumbnailPath).trim() : "",
       uploaderName: String(vData.uploaderName || "VidVora Creator").trim(),
     };
+    if (cacheMap) {
+      if (cacheMap.size >= MAX_SHARE_TARGET_CACHE) {
+        const oldestKey = cacheMap.keys().next().value;
+        if (oldestKey !== undefined) cacheMap.delete(oldestKey);
+      }
+      cacheMap.set(cacheKey, { value: resolved, cachedAt: Date.now() });
+    }
+    return resolved;
   } catch (err) {
     console.warn("resolveShareTarget video lookup warning:", err.message);
     return { found: false, isActive: false, code: cleanCode, videoId };

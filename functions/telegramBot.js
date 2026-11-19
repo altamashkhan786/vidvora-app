@@ -318,10 +318,43 @@ function extractVidVoraShareTarget(text, message = null, options = {}) {
   };
 }
 
+const SOURCE_VIDEO_CACHE_TTL_MS = 15 * 60 * 1000;
+const sourceVideoCacheByDb = new WeakMap();
+
+function getScopedMap(weakMap, db) {
+  if (!db || typeof db !== "object") return null;
+  let m = weakMap.get(db);
+  if (!m) {
+    m = new Map();
+    weakMap.set(db, m);
+  }
+  return m;
+}
+
+function cacheResolvedSourceVideo(db, rawCode, resolved) {
+  const map = getScopedMap(sourceVideoCacheByDb, db);
+  const key = String(rawCode || "").trim().toUpperCase();
+  if (!map || !key || !resolved?.found || !resolved?.isActive) return;
+  if (map.size >= 500) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
+  }
+  map.set(key, { value: resolved, cachedAt: Date.now() });
+}
+
 async function resolveVidVoraSourceVideo(db, rawCode) {
   const cleanCode = String(rawCode || "").trim();
   if (!cleanCode || !db || typeof db.collection !== "function") {
     return { found: false, isActive: false };
+  }
+
+  const srcCache = getScopedMap(sourceVideoCacheByDb, db);
+  const cacheKey = cleanCode.toUpperCase();
+  if (srcCache) {
+    const cached = srcCache.get(cacheKey);
+    if (cached && Date.now() - cached.cachedAt < SOURCE_VIDEO_CACHE_TTL_MS) {
+      return cached.value;
+    }
   }
 
   let linkDoc = null;
@@ -390,12 +423,14 @@ async function resolveVidVoraSourceVideo(db, rawCode) {
     if (!vData.storagePath) {
       return { found: false, isActive: false };
     }
-    return {
+    const resolved = {
       found: true,
       isActive: true,
       videoId: vidDoc.id || vData.videoId || sourceVideoId,
       video: vData,
     };
+    cacheResolvedSourceVideo(db, cleanCode, resolved);
+    return resolved;
   } catch (_) {
     return { found: false, isActive: false };
   }
@@ -1115,8 +1150,61 @@ async function downloadTelegramFileViaMtproto({
   }
 }
 
-const BOT_CONFIG_CACHE_TTL_MS = 30_000;
+const BOT_CONFIG_CACHE_TTL_MS = 15 * 60 * 1000;
+const BOT_SESSION_CACHE_TTL_MS = 30 * 60 * 1000;
+const MEMBER_PERM_CACHE_TTL_MS = 15 * 60 * 1000;
 const botConfigCacheByDb = new WeakMap();
+const botSessionCacheByDb = new WeakMap();
+const memberPermCacheByDb = new WeakMap();
+
+function isFirestoreQuotaError(err) {
+  return /RESOURCE_EXHAUSTED|Quota limit exceeded/i.test(String(err?.message || err || ""));
+}
+
+function getCachedBotSession(db, telegramUserId) {
+  const map = getScopedMap(botSessionCacheByDb, db);
+  if (!map) return null;
+  const entry = map.get(String(telegramUserId));
+  if (entry && Date.now() - entry.cachedAt < BOT_SESSION_CACHE_TTL_MS) {
+    return entry.data;
+  }
+  return null;
+}
+
+function setCachedBotSession(db, telegramUserId, data) {
+  const map = getScopedMap(botSessionCacheByDb, db);
+  if (!map || !telegramUserId) return;
+  if (map.size >= 500) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
+  }
+  map.set(String(telegramUserId), { data: { ...data }, cachedAt: Date.now() });
+}
+
+function deleteCachedBotSession(db, telegramUserId) {
+  const map = getScopedMap(botSessionCacheByDb, db);
+  if (map) map.delete(String(telegramUserId));
+}
+
+function getCachedMemberPerm(db, memberId) {
+  const map = getScopedMap(memberPermCacheByDb, db);
+  if (!map) return null;
+  const entry = map.get(String(memberId));
+  if (entry && Date.now() - entry.cachedAt < MEMBER_PERM_CACHE_TTL_MS) {
+    return entry.data;
+  }
+  return null;
+}
+
+function setCachedMemberPerm(db, memberId, data) {
+  const map = getScopedMap(memberPermCacheByDb, db);
+  if (!map || !memberId) return;
+  if (map.size >= 500) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
+  }
+  map.set(String(memberId), { data, cachedAt: Date.now() });
+}
 
 async function resolveBotRuntimeConfig(db) {
   let botToken = (process.env.TELEGRAM_BOT_TOKEN || "").trim();
@@ -1318,7 +1406,8 @@ async function handleTelegramUpdate({
   }
 
   if (/^\/logout(?:@\w+)?/i.test(textBody)) {
-    await db.collection("telegramBotSessions").doc(telegramUserId).delete();
+    deleteCachedBotSession(db, telegramUserId);
+    await db.collection("telegramBotSessions").doc(telegramUserId).delete().catch(() => {});
     await replyText("🔓 Unlinked your VidVora account from this bot. Send `/login PASSWORD` anytime to reconnect.", {
       parse_mode: "Markdown",
     });
@@ -1326,12 +1415,18 @@ async function handleTelegramUpdate({
   }
 
   if (/^\/status(?:@\w+)?/i.test(textBody)) {
-    const sessionSnap = await db.collection("telegramBotSessions").doc(telegramUserId).get();
-    if (!sessionSnap.exists) {
+    let s = getCachedBotSession(db, telegramUserId);
+    if (!s) {
+      const sessionSnap = await db.collection("telegramBotSessions").doc(telegramUserId).get();
+      if (sessionSnap.exists) {
+        s = sessionSnap.data() || {};
+        setCachedBotSession(db, telegramUserId, s);
+      }
+    }
+    if (!s) {
       await replyText("❌ Not linked yet. Send `/login YOUR_PASSWORD` first.", { parse_mode: "Markdown" });
       return { ok: true, action: "status_unlinked" };
     }
-    const s = sessionSnap.data() || {};
     await replyText(
       `✅ Linked Creator: *${escapeMarkdown(s.memberName || "Creator")}*\n📤 Uploads via Bot: *${s.uploadCount || 0}*`,
       { parse_mode: "Markdown" }
@@ -1350,18 +1445,23 @@ async function handleTelegramUpdate({
       await replyText("⛔ Your account does not have Upload Videos permission enabled.");
       return { ok: true, action: "login_forbidden" };
     }
-    await db.collection("telegramBotSessions").doc(telegramUserId).set(
-      {
-        telegramUserId,
-        chatId: String(chatId),
-        memberId: creator.memberId,
-        memberName: creator.name,
-        role: creator.role || "member",
-        linkedAt: new Date(),
-        uploadCount: 0,
-      },
-      { merge: true }
-    );
+    const newSessionPayload = {
+      telegramUserId,
+      chatId: String(chatId),
+      memberId: creator.memberId,
+      memberName: creator.name,
+      role: creator.role || "member",
+      linkedAt: new Date(),
+      uploadCount: 0,
+    };
+    await db.collection("telegramBotSessions").doc(telegramUserId).set(newSessionPayload, { merge: true });
+    setCachedBotSession(db, telegramUserId, newSessionPayload);
+    if (creator.memberId !== "admin") {
+      setCachedMemberPerm(db, creator.memberId, {
+        isActive: true,
+        allowedOptions: creator.allowedOptions || null,
+      });
+    }
     await replyText(
       `✅ Welcome *${escapeMarkdown(creator.name)}*!\n\nYour VidVora account is now linked. Send any video (caption = Title) and I will upload it & send back your *5-sec preview clip + watch link*.`,
       { parse_mode: "Markdown" }
@@ -1393,18 +1493,23 @@ async function handleTelegramUpdate({
           await replyText("⛔ Your account does not have Upload Videos permission enabled.");
           return { ok: true, action: "login_forbidden" };
         }
-        await db.collection("telegramBotSessions").doc(telegramUserId).set(
-          {
-            telegramUserId,
-            chatId: String(chatId),
-            memberId: directCreator.memberId,
-            memberName: directCreator.name,
-            role: directCreator.role || "member",
-            linkedAt: new Date(),
-            uploadCount: 0,
-          },
-          { merge: true }
-        );
+        const directSessionPayload = {
+          telegramUserId,
+          chatId: String(chatId),
+          memberId: directCreator.memberId,
+          memberName: directCreator.name,
+          role: directCreator.role || "member",
+          linkedAt: new Date(),
+          uploadCount: 0,
+        };
+        await db.collection("telegramBotSessions").doc(telegramUserId).set(directSessionPayload, { merge: true });
+        setCachedBotSession(db, telegramUserId, directSessionPayload);
+        if (directCreator.memberId !== "admin") {
+          setCachedMemberPerm(db, directCreator.memberId, {
+            isActive: true,
+            allowedOptions: directCreator.allowedOptions || null,
+          });
+        }
         await replyText(
           `✅ Welcome *${escapeMarkdown(directCreator.name)}*!\n\nYour VidVora account is now linked. Send any *Video* or paste any *VidVora Share Link* to convert into your own link!`,
           { parse_mode: "Markdown" }
@@ -1413,8 +1518,15 @@ async function handleTelegramUpdate({
       }
     }
 
-    const existingSession = await db.collection("telegramBotSessions").doc(telegramUserId).get();
-    if (existingSession.exists) {
+    let hasExistingSession = Boolean(getCachedBotSession(db, telegramUserId));
+    if (!hasExistingSession) {
+      const existingSession = await db.collection("telegramBotSessions").doc(telegramUserId).get();
+      if (existingSession.exists) {
+        hasExistingSession = true;
+        setCachedBotSession(db, telegramUserId, existingSession.data() || {});
+      }
+    }
+    if (hasExistingSession) {
       await replyText(
         "📹 Send/Batch-Forward *Video files*, a direct `.mp4` link, or any *VidVora Share Link* to convert into your own link.\n_(Account switch karne ke liye valid Password ya `/login YOUR_PASSWORD` bhejein.)_",
         { parse_mode: "Markdown" }
@@ -1428,19 +1540,27 @@ async function handleTelegramUpdate({
     return { ok: true, action: "unsupported_message" };
   }
 
-  const sessionSnap = await db.collection("telegramBotSessions").doc(telegramUserId).get();
-  if (!sessionSnap.exists) {
-    await replyText("🔐 Please link your Creator account first:\n`/login YOUR_PASSWORD`", {
-      parse_mode: "Markdown",
-    });
-    return { ok: true, action: "auth_required" };
+  let session = getCachedBotSession(db, telegramUserId);
+  if (!session) {
+    const sessionSnap = await db.collection("telegramBotSessions").doc(telegramUserId).get();
+    if (!sessionSnap.exists) {
+      await replyText("🔐 Please link your Creator account first:\n`/login YOUR_PASSWORD`", {
+        parse_mode: "Markdown",
+      });
+      return { ok: true, action: "auth_required" };
+    }
+    session = sessionSnap.data() || {};
+    setCachedBotSession(db, telegramUserId, session);
   }
-  const session = sessionSnap.data() || {};
 
-  // Re-verify active permission on every upload
+  // Re-verify active permission (cached 15 min per creator to avoid 100s of redundant reads on batch uploads)
   if (session.memberId !== "admin") {
-    const memberSnap = await db.collection("members").doc(session.memberId).get();
-    const memberData = memberSnap.exists ? memberSnap.data() : null;
+    let memberData = getCachedMemberPerm(db, session.memberId);
+    if (!memberData) {
+      const memberSnap = await db.collection("members").doc(session.memberId).get();
+      memberData = memberSnap.exists ? memberSnap.data() : { isActive: false };
+      setCachedMemberPerm(db, session.memberId, memberData);
+    }
     const allowed = Array.isArray(memberData?.allowedOptions) ? memberData.allowedOptions : null;
     if (!memberData || memberData.isActive !== true || (allowed && !allowed.includes("UPLOAD_VIDEOS"))) {
       await replyText("⛔ Your Creator upload access is currently paused or disabled.");
@@ -1822,10 +1942,26 @@ async function handleTelegramUpdate({
       expiresAt: null,
     });
 
+    const nextUploadCount = (Number(session.uploadCount) || 0) + 1;
+    session.uploadCount = nextUploadCount;
+    setCachedBotSession(db, telegramUserId, session);
     await db.collection("telegramBotSessions").doc(telegramUserId).set(
-      { uploadCount: (Number(session.uploadCount) || 0) + 1 },
+      { uploadCount: nextUploadCount },
       { merge: true }
     );
+
+    // Pre-warm stream & link-converter caches so immediate plays/conversions need 0 Firestore reads
+    if (videoDocCache.size >= MAX_VIDEO_DOC_CACHE) {
+      const oldestKey = videoDocCache.keys().next().value;
+      if (oldestKey) videoDocCache.delete(oldestKey);
+    }
+    videoDocCache.set(videoId, { data: videoDocPayload, cachedAt: Date.now() });
+    cacheResolvedSourceVideo(db, rawToken, {
+      found: true,
+      isActive: true,
+      videoId,
+      video: videoDocPayload,
+    });
 
     const resolvedShareBase =
       shareLinkBaseUrl ||
@@ -1929,10 +2065,13 @@ async function handleTelegramUpdate({
     return { ok: true, videoId, linkId, rawToken };
   } catch (err) {
     console.error("Telegram upload error:", err);
+    const errText = isFirestoreQuotaError(err)
+      ? "⚠️ Aaj ka Firebase Firestore Free Daily Quota (50,000 reads/day) poora ho gaya hai.\n\nYeh roz dopahar ~1:30 PM IST par automatically reset hota hai."
+      : `❌ Upload failed: ${err.message || "Unknown error"}`;
     await telegramApiJson(apiBase, botToken, "editMessageText", {
       chat_id: chatId,
       message_id: statusMsg.message_id,
-      text: `❌ Upload failed: ${err.message || "Unknown error"}`,
+      text: errText,
     }).catch(() => {});
     return { ok: false, error: err.message };
   } finally {
@@ -1948,7 +2087,8 @@ async function handleTelegramUpdate({
 const STREAM_CACHE_DIR = path.join(os.tmpdir(), "vidvora-stream-cache");
 const MAX_STREAM_CACHE_FILES = 4;
 const MAX_STREAM_CACHE_BYTES = 45 * 1024 * 1024;
-const VIDEO_DOC_CACHE_TTL_MS = 30_000;
+const VIDEO_DOC_CACHE_TTL_MS = 10 * 60 * 1000;
+const MAX_VIDEO_DOC_CACHE = 1000;
 const videoDocCache = new Map();
 const inflightTelegramDownloads = new Map();
 
@@ -2373,7 +2513,7 @@ async function handleStreamPublicVideo({
       return;
     }
     videoData = videoDoc.data() || {};
-    if (videoDocCache.size >= 200) {
+    if (videoDocCache.size >= MAX_VIDEO_DOC_CACHE) {
       const oldestKey = videoDocCache.keys().next().value;
       if (oldestKey) videoDocCache.delete(oldestKey);
     }

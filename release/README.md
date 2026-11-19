@@ -3,8 +3,8 @@
 - **App Name:** VidVora
 - **Package ID:** `com.aistudio.vidvora.vstr`
 - **Version:** `1.0` (`versionCode = 1`)
-- **APK File:** `release/VidVora.apk` (~35 MB)
-- **SHA-256:** `737f2284864ddf709c799220f5a2447568c1be97287e739237ab0170759e8b95`
+- **APK File:** `release/VidVora.apk` (~34 MB)
+- **SHA-256:** `108d324967e6d8e6636afb5f1042cb7f3b5b4d74585fd9cddfe4d8526f81897a`
 - **Documentation PDF:** `release/VidVora_Documentation.pdf` (also in `docs/VidVora_Documentation.pdf`)
 
 ## Backup Download Options (If Web UI Hides Large Binary Files)

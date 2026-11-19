@@ -53,11 +53,14 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 import java.util.UUID
+import com.example.data.remote.BackendDbClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
@@ -90,6 +93,67 @@ class FirestoreVideoRepository(
   )
 
   private val backgroundIoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+  private val backendDb = BackendDbClient()
+  private val backendRefreshBus = MutableSharedFlow<String>(extraBufferCapacity = 32)
+
+  private fun notifyBackendChanged(vararg keys: String) {
+    keys.forEach { backendRefreshBus.tryEmit(it) }
+  }
+
+  private fun <T> postgresOrFirestoreFlow(
+    refreshKey: String,
+    pollIntervalMs: Long = 20_000L,
+    fallbackValue: T,
+    fetchFromPostgres: suspend () -> T?,
+    firestoreFlow: () -> Flow<T>
+  ): Flow<T> = callbackFlow {
+    if (backendDb.isPostgresActive()) {
+      val initial = try {
+        fetchFromPostgres()
+      } catch (e: Exception) {
+        Log.w(TAG, "Postgres initial fetch ($refreshKey) warning: ${e.message}")
+        null
+      }
+      trySend(initial ?: fallbackValue)
+
+      val refreshJob = launch {
+        backendRefreshBus.collect { key ->
+          if (key == refreshKey || key == "*") {
+            val updated = try {
+              fetchFromPostgres()
+            } catch (_: Exception) {
+              null
+            }
+            if (updated != null) {
+              trySend(updated)
+            }
+          }
+        }
+      }
+      val pollJob = launch {
+        while (true) {
+          delay(pollIntervalMs)
+          val updated = try {
+            fetchFromPostgres()
+          } catch (_: Exception) {
+            null
+          }
+          if (updated != null) {
+            trySend(updated)
+          }
+        }
+      }
+      awaitClose {
+        refreshJob.cancel()
+        pollJob.cancel()
+      }
+    } else {
+      val fsJob = launch {
+        firestoreFlow().collect { trySend(it) }
+      }
+      awaitClose { fsJob.cancel() }
+    }
+  }
 
   private fun prewarmStreamEndpoint(streamUrl: String) {
     if (!streamUrl.startsWith("https://", ignoreCase = true) ||
@@ -398,11 +462,16 @@ class FirestoreVideoRepository(
 
     val countView = shouldIncrementViewCount(video.uploadedBy, currentMemberId)
     if (countView) {
-      try {
-        db.collection("videos").document(video.videoId).update("totalViews", FieldValue.increment(1))
-      } catch (_: Exception) {}
       backgroundIoScope.launch {
-        recordCreatorHourlyView(video.uploadedBy)
+        if (backendDb.isPostgresActive()) {
+          backendDb.creditView(video.videoId, video.uploadedBy, currentMemberId)
+          notifyBackendChanged("videos", "members")
+        } else {
+          try {
+            db.collection("videos").document(video.videoId).update("totalViews", FieldValue.increment(1))
+          } catch (_: Exception) {}
+          recordCreatorHourlyView(video.uploadedBy)
+        }
       }
     }
     prewarmStreamEndpoint(playableUrl)
@@ -447,7 +516,68 @@ class FirestoreVideoRepository(
 
     val cleanUpper = extractedKey.trim().uppercase()
 
-    // 1. Direct Firestore lookup FIRST (fast, works without Cloud Functions deployed)
+    // 0. Unlimited PostgreSQL Backend API lookup FIRST (zero Firestore quota usage when DATABASE_URL is configured)
+    if (!isDirectFileUrl) {
+      val remoteResp = backendDb.resolveVideo(
+        token = if (isDirectHttpUrl) trimmedInput else extractedKey.trim(),
+        currentMemberId = currentMemberId
+      )
+      if (remoteResp != null && remoteResp.ok) {
+        when (remoteResp.status) {
+          "deactivated" -> return TokenValidationResult.TokenDeactivated
+          "success" -> {
+            val vJson = remoteResp.video
+            if (vJson != null) {
+              val videoId = BackendDbClient.optStringClean(vJson, "videoId", cleanUpper).ifBlank { cleanUpper }
+              val title = BackendDbClient.optStringClean(vJson, "title", "Video Stream").ifBlank { "Video Stream" }
+              val description = BackendDbClient.optStringClean(vJson, "description", "")
+              val thumbnailPath = BackendDbClient.optNullableString(vJson, "thumbnailPath")
+              val storagePath = BackendDbClient.optStringClean(vJson, "storagePath", "")
+              val totalViews = vJson.optLong("totalViews", 0L)
+              val createdAtMs = BackendDbClient.optTimestampMillis(vJson, "createdAt") ?: System.currentTimeMillis()
+              val uploadedBy = BackendDbClient.optStringClean(vJson, "uploadedBy", "admin").ifBlank { "admin" }
+              val uploaderName = BackendDbClient.optStringClean(vJson, "uploaderName", "Admin").ifBlank { "Admin" }
+
+              val resolvedStreamUrl = resolveStreamUrl(storagePath, videoId)
+              val playableUrl = isPlayableResolvedUrl(resolvedStreamUrl, videoId)
+              if (playableUrl != null) {
+                prewarmStreamEndpoint(playableUrl)
+                notifyBackendChanged("videos", "members")
+                return TokenValidationResult.Success(
+                  VideoToken(
+                    id = videoId,
+                    token = cleanUpper,
+                    title = title,
+                    description = description,
+                    streamUrl = playableUrl,
+                    posterUrl = thumbnailPath,
+                    quality = "1080p FHD",
+                    isActive = true,
+                    viewCount = totalViews.toInt(),
+                    createdAt = createdAtMs,
+                    uploadedBy = uploadedBy,
+                    uploaderName = uploaderName
+                  )
+                )
+              } else if (resolvedStreamUrl.startsWith("file://", ignoreCase = true) ||
+                storagePath.startsWith("file://", ignoreCase = true)
+              ) {
+                return TokenValidationResult.Error(
+                  "This video file was saved only on the uploader's device. To share across devices, upload with a public https:// Video Stream URL."
+                )
+              }
+            }
+          }
+          "not_found" -> {
+            if (remoteResp.backend.equals("postgresql", ignoreCase = true) && !isDirectHttpUrl) {
+              return TokenValidationResult.TokenNotFound
+            }
+          }
+        }
+      }
+    }
+
+    // 1. Direct Firestore lookup fallback (only when PostgreSQL backend is not enabled)
     try {
       var resolvedVideoDoc: com.google.firebase.firestore.DocumentSnapshot? = null
       val keyCandidates = listOf(extractedKey.trim(), extractedKey.trim().lowercase(), cleanUpper).distinct()
@@ -704,6 +834,34 @@ class FirestoreVideoRepository(
   suspend fun findActiveVideoByStoragePath(url: String): VideoToken? {
     val cleanUrl = url.trim()
     if (cleanUrl.isBlank()) return null
+    if (backendDb.isPostgresActive()) {
+      val docs = backendDb.getCollection(
+        collection = "videos",
+        isActive = true,
+        field = "storagePath",
+        value = cleanUrl,
+        limit = 1
+      )
+      val first = docs?.firstOrNull() ?: return null
+      val parsed = BackendDbClient.parseVideo(first)
+      if (!parsed.isActive) return null
+      val resolved = resolveStreamUrl(parsed.storagePath, parsed.videoId)
+      val playable = isPlayableResolvedUrl(resolved, parsed.videoId) ?: return null
+      return VideoToken(
+        id = parsed.videoId,
+        token = parsed.videoId,
+        title = parsed.title.ifBlank { "Video Stream" },
+        description = parsed.description,
+        streamUrl = playable,
+        posterUrl = parsed.thumbnailPath,
+        quality = "1080p FHD",
+        isActive = true,
+        viewCount = parsed.totalViews.toInt(),
+        createdAt = parsed.createdAt.toDate().time,
+        uploadedBy = parsed.uploadedBy,
+        uploaderName = parsed.uploaderName
+      )
+    }
     return try {
       val matches = db.collection("videos")
         .whereEqualTo("isActive", true)
@@ -738,69 +896,91 @@ class FirestoreVideoRepository(
     }
   }
 
-  fun getAllVideosFlow(): Flow<List<FirestoreVideo>> = callbackFlow {
-    val registration: ListenerRegistration = db.collection("videos")
-      .whereEqualTo("isActive", true)
-      .addSnapshotListener { snapshot, error ->
-        if (error != null) {
-          Log.w(TAG, "Listen warning on videos: ${error.message}")
-          trySend(emptyList())
-          return@addSnapshotListener
-        }
-        val items = snapshot?.documents?.mapNotNull { doc ->
-          try {
-            val estimatedCreatedAt = doc.getTimestamp(
-              "createdAt",
-              DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
-            ) ?: Timestamp.now()
-            FirestoreVideo(
-              videoId = doc.getString("videoId") ?: doc.id,
-              title = doc.getString("title") ?: "",
-              description = doc.getString("description") ?: "",
-              thumbnailPath = doc.getString("thumbnailPath"),
-              storagePath = doc.getString("storagePath") ?: "",
-              createdAt = estimatedCreatedAt,
-              isActive = doc.getBoolean("isActive") ?: true,
-              totalViews = doc.getLong("totalViews") ?: 0L,
-              uploadedBy = doc.getString("uploadedBy") ?: "admin",
-              uploaderName = doc.getString("uploaderName") ?: "Admin"
-            )
-          } catch (_: Exception) {
-            null
-          }
-        } ?: emptyList()
-        trySend(sortVideosNewestFirst(items))
+  fun getAllVideosFlow(): Flow<List<FirestoreVideo>> = postgresOrFirestoreFlow(
+    refreshKey = "videos",
+    pollIntervalMs = 20_000L,
+    fallbackValue = emptyList(),
+    fetchFromPostgres = {
+      backendDb.getCollection("videos", isActive = true)?.let { docs ->
+        sortVideosNewestFirst(docs.map { BackendDbClient.parseVideo(it) })
       }
-    awaitClose { registration.remove() }
-  }
+    },
+    firestoreFlow = {
+      callbackFlow {
+        val registration: ListenerRegistration = db.collection("videos")
+          .whereEqualTo("isActive", true)
+          .addSnapshotListener { snapshot, error ->
+            if (error != null) {
+              Log.w(TAG, "Listen warning on videos: ${error.message}")
+              trySend(emptyList())
+              return@addSnapshotListener
+            }
+            val items = snapshot?.documents?.mapNotNull { doc ->
+              try {
+                val estimatedCreatedAt = doc.getTimestamp(
+                  "createdAt",
+                  DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+                ) ?: Timestamp.now()
+                FirestoreVideo(
+                  videoId = doc.getString("videoId") ?: doc.id,
+                  title = doc.getString("title") ?: "",
+                  description = doc.getString("description") ?: "",
+                  thumbnailPath = doc.getString("thumbnailPath"),
+                  storagePath = doc.getString("storagePath") ?: "",
+                  createdAt = estimatedCreatedAt,
+                  isActive = doc.getBoolean("isActive") ?: true,
+                  totalViews = doc.getLong("totalViews") ?: 0L,
+                  uploadedBy = doc.getString("uploadedBy") ?: "admin",
+                  uploaderName = doc.getString("uploaderName") ?: "Admin"
+                )
+              } catch (_: Exception) {
+                null
+              }
+            } ?: emptyList()
+            trySend(sortVideosNewestFirst(items))
+          }
+        awaitClose { registration.remove() }
+      }
+    }
+  )
 
-  fun getAllAccessLinksFlow(): Flow<List<FirestoreAccessLink>> = callbackFlow {
-    val registration: ListenerRegistration = db.collection("accessLinks")
-      .whereEqualTo("isActive", true)
-      .addSnapshotListener { snapshot, error ->
-        if (error != null) {
-          Log.w(TAG, "Listen warning on accessLinks: ${error.message}")
-          trySend(emptyList())
-          return@addSnapshotListener
-        }
-        val items = snapshot?.documents?.mapNotNull { doc ->
-          try {
-            FirestoreAccessLink(
-              linkId = doc.getString("linkId") ?: doc.id,
-              videoId = doc.getString("videoId") ?: "",
-              tokenHash = doc.getString("tokenHash") ?: "",
-              isActive = doc.getBoolean("isActive") ?: true,
-              createdAt = doc.getTimestamp("createdAt") ?: Timestamp.now(),
-              expiresAt = doc.getTimestamp("expiresAt")
-            )
-          } catch (_: Exception) {
-            null
+  fun getAllAccessLinksFlow(): Flow<List<FirestoreAccessLink>> = postgresOrFirestoreFlow(
+    refreshKey = "accessLinks",
+    pollIntervalMs = 25_000L,
+    fallbackValue = emptyList(),
+    fetchFromPostgres = {
+      backendDb.getCollection("accessLinks", isActive = true)?.map { BackendDbClient.parseAccessLink(it) }
+    },
+    firestoreFlow = {
+      callbackFlow {
+        val registration: ListenerRegistration = db.collection("accessLinks")
+          .whereEqualTo("isActive", true)
+          .addSnapshotListener { snapshot, error ->
+            if (error != null) {
+              Log.w(TAG, "Listen warning on accessLinks: ${error.message}")
+              trySend(emptyList())
+              return@addSnapshotListener
+            }
+            val items = snapshot?.documents?.mapNotNull { doc ->
+              try {
+                FirestoreAccessLink(
+                  linkId = doc.getString("linkId") ?: doc.id,
+                  videoId = doc.getString("videoId") ?: "",
+                  tokenHash = doc.getString("tokenHash") ?: "",
+                  isActive = doc.getBoolean("isActive") ?: true,
+                  createdAt = doc.getTimestamp("createdAt") ?: Timestamp.now(),
+                  expiresAt = doc.getTimestamp("expiresAt")
+                )
+              } catch (_: Exception) {
+                null
+              }
+            } ?: emptyList()
+            trySend(items)
           }
-        } ?: emptyList()
-        trySend(items)
+        awaitClose { registration.remove() }
       }
-    awaitClose { registration.remove() }
-  }
+    }
+  )
 
   /**
    * Upload video and thumbnail files (with persistent local fallback if Storage is unprovisioned/restricted)
@@ -974,14 +1154,44 @@ class FirestoreVideoRepository(
       "expiresAt" to accessLink.expiresAt
     )
 
-    // Save in Cloud Firestore
-    db.collection("videos").document(videoId).set(videoData).await()
-    db.collection("accessLinks").document(linkId).set(linkData).await()
-
-    val configuredShareBase = try {
-      db.collection("appConfig").document("general").get().await().getString("shareLinkBaseUrl").orEmpty()
-    } catch (_: Exception) {
-      ""
+    // Save in PostgreSQL (if configured on Render) or Cloud Firestore fallback
+    val configuredShareBase = if (backendDb.isPostgresActive()) {
+      val pgVideoData = mapOf(
+        "videoId" to video.videoId,
+        "title" to video.title,
+        "description" to video.description,
+        "thumbnailPath" to video.thumbnailPath,
+        "storagePath" to video.storagePath,
+        "createdAt" to BackendDbClient.serverTimestampMarker(),
+        "isActive" to video.isActive,
+        "totalViews" to video.totalViews,
+        "uploadedBy" to video.uploadedBy,
+        "uploaderName" to video.uploaderName
+      )
+      val pgLinkData = mapOf(
+        "linkId" to accessLink.linkId,
+        "videoId" to accessLink.videoId,
+        "tokenHash" to accessLink.tokenHash,
+        "isActive" to accessLink.isActive,
+        "createdAt" to BackendDbClient.serverTimestampMarker(),
+        "expiresAt" to accessLink.expiresAt
+      )
+      val okV = backendDb.writeDoc("videos", videoId, "set", pgVideoData)
+      val okL = backendDb.writeDoc("accessLinks", linkId, "set", pgLinkData)
+      if (!okV || !okL) {
+        throw IllegalStateException("Unable to save video on backend server. Please try again.")
+      }
+      notifyBackendChanged("videos", "accessLinks")
+      val cfgDoc = backendDb.getDoc("appConfig", "general")?.second
+      cfgDoc?.let { BackendDbClient.optStringClean(it, "shareLinkBaseUrl") }.orEmpty()
+    } else {
+      db.collection("videos").document(videoId).set(videoData).await()
+      db.collection("accessLinks").document(linkId).set(linkData).await()
+      try {
+        db.collection("appConfig").document("general").get().await().getString("shareLinkBaseUrl").orEmpty()
+      } catch (_: Exception) {
+        ""
+      }
     }
     val shareableLink = buildShareableVideoUrl(rawToken, configuredShareBase)
 
@@ -994,6 +1204,17 @@ class FirestoreVideoRepository(
   }
 
   suspend fun updateVideoMetadata(videoId: String, newTitle: String, newDescription: String) {
+    if (backendDb.isPostgresActive()) {
+      val ok = backendDb.writeDoc(
+        "videos",
+        videoId,
+        "update",
+        mapOf("title" to newTitle.trim(), "description" to newDescription.trim())
+      )
+      if (!ok) throw IllegalStateException("Failed to update video metadata.")
+      notifyBackendChanged("videos")
+      return
+    }
     db.collection("videos").document(videoId).update(
       mapOf(
         "title" to newTitle.trim(),
@@ -1003,19 +1224,46 @@ class FirestoreVideoRepository(
   }
 
   suspend fun toggleLinkActive(linkId: String, isActive: Boolean) {
+    if (backendDb.isPostgresActive()) {
+      val ok = backendDb.writeDoc("accessLinks", linkId, "update", mapOf("isActive" to isActive))
+      if (!ok) throw IllegalStateException("Failed to update link status.")
+      notifyBackendChanged("accessLinks")
+      return
+    }
     db.collection("accessLinks").document(linkId).update("isActive", isActive).await()
   }
 
   suspend fun toggleVideoActive(videoId: String, isActive: Boolean) {
+    if (backendDb.isPostgresActive()) {
+      val ok = backendDb.writeDoc("videos", videoId, "update", mapOf("isActive" to isActive))
+      if (!ok) throw IllegalStateException("Failed to update video status.")
+      notifyBackendChanged("videos")
+      return
+    }
     db.collection("videos").document(videoId).update("isActive", isActive).await()
   }
 
   suspend fun deleteLink(linkId: String) {
+    if (backendDb.isPostgresActive()) {
+      val ok = backendDb.writeDoc("accessLinks", linkId, "delete")
+      if (!ok) throw IllegalStateException("Failed to delete link.")
+      notifyBackendChanged("accessLinks")
+      return
+    }
     db.collection("accessLinks").document(linkId).delete().await()
   }
 
   suspend fun deleteVideoAndAssociatedData(videoId: String) {
     try {
+      if (backendDb.isPostgresActive()) {
+        backendDb.writeDoc("videos", videoId, "delete")
+        val links = backendDb.getCollection("accessLinks", field = "videoId", value = videoId).orEmpty()
+        for (doc in links) {
+          backendDb.writeDoc("accessLinks", doc.id, "delete")
+        }
+        notifyBackendChanged("videos", "accessLinks")
+        return
+      }
       db.collection("videos").document(videoId).delete().await()
 
       val links = db.collection("accessLinks").whereEqualTo("videoId", videoId).get().await()
@@ -1036,6 +1284,8 @@ class FirestoreVideoRepository(
   }
 
   suspend fun seedInitialDataIfEmpty() {
+    // Avoid unnecessary Firestore reads on every app launch when PostgreSQL is active
+    if (backendDb.isPostgresActive()) return
     try {
       val existing = db.collection("videos").limit(1).get().await()
       if (existing.isEmpty) {
@@ -1147,20 +1397,37 @@ class FirestoreVideoRepository(
     )
   }
 
-  fun getTelegramConfigFlow(): Flow<TelegramConfig> = callbackFlow {
-    val registration = db.collection("appConfig").document("general")
-      .addSnapshotListener { snapshot, error ->
-        if (error != null) {
-          Log.w(TAG, "Error listening to telegram config: ${error.message}")
-          trySend(TelegramConfig(mainLink = DEFAULT_TELEGRAM_LINK))
-          return@addSnapshotListener
-        }
-        trySend(parseTelegramConfigSnapshot(snapshot))
+  fun getTelegramConfigFlow(): Flow<TelegramConfig> = postgresOrFirestoreFlow(
+    refreshKey = "appConfig/general",
+    pollIntervalMs = 60_000L,
+    fallbackValue = TelegramConfig(mainLink = DEFAULT_TELEGRAM_LINK),
+    fetchFromPostgres = {
+      backendDb.getDoc("appConfig", "general")?.let { (_, json) ->
+        BackendDbClient.parseTelegramConfig(json)
       }
-    awaitClose { registration.remove() }
-  }
+    },
+    firestoreFlow = {
+      callbackFlow {
+        val registration = db.collection("appConfig").document("general")
+          .addSnapshotListener { snapshot, error ->
+            if (error != null) {
+              Log.w(TAG, "Error listening to telegram config: ${error.message}")
+              trySend(TelegramConfig(mainLink = DEFAULT_TELEGRAM_LINK))
+              return@addSnapshotListener
+            }
+            trySend(parseTelegramConfigSnapshot(snapshot))
+          }
+        awaitClose { registration.remove() }
+      }
+    }
+  )
 
   suspend fun fetchTelegramConfigFromServer(): TelegramConfig? {
+    if (backendDb.isPostgresActive()) {
+      return backendDb.getDoc("appConfig", "general")?.let { (_, json) ->
+        BackendDbClient.parseTelegramConfig(json)
+      }
+    }
     return try {
       val snapshot = db.collection("appConfig").document("general")
         .get(com.google.firebase.firestore.Source.SERVER)
@@ -1172,23 +1439,35 @@ class FirestoreVideoRepository(
     }
   }
 
-  fun getTelegramLinkFlow(): Flow<String> = callbackFlow {
-    val registration = db.collection("appConfig").document("general")
-      .addSnapshotListener { snapshot, error ->
-        if (error != null) {
-          Log.w(TAG, "Error listening to telegram link: ${error.message}")
-          trySend(DEFAULT_TELEGRAM_LINK)
-          return@addSnapshotListener
-        }
-        val link = snapshot?.getString("telegramLink")
-        if (!link.isNullOrBlank()) {
-          trySend(link.trim())
-        } else {
-          trySend(DEFAULT_TELEGRAM_LINK)
-        }
+  fun getTelegramLinkFlow(): Flow<String> = postgresOrFirestoreFlow(
+    refreshKey = "appConfig/general",
+    pollIntervalMs = 60_000L,
+    fallbackValue = DEFAULT_TELEGRAM_LINK,
+    fetchFromPostgres = {
+      backendDb.getDoc("appConfig", "general")?.let { (_, json) ->
+        BackendDbClient.parseTelegramConfig(json).mainLink
       }
-    awaitClose { registration.remove() }
-  }
+    },
+    firestoreFlow = {
+      callbackFlow {
+        val registration = db.collection("appConfig").document("general")
+          .addSnapshotListener { snapshot, error ->
+            if (error != null) {
+              Log.w(TAG, "Error listening to telegram link: ${error.message}")
+              trySend(DEFAULT_TELEGRAM_LINK)
+              return@addSnapshotListener
+            }
+            val link = snapshot?.getString("telegramLink")
+            if (!link.isNullOrBlank()) {
+              trySend(link.trim())
+            } else {
+              trySend(DEFAULT_TELEGRAM_LINK)
+            }
+          }
+        awaitClose { registration.remove() }
+      }
+    }
+  )
 
   suspend fun updateTelegramConfig(
     mainLink: String,
@@ -1308,20 +1587,37 @@ class FirestoreVideoRepository(
         )
       }
 
-      val data = hashMapOf<String, Any>(
-        "telegramLink" to cleanMain,
-        "creatorBotLink" to cleanCreatorBotLink,
-        "financeBotLink" to cleanFinanceBotLink,
-        "shareLinkBaseUrl" to cleanShareLinkBaseUrl,
-        "categoryLinks" to sanitizedCategories,
-        "categoryNames" to sanitizedCategoryNames,
-        "deletedCategoryKeys" to cleanDeletedKeys,
-        "customCategories" to serializedCustomMaps,
-        "updatedAt" to FieldValue.serverTimestamp()
-      )
-      db.collection("appConfig").document("general")
-        .set(data)
-        .await()
+      if (backendDb.isPostgresActive()) {
+        val pgData = mapOf(
+          "telegramLink" to cleanMain,
+          "creatorBotLink" to cleanCreatorBotLink,
+          "financeBotLink" to cleanFinanceBotLink,
+          "shareLinkBaseUrl" to cleanShareLinkBaseUrl,
+          "categoryLinks" to sanitizedCategories,
+          "categoryNames" to sanitizedCategoryNames,
+          "deletedCategoryKeys" to cleanDeletedKeys,
+          "customCategories" to serializedCustomMaps,
+          "updatedAt" to BackendDbClient.serverTimestampMarker()
+        )
+        val ok = backendDb.writeDoc("appConfig", "general", "merge", pgData)
+        if (!ok) return Result.failure(IllegalStateException("Failed to save Telegram config on backend."))
+        notifyBackendChanged("appConfig/general")
+      } else {
+        val data = hashMapOf<String, Any>(
+          "telegramLink" to cleanMain,
+          "creatorBotLink" to cleanCreatorBotLink,
+          "financeBotLink" to cleanFinanceBotLink,
+          "shareLinkBaseUrl" to cleanShareLinkBaseUrl,
+          "categoryLinks" to sanitizedCategories,
+          "categoryNames" to sanitizedCategoryNames,
+          "deletedCategoryKeys" to cleanDeletedKeys,
+          "customCategories" to serializedCustomMaps,
+          "updatedAt" to FieldValue.serverTimestamp()
+        )
+        db.collection("appConfig").document("general")
+          .set(data)
+          .await()
+      }
       Result.success(
         TelegramConfig(
           mainLink = cleanMain,
@@ -1335,7 +1631,7 @@ class FirestoreVideoRepository(
         )
       )
     } catch (e: Exception) {
-      Log.e(TAG, "Failed to update telegram config in Firestore", e)
+      Log.e(TAG, "Failed to update telegram config", e)
       Result.failure(e)
     }
   }
@@ -1343,21 +1639,37 @@ class FirestoreVideoRepository(
   suspend fun updateTelegramLink(newLink: String): Result<Unit> {
     return try {
       val cleanLink = normalizeTelegramUrl(newLink).ifBlank { DEFAULT_TELEGRAM_LINK }
-      val data = mapOf(
-        "telegramLink" to cleanLink,
-        "updatedAt" to FieldValue.serverTimestamp()
-      )
-      db.collection("appConfig").document("general")
-        .set(data, com.google.firebase.firestore.SetOptions.merge())
-        .await()
+      if (backendDb.isPostgresActive()) {
+        val ok = backendDb.writeDoc(
+          "appConfig",
+          "general",
+          "merge",
+          mapOf("telegramLink" to cleanLink, "updatedAt" to BackendDbClient.serverTimestampMarker())
+        )
+        if (!ok) return Result.failure(IllegalStateException("Failed to update Telegram link on backend."))
+        notifyBackendChanged("appConfig/general")
+      } else {
+        val data = mapOf(
+          "telegramLink" to cleanLink,
+          "updatedAt" to FieldValue.serverTimestamp()
+        )
+        db.collection("appConfig").document("general")
+          .set(data, com.google.firebase.firestore.SetOptions.merge())
+          .await()
+      }
       Result.success(Unit)
     } catch (e: Exception) {
-      Log.e(TAG, "Failed to update telegram link in Firestore", e)
+      Log.e(TAG, "Failed to update telegram link", e)
       Result.failure(e)
     }
   }
 
   suspend fun getTelegramLink(): String {
+    if (backendDb.isPostgresActive()) {
+      val doc = backendDb.getDoc("appConfig", "general")?.second
+      val link = doc?.let { BackendDbClient.optNullableString(it, "telegramLink") }
+      return if (!link.isNullOrBlank()) link.trim() else DEFAULT_TELEGRAM_LINK
+    }
     return try {
       val snap = db.collection("appConfig").document("general").get().await()
       val link = snap.getString("telegramLink")
@@ -1400,26 +1712,47 @@ class FirestoreVideoRepository(
     )
   }
 
-  fun getAppUpdateConfigFlow(): Flow<AppUpdateConfig> = callbackFlow {
-    val registration = db.collection("appConfig").document(APP_UPDATE_DOC_ID)
-      .addSnapshotListener { snapshot, error ->
-        if (error != null) {
-          Log.w(TAG, "Error listening to appUpdate config: ${error.message}")
-          trySend(
-            AppUpdateConfig(
-              latestVersionCode = BuildConfig.VERSION_CODE,
-              latestVersionName = BuildConfig.VERSION_NAME,
-              apkUrl = DEFAULT_APK_DOWNLOAD_URL
-            )
-          )
-          return@addSnapshotListener
-        }
-        trySend(parseAppUpdateConfigSnapshot(snapshot))
+  fun getAppUpdateConfigFlow(): Flow<AppUpdateConfig> = postgresOrFirestoreFlow(
+    refreshKey = "appConfig/appUpdate",
+    pollIntervalMs = 60_000L,
+    fallbackValue = AppUpdateConfig(
+      latestVersionCode = BuildConfig.VERSION_CODE,
+      latestVersionName = BuildConfig.VERSION_NAME,
+      apkUrl = DEFAULT_APK_DOWNLOAD_URL
+    ),
+    fetchFromPostgres = {
+      backendDb.getDoc("appConfig", APP_UPDATE_DOC_ID)?.let { (_, json) ->
+        BackendDbClient.parseAppUpdateConfig(json)
       }
-    awaitClose { registration.remove() }
-  }
+    },
+    firestoreFlow = {
+      callbackFlow {
+        val registration = db.collection("appConfig").document(APP_UPDATE_DOC_ID)
+          .addSnapshotListener { snapshot, error ->
+            if (error != null) {
+              Log.w(TAG, "Error listening to appUpdate config: ${error.message}")
+              trySend(
+                AppUpdateConfig(
+                  latestVersionCode = BuildConfig.VERSION_CODE,
+                  latestVersionName = BuildConfig.VERSION_NAME,
+                  apkUrl = DEFAULT_APK_DOWNLOAD_URL
+                )
+              )
+              return@addSnapshotListener
+            }
+            trySend(parseAppUpdateConfigSnapshot(snapshot))
+          }
+        awaitClose { registration.remove() }
+      }
+    }
+  )
 
   suspend fun fetchAppUpdateConfigFromServer(): AppUpdateConfig? {
+    if (backendDb.isPostgresActive()) {
+      return backendDb.getDoc("appConfig", APP_UPDATE_DOC_ID)?.let { (_, json) ->
+        BackendDbClient.parseAppUpdateConfig(json)
+      }
+    }
     return try {
       val snapshot = db.collection("appConfig").document(APP_UPDATE_DOC_ID)
         .get(com.google.firebase.firestore.Source.SERVER)
@@ -1457,19 +1790,35 @@ class FirestoreVideoRepository(
         return Result.failure(IllegalArgumentException(validationError))
       }
 
-      val payload = hashMapOf<String, Any>(
-        "isEnabled" to isEnabled,
-        "latestVersionCode" to latestVersionCode,
-        "latestVersionName" to cleanVersionName,
-        "title" to cleanTitle,
-        "message" to cleanMessage,
-        "apkUrl" to cleanApkUrl,
-        "isForceUpdate" to isForceUpdate,
-        "updatedAt" to FieldValue.serverTimestamp()
-      )
-      db.collection("appConfig").document(APP_UPDATE_DOC_ID)
-        .set(payload)
-        .await()
+      if (backendDb.isPostgresActive()) {
+        val pgPayload = mapOf(
+          "isEnabled" to isEnabled,
+          "latestVersionCode" to latestVersionCode,
+          "latestVersionName" to cleanVersionName,
+          "title" to cleanTitle,
+          "message" to cleanMessage,
+          "apkUrl" to cleanApkUrl,
+          "isForceUpdate" to isForceUpdate,
+          "updatedAt" to BackendDbClient.serverTimestampMarker()
+        )
+        val ok = backendDb.writeDoc("appConfig", APP_UPDATE_DOC_ID, "set", pgPayload)
+        if (!ok) return Result.failure(IllegalStateException("Failed to save appUpdate config on backend."))
+        notifyBackendChanged("appConfig/appUpdate")
+      } else {
+        val payload = hashMapOf<String, Any>(
+          "isEnabled" to isEnabled,
+          "latestVersionCode" to latestVersionCode,
+          "latestVersionName" to cleanVersionName,
+          "title" to cleanTitle,
+          "message" to cleanMessage,
+          "apkUrl" to cleanApkUrl,
+          "isForceUpdate" to isForceUpdate,
+          "updatedAt" to FieldValue.serverTimestamp()
+        )
+        db.collection("appConfig").document(APP_UPDATE_DOC_ID)
+          .set(payload)
+          .await()
+      }
 
       Result.success(
         AppUpdateConfig(
@@ -1483,7 +1832,7 @@ class FirestoreVideoRepository(
         )
       )
     } catch (e: Exception) {
-      Log.e(TAG, "Failed to update appUpdate config in Firestore", e)
+      Log.e(TAG, "Failed to update appUpdate config", e)
       Result.failure(e)
     }
   }
@@ -1491,6 +1840,11 @@ class FirestoreVideoRepository(
   // --- Superadmin Master Key Security Config ---
 
   suspend fun getSuperadminMasterKeyHash(): String? {
+    if (backendDb.isPostgresActive()) {
+      val json = backendDb.getDoc("appConfig", ADMIN_SECURITY_DOC_ID)?.second
+      return json?.let { BackendDbClient.optNullableString(it, "adminMasterKeyHash") }
+        ?.trim()?.takeIf { it.length == 64 }
+    }
     return try {
       val snap = db.collection("appConfig").document(ADMIN_SECURITY_DOC_ID).get().await()
       snap.getString("adminMasterKeyHash")?.trim()?.takeIf { it.length == 64 }
@@ -1541,13 +1895,23 @@ class FirestoreVideoRepository(
       }
 
       val newHash = hashSecretExact(cleanNew)
-      val payload = mapOf(
-        "adminMasterKeyHash" to newHash,
-        "updatedAt" to FieldValue.serverTimestamp()
-      )
-      db.collection("appConfig").document(ADMIN_SECURITY_DOC_ID)
-        .set(payload)
-        .await()
+      if (backendDb.isPostgresActive()) {
+        val ok = backendDb.writeDoc(
+          "appConfig",
+          ADMIN_SECURITY_DOC_ID,
+          "set",
+          mapOf("adminMasterKeyHash" to newHash, "updatedAt" to BackendDbClient.serverTimestampMarker())
+        )
+        if (!ok) return Result.failure(IllegalStateException("Failed to save Superadmin Master Key on backend."))
+      } else {
+        val payload = mapOf(
+          "adminMasterKeyHash" to newHash,
+          "updatedAt" to FieldValue.serverTimestamp()
+        )
+        db.collection("appConfig").document(ADMIN_SECURITY_DOC_ID)
+          .set(payload)
+          .await()
+      }
       Result.success(newHash)
     } catch (e: Exception) {
       Log.e(TAG, "Failed to update Superadmin Master Key", e)
@@ -1604,25 +1968,37 @@ class FirestoreVideoRepository(
     }
   }
 
-  fun getAllMembersFlow(): Flow<List<FirestoreMember>> = callbackFlow {
-    val registration = db.collection("members")
-      .addSnapshotListener { snapshot, error ->
-        if (error != null) {
-          Log.w(TAG, "Listen warning on members: ${error.message}")
-          trySend(emptyList())
-          return@addSnapshotListener
-        }
-        val members = snapshot?.documents?.mapNotNull { doc ->
-          try {
-            parseMemberDoc(doc)
-          } catch (_: Exception) {
-            null
-          }
-        } ?: emptyList()
-        trySend(sortMembersNewestFirst(members))
+  fun getAllMembersFlow(): Flow<List<FirestoreMember>> = postgresOrFirestoreFlow(
+    refreshKey = "members",
+    pollIntervalMs = 20_000L,
+    fallbackValue = emptyList(),
+    fetchFromPostgres = {
+      backendDb.getCollection("members")?.let { docs ->
+        sortMembersNewestFirst(docs.map { BackendDbClient.parseMember(it) })
       }
-    awaitClose { registration.remove() }
-  }
+    },
+    firestoreFlow = {
+      callbackFlow {
+        val registration = db.collection("members")
+          .addSnapshotListener { snapshot, error ->
+            if (error != null) {
+              Log.w(TAG, "Listen warning on members: ${error.message}")
+              trySend(emptyList())
+              return@addSnapshotListener
+            }
+            val members = snapshot?.documents?.mapNotNull { doc ->
+              try {
+                parseMemberDoc(doc)
+              } catch (_: Exception) {
+                null
+              }
+            } ?: emptyList()
+            trySend(sortMembersNewestFirst(members))
+          }
+        awaitClose { registration.remove() }
+      }
+    }
+  )
 
   suspend fun addMember(
     name: String,
@@ -1643,6 +2019,58 @@ class FirestoreVideoRepository(
       val cleanOptions = MemberOption.sanitizeKeys(allowedOptions)
       if (cleanOptions.isEmpty()) {
         return Result.failure(IllegalArgumentException("Please select at least 1 option for this account."))
+      }
+
+      if (backendDb.isPostgresActive()) {
+        val existingMembers = backendDb.getCollection("members").orEmpty()
+        val emailCollision = existingMembers.firstOrNull { doc ->
+          BackendDbClient.optStringClean(doc.data, "emailOrPhone").trim().equals(cleanEmail, ignoreCase = true)
+        }
+        if (emailCollision != null) {
+          val existingName = BackendDbClient.optStringClean(emailCollision.data, "name", "Creator").trim()
+          return Result.failure(
+            IllegalArgumentException(
+              "Email '$cleanEmail' is already registered to '$existingName'. Use Change Email on their card to update or transfer data."
+            )
+          )
+        }
+        val keyCollision = existingMembers.any { doc ->
+          BackendDbClient.optStringClean(doc.data, "passkey").trim() == cleanPass
+        }
+        if (keyCollision) {
+          return Result.failure(IllegalArgumentException("This Password is already assigned to another member."))
+        }
+        val memberId = "mem_" + UUID.randomUUID().toString().replace("-", "").take(10)
+        val member = FirestoreMember(
+          memberId = memberId,
+          name = cleanName,
+          emailOrPhone = cleanEmail,
+          passkey = cleanPass,
+          role = normalizedRole,
+          isActive = true,
+          createdAt = Timestamp.now(),
+          totalEarning = 0.0,
+          creditedViews = 0L,
+          viewRatePer1000 = DEFAULT_VIEW_RATE_PER_1000,
+          allowedOptions = cleanOptions
+        )
+        val pgPayload = mapOf(
+          "memberId" to member.memberId,
+          "name" to member.name,
+          "emailOrPhone" to member.emailOrPhone,
+          "passkey" to member.passkey,
+          "role" to member.role,
+          "allowedOptions" to member.allowedOptions,
+          "isActive" to member.isActive,
+          "createdAt" to BackendDbClient.serverTimestampMarker(),
+          "totalEarning" to 0.0,
+          "creditedViews" to 0L,
+          "viewRatePer1000" to DEFAULT_VIEW_RATE_PER_1000
+        )
+        val ok = backendDb.writeDoc("members", memberId, "set", pgPayload)
+        if (!ok) return Result.failure(IllegalStateException("Failed to create member on backend."))
+        notifyBackendChanged("members")
+        return Result.success(member)
       }
 
       // Prevent duplicate email registration across members
@@ -1773,6 +2201,53 @@ class FirestoreVideoRepository(
         return Result.failure(IllegalArgumentException("Please select at least 1 option for this account."))
       }
 
+      if (backendDb.isPostgresActive()) {
+        val allMembers = backendDb.getCollection("members").orEmpty()
+        val targetDoc = allMembers.firstOrNull { it.id == cleanId || BackendDbClient.optStringClean(it.data, "memberId") == cleanId }
+          ?: return Result.failure(IllegalArgumentException("Member account no longer exists."))
+        val previousMember = BackendDbClient.parseMember(targetDoc)
+        val canonicalMemberId = previousMember.memberId
+        val emailConflict = allMembers.firstOrNull { doc ->
+          doc.id != targetDoc.id &&
+            BackendDbClient.optStringClean(doc.data, "memberId", doc.id) != canonicalMemberId &&
+            BackendDbClient.optStringClean(doc.data, "emailOrPhone").trim().equals(cleanEmail, ignoreCase = true)
+        }
+        if (emailConflict != null) {
+          val conflictName = BackendDbClient.optStringClean(emailConflict.data, "name", "Creator").trim()
+          return Result.failure(
+            IllegalArgumentException(
+              "Email '$cleanEmail' is already used by '$conflictName'. Use 'Change Email' button to transfer old data & earnings to that email."
+            )
+          )
+        }
+        val resolvedRole = if (role != null) MemberRole.normalize(role) else previousMember.role
+        val updates = mutableMapOf<String, Any?>(
+          "name" to cleanName,
+          "emailOrPhone" to cleanEmail,
+          "passkey" to cleanPass,
+          "isActive" to isActive
+        )
+        if (role != null) updates["role"] = resolvedRole
+        if (allowedOptions != null) updates["allowedOptions"] = MemberOption.sanitizeKeys(allowedOptions)
+        val ok = backendDb.writeDoc("members", targetDoc.id, "update", updates)
+        if (!ok) return Result.failure(IllegalStateException("Failed to update member details on backend."))
+        notifyBackendChanged("members")
+        val refreshed = backendDb.getDoc("members", targetDoc.id)?.second
+        val updated = if (refreshed != null) {
+          BackendDbClient.parseMember(com.example.data.remote.RemoteDoc(targetDoc.id, refreshed))
+        } else {
+          previousMember.copy(
+            name = cleanName,
+            emailOrPhone = cleanEmail,
+            passkey = cleanPass,
+            isActive = isActive,
+            role = resolvedRole,
+            allowedOptions = allowedOptions?.let { MemberOption.sanitizeKeys(it) } ?: previousMember.allowedOptions
+          )
+        }
+        return Result.success(updated)
+      }
+
       val targetRef = resolveMemberDocRef(cleanId)
       val currentSnap = targetRef.get().await()
       if (!currentSnap.exists()) {
@@ -1852,6 +2327,111 @@ class FirestoreVideoRepository(
         return Result.failure(IllegalArgumentException("Invalid creator account."))
       }
       val cleanNewEmail = newEmail.trim()
+
+      if (backendDb.isPostgresActive()) {
+        val allMembers = backendDb.getCollection("members").orEmpty()
+        val sourceDoc = allMembers.firstOrNull { it.id == cleanSourceId || BackendDbClient.optStringClean(it.data, "memberId") == cleanSourceId }
+          ?: return Result.failure(IllegalArgumentException("Creator account no longer exists."))
+        val sourceMember = BackendDbClient.parseMember(sourceDoc)
+        val canonicalSourceId = sourceMember.memberId
+        val previousEmail = sourceMember.emailOrPhone.trim()
+        if (previousEmail.equals(cleanNewEmail, ignoreCase = true)) {
+          return Result.failure(IllegalArgumentException("New email is the same as the current email."))
+        }
+        val existingTargetDoc = allMembers.firstOrNull { doc ->
+          doc.id != sourceDoc.id &&
+            BackendDbClient.optStringClean(doc.data, "memberId", doc.id) != canonicalSourceId &&
+            BackendDbClient.optStringClean(doc.data, "emailOrPhone").trim().equals(cleanNewEmail, ignoreCase = true)
+        }
+        if (existingTargetDoc == null) {
+          backendDb.writeDoc("members", sourceDoc.id, "update", mapOf("emailOrPhone" to cleanNewEmail))
+          val vids = backendDb.getCollection("videos", field = "uploadedBy", value = canonicalSourceId).orEmpty()
+          val wdrs = backendDb.getCollection("withdrawalRequests", field = "memberId", value = canonicalSourceId).orEmpty()
+          for (w in wdrs) {
+            backendDb.writeDoc(
+              "withdrawalRequests",
+              w.id,
+              "update",
+              mapOf("creatorEmail" to cleanNewEmail, "updatedAt" to BackendDbClient.serverTimestampMarker())
+            )
+          }
+          notifyBackendChanged("members", "withdrawalRequests")
+          return Result.success(
+            CreatorEmailChangeResult(
+              member = sourceMember.copy(emailOrPhone = cleanNewEmail),
+              previousEmail = previousEmail,
+              updatedEmail = cleanNewEmail,
+              migratedVideosCount = vids.size,
+              syncedWithdrawalsCount = wdrs.size,
+              mergedExistingAccount = false
+            )
+          )
+        } else {
+          val targetMember = BackendDbClient.parseMember(existingTargetDoc)
+          val canonicalTargetId = targetMember.memberId
+          val resolvedTargetName = targetMember.name.ifBlank { sourceMember.name.ifBlank { "Creator" } }
+          val sourceVids = backendDb.getCollection("videos", field = "uploadedBy", value = canonicalSourceId).orEmpty()
+          for (v in sourceVids) {
+            backendDb.writeDoc(
+              "videos",
+              v.id,
+              "update",
+              mapOf("uploadedBy" to canonicalTargetId, "uploaderName" to resolvedTargetName)
+            )
+          }
+          val sourceWdrs = backendDb.getCollection("withdrawalRequests", field = "memberId", value = canonicalSourceId).orEmpty()
+          for (w in sourceWdrs) {
+            backendDb.writeDoc(
+              "withdrawalRequests",
+              w.id,
+              "update",
+              mapOf(
+                "memberId" to canonicalTargetId,
+                "creatorEmail" to cleanNewEmail,
+                "creatorName" to resolvedTargetName,
+                "updatedAt" to BackendDbClient.serverTimestampMarker()
+              )
+            )
+          }
+          val mergedOptions = MemberOption.sanitizeKeys(targetMember.allowedOptions + sourceMember.allowedOptions)
+          val combinedViews = targetMember.creditedViews + sourceMember.creditedViews
+          val combinedEarning = kotlin.math.round((targetMember.totalEarning + sourceMember.totalEarning) * 100.0) / 100.0
+          val combinedHourly = mergeHourlyViews(targetMember.hourlyViews, sourceMember.hourlyViews)
+          val resolvedRate = if (targetMember.viewRatePer1000 > 0.0) targetMember.viewRatePer1000 else sourceMember.viewRatePer1000
+          backendDb.writeDoc(
+            "members",
+            existingTargetDoc.id,
+            "update",
+            mapOf(
+              "creditedViews" to combinedViews,
+              "totalEarning" to combinedEarning,
+              "viewRatePer1000" to resolvedRate,
+              "allowedOptions" to mergedOptions,
+              "hourlyViews" to combinedHourly,
+              "isActive" to (targetMember.isActive || sourceMember.isActive)
+            )
+          )
+          backendDb.writeDoc("members", sourceDoc.id, "delete")
+          notifyBackendChanged("members", "videos", "withdrawalRequests")
+          return Result.success(
+            CreatorEmailChangeResult(
+              member = targetMember.copy(
+                creditedViews = combinedViews,
+                totalEarning = combinedEarning,
+                viewRatePer1000 = resolvedRate,
+                allowedOptions = mergedOptions,
+                hourlyViews = combinedHourly,
+                isActive = targetMember.isActive || sourceMember.isActive
+              ),
+              previousEmail = previousEmail,
+              updatedEmail = cleanNewEmail,
+              migratedVideosCount = sourceVids.size,
+              syncedWithdrawalsCount = sourceWdrs.size,
+              mergedExistingAccount = true
+            )
+          )
+        }
+      }
 
       val sourceRef = resolveMemberDocRef(cleanSourceId)
       val sourceSnap = sourceRef.get().await()
@@ -2103,6 +2683,30 @@ class FirestoreVideoRepository(
       if (cleanId.isBlank()) {
         return Result.failure(IllegalArgumentException("Member session not found."))
       }
+      if (backendDb.isPostgresActive()) {
+        val docPair = backendDb.getDoc("members", cleanId)
+        val docJson = if (docPair?.first == true) docPair.second else null
+        if (docJson == null) {
+          return Result.failure(IllegalArgumentException("Member account no longer exists."))
+        }
+        val storedPasskey = BackendDbClient.optStringClean(docJson, "passkey").trim()
+        val validationError = validatePasskeyChange(
+          storedPasskey = storedPasskey,
+          currentInput = currentPasskey,
+          newPasskey = newPasskey,
+          confirmPasskey = confirmPasskey
+        )
+        if (validationError != null) {
+          return Result.failure(IllegalArgumentException(validationError))
+        }
+        val cleanNew = newPasskey.trim()
+        val ok = backendDb.writeDoc("members", cleanId, "update", mapOf("passkey" to cleanNew))
+        if (!ok) return Result.failure(IllegalStateException("Failed to update password on backend."))
+        notifyBackendChanged("members")
+        return Result.success(
+          BackendDbClient.parseMember(com.example.data.remote.RemoteDoc(cleanId, docJson)).copy(passkey = cleanNew)
+        )
+      }
       val snap = db.collection("members").document(cleanId).get().await()
       if (!snap.exists()) {
         return Result.failure(IllegalArgumentException("Member account no longer exists."))
@@ -2131,6 +2735,12 @@ class FirestoreVideoRepository(
 
   suspend fun toggleMemberActive(memberId: String, isActive: Boolean): Result<Unit> {
     return try {
+      if (backendDb.isPostgresActive()) {
+        val ok = backendDb.writeDoc("members", memberId, "update", mapOf("isActive" to isActive))
+        if (!ok) return Result.failure(IllegalStateException("Failed to update member status on backend."))
+        notifyBackendChanged("members")
+        return Result.success(Unit)
+      }
       db.collection("members").document(memberId).update("isActive", isActive).await()
       Result.success(Unit)
     } catch (e: Exception) {
@@ -2143,6 +2753,15 @@ class FirestoreVideoRepository(
       val cleanId = memberId.trim()
       if (cleanId.isBlank()) {
         return Result.failure(IllegalArgumentException("Invalid member ID."))
+      }
+      if (backendDb.isPostgresActive()) {
+        backendDb.writeDoc("members", cleanId, "delete")
+        val matching = backendDb.getCollection("members", field = "memberId", value = cleanId).orEmpty()
+        for (doc in matching) {
+          if (doc.id != cleanId) backendDb.writeDoc("members", doc.id, "delete")
+        }
+        notifyBackendChanged("members")
+        return Result.success(Unit)
       }
       db.collection("members").document(cleanId).delete().await()
       val matchingByField = db.collection("members")
@@ -2162,9 +2781,17 @@ class FirestoreVideoRepository(
   }
 
   suspend fun getMemberByPasskey(inputKey: String): FirestoreMember? {
+    val cleanKey = inputKey.trim()
+    if (cleanKey.isBlank()) return null
+    if (backendDb.isPostgresActive()) {
+      val docs = backendDb.getCollection("members", field = "passkey", value = cleanKey, limit = 1)
+      val doc = docs?.firstOrNull() ?: return null
+      val parsed = BackendDbClient.parseMember(doc)
+      return if (parsed.isActive) parsed else null
+    }
     return try {
       val snap = db.collection("members")
-        .whereEqualTo("passkey", inputKey.trim())
+        .whereEqualTo("passkey", cleanKey)
         .limit(1)
         .get()
         .await()
@@ -2182,6 +2809,20 @@ class FirestoreVideoRepository(
     val cleanEmail = email.trim().lowercase()
     val cleanKey = inputKey.trim()
     if (cleanEmail.isBlank() || cleanKey.isBlank()) return null
+    if (backendDb.isPostgresActive()) {
+      val byPass = backendDb.getCollection("members", field = "passkey", value = cleanKey).orEmpty()
+      val matched = byPass.firstOrNull { d ->
+        BackendDbClient.optStringClean(d.data, "emailOrPhone").trim().lowercase() == cleanEmail
+      } ?: run {
+        val all = backendDb.getCollection("members").orEmpty()
+        all.firstOrNull { d ->
+          BackendDbClient.optStringClean(d.data, "emailOrPhone").trim().lowercase() == cleanEmail &&
+            BackendDbClient.optStringClean(d.data, "passkey").trim() == cleanKey
+        }
+      } ?: return null
+      val parsed = BackendDbClient.parseMember(matched)
+      return if (parsed.isActive) parsed else null
+    }
     return try {
       val snap = db.collection("members")
         .whereEqualTo("passkey", cleanKey)
@@ -2210,6 +2851,14 @@ class FirestoreVideoRepository(
   suspend fun getMemberById(memberId: String): FirestoreMember? {
     val cleanId = memberId.trim()
     if (cleanId.isBlank()) return null
+    if (backendDb.isPostgresActive()) {
+      val direct = backendDb.getDoc("members", cleanId)
+      if (direct?.first == true && direct.second != null) {
+        return BackendDbClient.parseMember(com.example.data.remote.RemoteDoc(cleanId, direct.second!!))
+      }
+      val byField = backendDb.getCollection("members", field = "memberId", value = cleanId, limit = 1)
+      return byField?.firstOrNull()?.let { BackendDbClient.parseMember(it) }
+    }
     return try {
       val ref = resolveMemberDocRef(cleanId)
       val doc = ref.get().await()
@@ -2222,6 +2871,9 @@ class FirestoreVideoRepository(
   }
 
   private suspend fun resolveAuthBackendBaseUrl(): String {
+    if (backendDb.isPostgresActive()) {
+      return DEFAULT_AUTH_BACKEND_BASE_URL
+    }
     return try {
       val snap = db.collection("appConfig").document("general").get().await()
       val explicit = snap.getString("authBackendBaseUrl").orEmpty().trim().trimEnd('/')
@@ -2339,6 +2991,7 @@ class FirestoreVideoRepository(
         val memberObj = json.optJSONObject("member")
           ?: return Result.failure(IllegalStateException("Account verified, please sign in on Login tab."))
         val parsed = parseMemberJson(memberObj, password.trim())
+        notifyBackendChanged("members")
         val freshFromFirestore = if (parsed.memberId.isNotBlank()) getMemberById(parsed.memberId) else null
         Result.success(freshFromFirestore ?: parsed)
       } else {
@@ -2397,6 +3050,7 @@ class FirestoreVideoRepository(
         val memberObj = json.optJSONObject("member")
           ?: return Result.failure(IllegalStateException("Password reset ho gaya, ab Login tab se sign in karein."))
         val parsed = parseMemberJson(memberObj, cleanPass)
+        notifyBackendChanged("members")
         val freshFromFirestore = if (parsed.memberId.isNotBlank()) getMemberById(parsed.memberId) else null
         Result.success(freshFromFirestore ?: parsed)
       } else {
@@ -2414,6 +3068,12 @@ class FirestoreVideoRepository(
   suspend fun updateMemberEarning(memberId: String, newTotalEarning: Double): Result<Unit> {
     return try {
       val safeEarning = kotlin.math.round(newTotalEarning.coerceAtLeast(0.0) * 100.0) / 100.0
+      if (backendDb.isPostgresActive()) {
+        val ok = backendDb.writeDoc("members", memberId, "update", mapOf("totalEarning" to safeEarning))
+        if (!ok) return Result.failure(IllegalStateException("Failed to update earning on backend."))
+        notifyBackendChanged("members")
+        return Result.success(Unit)
+      }
       db.collection("members").document(memberId)
         .update("totalEarning", safeEarning)
         .await()
@@ -2440,6 +3100,43 @@ class FirestoreVideoRepository(
       }
       if (ratePer1000.isNaN() || ratePer1000.isInfinite() || ratePer1000 < 0.0) {
         return Result.failure(IllegalArgumentException("Rate per 1,000 views must be non-negative."))
+      }
+
+      if (backendDb.isPostgresActive()) {
+        val direct = backendDb.getDoc("members", cleanId)
+        val targetDoc = if (direct?.first == true && direct.second != null) {
+          com.example.data.remote.RemoteDoc(cleanId, direct.second!!)
+        } else {
+          backendDb.getCollection("members", field = "memberId", value = cleanId, limit = 1)?.firstOrNull()
+        } ?: return Result.failure(IllegalArgumentException("Member account no longer exists."))
+
+        val currentMember = BackendDbClient.parseMember(targetDoc)
+        val earningDeltaOrTotal = calculateViewsEarning(viewsInput, ratePer1000)
+        val newCreditedViews = if (isAddition) currentMember.creditedViews + viewsInput else viewsInput
+        val newTotalEarning = if (isAddition) {
+          kotlin.math.round((currentMember.totalEarning + earningDeltaOrTotal) * 100.0) / 100.0
+        } else {
+          earningDeltaOrTotal
+        }
+        val ok = backendDb.writeDoc(
+          "members",
+          targetDoc.id,
+          "update",
+          mapOf(
+            "creditedViews" to newCreditedViews,
+            "viewRatePer1000" to ratePer1000,
+            "totalEarning" to newTotalEarning
+          )
+        )
+        if (!ok) return Result.failure(IllegalStateException("Failed to credit views on backend."))
+        notifyBackendChanged("members")
+        return Result.success(
+          currentMember.copy(
+            creditedViews = newCreditedViews,
+            viewRatePer1000 = ratePer1000,
+            totalEarning = newTotalEarning
+          )
+        )
       }
 
       val directRef = db.collection("members").document(cleanId)
@@ -2494,36 +3191,47 @@ class FirestoreVideoRepository(
     }
   }
 
-  fun getAllWithdrawalRequestsFlow(): Flow<List<FirestoreWithdrawalRequest>> = callbackFlow {
-    val registration = db.collection("withdrawalRequests")
-      .addSnapshotListener { snapshot, error ->
-        if (error != null) {
-          Log.w(TAG, "Listen warning on withdrawalRequests: ${error.message}")
-          trySend(emptyList())
-          return@addSnapshotListener
-        }
-        val requests = snapshot?.documents?.mapNotNull { doc ->
-          try {
-            FirestoreWithdrawalRequest(
-              requestId = doc.getString("requestId") ?: doc.id,
-              memberId = doc.getString("memberId") ?: "",
-              creatorName = doc.getString("creatorName") ?: "",
-              creatorEmail = doc.getString("creatorEmail") ?: "",
-              amount = (doc.get("amount") as? Number)?.toDouble() ?: 0.0,
-              upiId = doc.getString("upiId") ?: "",
-              status = doc.getString("status") ?: WithdrawalStatus.PENDING,
-              adminNote = doc.getString("adminNote") ?: "",
-              requestedAt = doc.getTimestamp("requestedAt") ?: Timestamp.now(),
-              updatedAt = doc.getTimestamp("updatedAt")
-            )
-          } catch (_: Exception) {
-            null
+  fun getAllWithdrawalRequestsFlow(): Flow<List<FirestoreWithdrawalRequest>> = postgresOrFirestoreFlow(
+    refreshKey = "withdrawalRequests",
+    pollIntervalMs = 20_000L,
+    fallbackValue = emptyList(),
+    fetchFromPostgres = {
+      backendDb.getCollection("withdrawalRequests")?.map { BackendDbClient.parseWithdrawal(it) }
+        ?.sortedByDescending { it.requestedAt.toDate().time }
+    },
+    firestoreFlow = {
+      callbackFlow {
+        val registration = db.collection("withdrawalRequests")
+          .addSnapshotListener { snapshot, error ->
+            if (error != null) {
+              Log.w(TAG, "Listen warning on withdrawalRequests: ${error.message}")
+              trySend(emptyList())
+              return@addSnapshotListener
+            }
+            val requests = snapshot?.documents?.mapNotNull { doc ->
+              try {
+                FirestoreWithdrawalRequest(
+                  requestId = doc.getString("requestId") ?: doc.id,
+                  memberId = doc.getString("memberId") ?: "",
+                  creatorName = doc.getString("creatorName") ?: "",
+                  creatorEmail = doc.getString("creatorEmail") ?: "",
+                  amount = (doc.get("amount") as? Number)?.toDouble() ?: 0.0,
+                  upiId = doc.getString("upiId") ?: "",
+                  status = doc.getString("status") ?: WithdrawalStatus.PENDING,
+                  adminNote = doc.getString("adminNote") ?: "",
+                  requestedAt = doc.getTimestamp("requestedAt") ?: Timestamp.now(),
+                  updatedAt = doc.getTimestamp("updatedAt")
+                )
+              } catch (_: Exception) {
+                null
+              }
+            }?.sortedByDescending { it.requestedAt.toDate().time } ?: emptyList()
+            trySend(requests)
           }
-        }?.sortedByDescending { it.requestedAt.toDate().time } ?: emptyList()
-        trySend(requests)
+        awaitClose { registration.remove() }
       }
-    awaitClose { registration.remove() }
-  }
+    }
+  )
 
   suspend fun submitWithdrawalRequest(
     member: FirestoreMember,
@@ -2539,21 +3247,35 @@ class FirestoreVideoRepository(
         return Result.failure(IllegalArgumentException("Minimum withdrawal amount is ₹500"))
       }
 
-      // Verify live creator balance from Firestore before creating request
-      val memberSnap = db.collection("members").document(member.memberId).get().await()
-      val liveTotalEarning = (memberSnap.get("totalEarning") as? Number)?.toDouble() ?: member.totalEarning
-
-      val existingReqs = db.collection("withdrawalRequests")
-        .whereEqualTo("memberId", member.memberId)
-        .get()
-        .await()
-
-      val reservedAmount = existingReqs.documents.sumOf { doc ->
-        val status = doc.getString("status") ?: WithdrawalStatus.PENDING
-        if (status != WithdrawalStatus.REJECTED) {
-          (doc.get("amount") as? Number)?.toDouble() ?: 0.0
-        } else {
-          0.0
+      val liveTotalEarning: Double
+      val reservedAmount: Double
+      if (backendDb.isPostgresActive()) {
+        val memberJson = backendDb.getDoc("members", member.memberId)?.second
+        liveTotalEarning = memberJson?.optDouble("totalEarning", member.totalEarning)
+          ?.takeIf { !it.isNaN() } ?: member.totalEarning
+        val existingReqs = backendDb.getCollection("withdrawalRequests", field = "memberId", value = member.memberId).orEmpty()
+        reservedAmount = existingReqs.sumOf { doc ->
+          val status = BackendDbClient.optStringClean(doc.data, "status", WithdrawalStatus.PENDING)
+          if (status != WithdrawalStatus.REJECTED) {
+            doc.data.optDouble("amount", 0.0).takeIf { !it.isNaN() } ?: 0.0
+          } else {
+            0.0
+          }
+        }
+      } else {
+        val memberSnap = db.collection("members").document(member.memberId).get().await()
+        liveTotalEarning = (memberSnap.get("totalEarning") as? Number)?.toDouble() ?: member.totalEarning
+        val existingReqs = db.collection("withdrawalRequests")
+          .whereEqualTo("memberId", member.memberId)
+          .get()
+          .await()
+        reservedAmount = existingReqs.documents.sumOf { doc ->
+          val status = doc.getString("status") ?: WithdrawalStatus.PENDING
+          if (status != WithdrawalStatus.REJECTED) {
+            (doc.get("amount") as? Number)?.toDouble() ?: 0.0
+          } else {
+            0.0
+          }
         }
       }
 
@@ -2565,20 +3287,37 @@ class FirestoreVideoRepository(
       }
 
       val requestId = "wdr_" + UUID.randomUUID().toString().replace("-", "").take(12)
-      val payload = hashMapOf(
-        "requestId" to requestId,
-        "memberId" to member.memberId,
-        "creatorName" to member.name.ifBlank { "Creator" },
-        "creatorEmail" to member.emailOrPhone,
-        "amount" to amount,
-        "upiId" to cleanUpi,
-        "status" to WithdrawalStatus.PENDING,
-        "adminNote" to "",
-        "requestedAt" to FieldValue.serverTimestamp(),
-        "updatedAt" to FieldValue.serverTimestamp()
-      )
-
-      db.collection("withdrawalRequests").document(requestId).set(payload).await()
+      if (backendDb.isPostgresActive()) {
+        val pgPayload = mapOf(
+          "requestId" to requestId,
+          "memberId" to member.memberId,
+          "creatorName" to member.name.ifBlank { "Creator" },
+          "creatorEmail" to member.emailOrPhone,
+          "amount" to amount,
+          "upiId" to cleanUpi,
+          "status" to WithdrawalStatus.PENDING,
+          "adminNote" to "",
+          "requestedAt" to BackendDbClient.serverTimestampMarker(),
+          "updatedAt" to BackendDbClient.serverTimestampMarker()
+        )
+        val ok = backendDb.writeDoc("withdrawalRequests", requestId, "set", pgPayload)
+        if (!ok) return Result.failure(IllegalStateException("Failed to submit withdrawal request on backend."))
+        notifyBackendChanged("withdrawalRequests")
+      } else {
+        val payload = hashMapOf(
+          "requestId" to requestId,
+          "memberId" to member.memberId,
+          "creatorName" to member.name.ifBlank { "Creator" },
+          "creatorEmail" to member.emailOrPhone,
+          "amount" to amount,
+          "upiId" to cleanUpi,
+          "status" to WithdrawalStatus.PENDING,
+          "adminNote" to "",
+          "requestedAt" to FieldValue.serverTimestamp(),
+          "updatedAt" to FieldValue.serverTimestamp()
+        )
+        db.collection("withdrawalRequests").document(requestId).set(payload).await()
+      }
 
       Result.success(
         FirestoreWithdrawalRequest(
@@ -2615,6 +3354,21 @@ class FirestoreVideoRepository(
       if (newStatus !in allowed) {
         return Result.failure(IllegalArgumentException("Invalid payout status: $newStatus"))
       }
+      if (backendDb.isPostgresActive()) {
+        val ok = backendDb.writeDoc(
+          "withdrawalRequests",
+          requestId,
+          "update",
+          mapOf(
+            "status" to newStatus,
+            "adminNote" to adminNote.trim(),
+            "updatedAt" to BackendDbClient.serverTimestampMarker()
+          )
+        )
+        if (!ok) return Result.failure(IllegalStateException("Failed to update withdrawal status on backend."))
+        notifyBackendChanged("withdrawalRequests")
+        return Result.success(Unit)
+      }
       db.collection("withdrawalRequests").document(requestId)
         .update(
           mapOf(
@@ -2633,36 +3387,48 @@ class FirestoreVideoRepository(
 
   // --- Superadmin Broadcast Notifications ---
 
-  fun getNotificationsFlow(): Flow<List<FirestoreNotification>> = callbackFlow {
-    val registration = db.collection("notifications")
-      .addSnapshotListener { snapshot, error ->
-        if (error != null) {
-          Log.w(TAG, "Listen warning on notifications: ${error.message}")
-          trySend(emptyList())
-          return@addSnapshotListener
-        }
-        val items = snapshot?.documents?.mapNotNull { doc ->
-          try {
-            val isActive = doc.getBoolean("isActive") ?: true
-            if (!isActive) return@mapNotNull null
-            FirestoreNotification(
-              notificationId = doc.getString("notificationId") ?: doc.id,
-              title = doc.getString("title") ?: "",
-              message = doc.getString("message") ?: "",
-              imageUrl = doc.getString("imageUrl") ?: "",
-              actionUrl = doc.getString("actionUrl") ?: "",
-              sentBy = doc.getString("sentBy") ?: "Admin",
-              createdAt = doc.getTimestamp("createdAt") ?: Timestamp.now(),
-              isActive = isActive
-            )
-          } catch (_: Exception) {
-            null
+  fun getNotificationsFlow(): Flow<List<FirestoreNotification>> = postgresOrFirestoreFlow(
+    refreshKey = "notifications",
+    pollIntervalMs = 45_000L,
+    fallbackValue = emptyList(),
+    fetchFromPostgres = {
+      backendDb.getCollection("notifications")
+        ?.mapNotNull { BackendDbClient.parseNotification(it) }
+        ?.sortedByDescending { it.createdAt.toDate().time }
+    },
+    firestoreFlow = {
+      callbackFlow {
+        val registration = db.collection("notifications")
+          .addSnapshotListener { snapshot, error ->
+            if (error != null) {
+              Log.w(TAG, "Listen warning on notifications: ${error.message}")
+              trySend(emptyList())
+              return@addSnapshotListener
+            }
+            val items = snapshot?.documents?.mapNotNull { doc ->
+              try {
+                val isActive = doc.getBoolean("isActive") ?: true
+                if (!isActive) return@mapNotNull null
+                FirestoreNotification(
+                  notificationId = doc.getString("notificationId") ?: doc.id,
+                  title = doc.getString("title") ?: "",
+                  message = doc.getString("message") ?: "",
+                  imageUrl = doc.getString("imageUrl") ?: "",
+                  actionUrl = doc.getString("actionUrl") ?: "",
+                  sentBy = doc.getString("sentBy") ?: "Admin",
+                  createdAt = doc.getTimestamp("createdAt") ?: Timestamp.now(),
+                  isActive = isActive
+                )
+              } catch (_: Exception) {
+                null
+              }
+            }?.sortedByDescending { it.createdAt.toDate().time } ?: emptyList()
+            trySend(items)
           }
-        }?.sortedByDescending { it.createdAt.toDate().time } ?: emptyList()
-        trySend(items)
+        awaitClose { registration.remove() }
       }
-    awaitClose { registration.remove() }
-  }
+    }
+  )
 
   private suspend fun encodeCompressedImageDataUri(
     imageUri: Uri,
@@ -2759,18 +3525,33 @@ class FirestoreVideoRepository(
       val cleanSentBy = sentBy.trim().ifBlank { "Superadmin" }.take(120)
       val notificationId = "ntf_" + UUID.randomUUID().toString().replace("-", "").take(12)
 
-      val payload = hashMapOf<String, Any>(
-        "notificationId" to notificationId,
-        "title" to cleanTitle,
-        "message" to cleanMessage,
-        "imageUrl" to resolvedImageUrl,
-        "actionUrl" to resolvedActionUrl,
-        "sentBy" to cleanSentBy,
-        "createdAt" to FieldValue.serverTimestamp(),
-        "isActive" to true
-      )
-
-      db.collection("notifications").document(notificationId).set(payload).await()
+      if (backendDb.isPostgresActive()) {
+        val pgPayload = mapOf(
+          "notificationId" to notificationId,
+          "title" to cleanTitle,
+          "message" to cleanMessage,
+          "imageUrl" to resolvedImageUrl,
+          "actionUrl" to resolvedActionUrl,
+          "sentBy" to cleanSentBy,
+          "createdAt" to BackendDbClient.serverTimestampMarker(),
+          "isActive" to true
+        )
+        val ok = backendDb.writeDoc("notifications", notificationId, "set", pgPayload)
+        if (!ok) return Result.failure(IllegalStateException("Failed to send notification on backend."))
+        notifyBackendChanged("notifications")
+      } else {
+        val payload = hashMapOf<String, Any>(
+          "notificationId" to notificationId,
+          "title" to cleanTitle,
+          "message" to cleanMessage,
+          "imageUrl" to resolvedImageUrl,
+          "actionUrl" to resolvedActionUrl,
+          "sentBy" to cleanSentBy,
+          "createdAt" to FieldValue.serverTimestamp(),
+          "isActive" to true
+        )
+        db.collection("notifications").document(notificationId).set(payload).await()
+      }
 
       Result.success(
         FirestoreNotification(
@@ -2792,6 +3573,12 @@ class FirestoreVideoRepository(
 
   suspend fun deleteNotification(notificationId: String): Result<Unit> {
     return try {
+      if (backendDb.isPostgresActive()) {
+        val ok = backendDb.writeDoc("notifications", notificationId, "delete")
+        if (!ok) return Result.failure(IllegalStateException("Failed to delete notification on backend."))
+        notifyBackendChanged("notifications")
+        return Result.success(Unit)
+      }
       db.collection("notifications").document(notificationId).delete().await()
       Result.success(Unit)
     } catch (e: Exception) {
@@ -2802,40 +3589,55 @@ class FirestoreVideoRepository(
 
   // --- Creator Gift & Announcement Events ---
 
-  fun getCreatorEventsFlow(): Flow<List<FirestoreCreatorEvent>> = callbackFlow {
-    val registration = db.collection("creatorEvents")
-      .addSnapshotListener { snapshot, error ->
-        if (error != null) {
-          Log.w(TAG, "Listen warning on creatorEvents: ${error.message}")
-          trySend(emptyList())
-          return@addSnapshotListener
-        }
-        val items = snapshot?.documents?.mapNotNull { doc ->
-          try {
-            val createdAt = doc.getTimestamp("createdAt") ?: Timestamp.now()
-            val updatedAt = doc.getTimestamp("updatedAt") ?: createdAt
-            FirestoreCreatorEvent(
-              eventId = doc.getString("eventId") ?: doc.id,
-              title = doc.getString("title") ?: "",
-              description = doc.getString("description") ?: "",
-              giftLabel = doc.getString("giftLabel") ?: "",
-              imageUrl = doc.getString("imageUrl") ?: "",
-              createdBy = doc.getString("createdBy") ?: "Superadmin",
-              createdAt = createdAt,
-              updatedAt = updatedAt,
-              isActive = doc.getBoolean("isActive") ?: true
-            )
-          } catch (_: Exception) {
-            null
-          }
-        }?.sortedWith(
+  fun getCreatorEventsFlow(): Flow<List<FirestoreCreatorEvent>> = postgresOrFirestoreFlow(
+    refreshKey = "creatorEvents",
+    pollIntervalMs = 45_000L,
+    fallbackValue = emptyList(),
+    fetchFromPostgres = {
+      backendDb.getCollection("creatorEvents")
+        ?.map { BackendDbClient.parseCreatorEvent(it) }
+        ?.sortedWith(
           compareByDescending<FirestoreCreatorEvent> { it.updatedAt.toDate().time }
             .thenByDescending { it.createdAt.toDate().time }
-        ) ?: emptyList()
-        trySend(items)
+        )
+    },
+    firestoreFlow = {
+      callbackFlow {
+        val registration = db.collection("creatorEvents")
+          .addSnapshotListener { snapshot, error ->
+            if (error != null) {
+              Log.w(TAG, "Listen warning on creatorEvents: ${error.message}")
+              trySend(emptyList())
+              return@addSnapshotListener
+            }
+            val items = snapshot?.documents?.mapNotNull { doc ->
+              try {
+                val createdAt = doc.getTimestamp("createdAt") ?: Timestamp.now()
+                val updatedAt = doc.getTimestamp("updatedAt") ?: createdAt
+                FirestoreCreatorEvent(
+                  eventId = doc.getString("eventId") ?: doc.id,
+                  title = doc.getString("title") ?: "",
+                  description = doc.getString("description") ?: "",
+                  giftLabel = doc.getString("giftLabel") ?: "",
+                  imageUrl = doc.getString("imageUrl") ?: "",
+                  createdBy = doc.getString("createdBy") ?: "Superadmin",
+                  createdAt = createdAt,
+                  updatedAt = updatedAt,
+                  isActive = doc.getBoolean("isActive") ?: true
+                )
+              } catch (_: Exception) {
+                null
+              }
+            }?.sortedWith(
+              compareByDescending<FirestoreCreatorEvent> { it.updatedAt.toDate().time }
+                .thenByDescending { it.createdAt.toDate().time }
+            ) ?: emptyList()
+            trySend(items)
+          }
+        awaitClose { registration.remove() }
       }
-    awaitClose { registration.remove() }
-  }
+    }
+  )
 
   suspend fun createCreatorEvent(
     title: String,
@@ -2872,19 +3674,35 @@ class FirestoreVideoRepository(
       val cleanCreatedBy = createdBy.trim().ifBlank { "Superadmin" }.take(120)
       val eventId = "evt_" + UUID.randomUUID().toString().replace("-", "").take(12)
 
-      val payload = hashMapOf<String, Any>(
-        "eventId" to eventId,
-        "title" to cleanTitle,
-        "description" to cleanDescription,
-        "giftLabel" to cleanGiftLabel,
-        "imageUrl" to resolvedImageUrl,
-        "createdBy" to cleanCreatedBy,
-        "createdAt" to FieldValue.serverTimestamp(),
-        "updatedAt" to FieldValue.serverTimestamp(),
-        "isActive" to isActive
-      )
-
-      db.collection("creatorEvents").document(eventId).set(payload).await()
+      if (backendDb.isPostgresActive()) {
+        val pgPayload = mapOf(
+          "eventId" to eventId,
+          "title" to cleanTitle,
+          "description" to cleanDescription,
+          "giftLabel" to cleanGiftLabel,
+          "imageUrl" to resolvedImageUrl,
+          "createdBy" to cleanCreatedBy,
+          "createdAt" to BackendDbClient.serverTimestampMarker(),
+          "updatedAt" to BackendDbClient.serverTimestampMarker(),
+          "isActive" to isActive
+        )
+        val ok = backendDb.writeDoc("creatorEvents", eventId, "set", pgPayload)
+        if (!ok) return Result.failure(IllegalStateException("Failed to create event on backend."))
+        notifyBackendChanged("creatorEvents")
+      } else {
+        val payload = hashMapOf<String, Any>(
+          "eventId" to eventId,
+          "title" to cleanTitle,
+          "description" to cleanDescription,
+          "giftLabel" to cleanGiftLabel,
+          "imageUrl" to resolvedImageUrl,
+          "createdBy" to cleanCreatedBy,
+          "createdAt" to FieldValue.serverTimestamp(),
+          "updatedAt" to FieldValue.serverTimestamp(),
+          "isActive" to isActive
+        )
+        db.collection("creatorEvents").document(eventId).set(payload).await()
+      }
 
       Result.success(
         FirestoreCreatorEvent(
@@ -2938,16 +3756,29 @@ class FirestoreVideoRepository(
         return Result.failure(IllegalArgumentException(validationError))
       }
 
-      val updates = hashMapOf<String, Any>(
-        "title" to title.trim(),
-        "description" to description.trim(),
-        "giftLabel" to giftLabel.trim(),
-        "imageUrl" to resolvedImageUrl,
-        "isActive" to isActive,
-        "updatedAt" to FieldValue.serverTimestamp()
-      )
-
-      db.collection("creatorEvents").document(cleanId).update(updates).await()
+      if (backendDb.isPostgresActive()) {
+        val pgUpdates = mapOf(
+          "title" to title.trim(),
+          "description" to description.trim(),
+          "giftLabel" to giftLabel.trim(),
+          "imageUrl" to resolvedImageUrl,
+          "isActive" to isActive,
+          "updatedAt" to BackendDbClient.serverTimestampMarker()
+        )
+        val ok = backendDb.writeDoc("creatorEvents", cleanId, "update", pgUpdates)
+        if (!ok) return Result.failure(IllegalStateException("Failed to update event on backend."))
+        notifyBackendChanged("creatorEvents")
+      } else {
+        val updates = hashMapOf<String, Any>(
+          "title" to title.trim(),
+          "description" to description.trim(),
+          "giftLabel" to giftLabel.trim(),
+          "imageUrl" to resolvedImageUrl,
+          "isActive" to isActive,
+          "updatedAt" to FieldValue.serverTimestamp()
+        )
+        db.collection("creatorEvents").document(cleanId).update(updates).await()
+      }
       Result.success(Unit)
     } catch (e: Exception) {
       Log.e(TAG, "Error updating creator event $eventId: ${e.message}", e)
@@ -2961,6 +3792,12 @@ class FirestoreVideoRepository(
       if (cleanId.isBlank()) {
         return Result.failure(IllegalArgumentException("Missing event ID."))
       }
+      if (backendDb.isPostgresActive()) {
+        val ok = backendDb.writeDoc("creatorEvents", cleanId, "delete")
+        if (!ok) return Result.failure(IllegalStateException("Failed to delete event on backend."))
+        notifyBackendChanged("creatorEvents")
+        return Result.success(Unit)
+      }
       db.collection("creatorEvents").document(cleanId).delete().await()
       Result.success(Unit)
     } catch (e: Exception) {
@@ -2971,34 +3808,46 @@ class FirestoreVideoRepository(
 
   // --- App Installation, Active & Estimated Uninstall Analytics ---
 
-  fun getAllAppInstallsFlow(): Flow<List<FirestoreAppInstall>> = callbackFlow {
-    val registration = db.collection("appInstalls")
-      .addSnapshotListener { snapshot, error ->
-        if (error != null) {
-          Log.w(TAG, "Listen warning on appInstalls: ${error.message}")
-          trySend(emptyList())
-          return@addSnapshotListener
-        }
-        val items = snapshot?.documents?.mapNotNull { doc ->
-          try {
-            FirestoreAppInstall(
-              installId = doc.getString("installId") ?: doc.id,
-              firstInstalledAt = doc.getTimestamp("firstInstalledAt") ?: Timestamp.now(),
-              lastSeenAt = doc.getTimestamp("lastSeenAt") ?: Timestamp.now(),
-              appVersion = doc.getString("appVersion") ?: "1.0",
-              deviceLabel = doc.getString("deviceLabel") ?: "Android Device",
-              androidVersion = doc.getString("androidVersion") ?: "Android",
-              sessionCount = (doc.get("sessionCount") as? Number)?.toLong() ?: 1L,
-              isMarkedUninstalled = doc.getBoolean("isMarkedUninstalled") ?: false
-            )
-          } catch (_: Exception) {
-            null
+  fun getAllAppInstallsFlow(): Flow<List<FirestoreAppInstall>> = postgresOrFirestoreFlow(
+    refreshKey = "appInstalls",
+    pollIntervalMs = 45_000L,
+    fallbackValue = emptyList(),
+    fetchFromPostgres = {
+      backendDb.getCollection("appInstalls")
+        ?.map { BackendDbClient.parseAppInstall(it) }
+        ?.sortedByDescending { it.lastSeenAt.toDate().time }
+    },
+    firestoreFlow = {
+      callbackFlow {
+        val registration = db.collection("appInstalls")
+          .addSnapshotListener { snapshot, error ->
+            if (error != null) {
+              Log.w(TAG, "Listen warning on appInstalls: ${error.message}")
+              trySend(emptyList())
+              return@addSnapshotListener
+            }
+            val items = snapshot?.documents?.mapNotNull { doc ->
+              try {
+                FirestoreAppInstall(
+                  installId = doc.getString("installId") ?: doc.id,
+                  firstInstalledAt = doc.getTimestamp("firstInstalledAt") ?: Timestamp.now(),
+                  lastSeenAt = doc.getTimestamp("lastSeenAt") ?: Timestamp.now(),
+                  appVersion = doc.getString("appVersion") ?: "1.0",
+                  deviceLabel = doc.getString("deviceLabel") ?: "Android Device",
+                  androidVersion = doc.getString("androidVersion") ?: "Android",
+                  sessionCount = (doc.get("sessionCount") as? Number)?.toLong() ?: 1L,
+                  isMarkedUninstalled = doc.getBoolean("isMarkedUninstalled") ?: false
+                )
+              } catch (_: Exception) {
+                null
+              }
+            }?.sortedByDescending { it.lastSeenAt.toDate().time } ?: emptyList()
+            trySend(items)
           }
-        }?.sortedByDescending { it.lastSeenAt.toDate().time } ?: emptyList()
-        trySend(items)
+        awaitClose { registration.remove() }
       }
-    awaitClose { registration.remove() }
-  }
+    }
+  )
 
   suspend fun registerOrHeartbeatAppInstall(context: Context = appContext ?: error("Context required")) {
     try {
@@ -3034,6 +3883,32 @@ class FirestoreVideoRepository(
         if (it.isLowerCase()) it.titlecase(java.util.Locale.getDefault()) else it.toString()
       }.take(100)
       val safeAndroidVersion = "Android ${Build.VERSION.RELEASE ?: "Unknown"}".take(40)
+
+      if (backendDb.isPostgresActive()) {
+        val pgPayload = mutableMapOf<String, Any?>(
+          "installId" to installId,
+          "lastSeenAt" to BackendDbClient.serverTimestampMarker(),
+          "appVersion" to currentVersion,
+          "deviceLabel" to safeDeviceLabel,
+          "androidVersion" to safeAndroidVersion,
+          "isMarkedUninstalled" to false
+        )
+        if (!isServerSynced) {
+          pgPayload["firstInstalledAt"] = BackendDbClient.serverTimestampMarker()
+          pgPayload["sessionCount"] = 1L
+        } else {
+          pgPayload["sessionCount"] = BackendDbClient.incrementMarker(1L)
+        }
+        val ok = backendDb.writeDoc("appInstalls", installId, "merge", pgPayload)
+        if (ok) {
+          prefs.edit()
+            .putBoolean(KEY_SERVER_SYNCED, true)
+            .putLong(KEY_LAST_HEARTBEAT_MS, nowMs)
+            .putString(KEY_LAST_VERSION, currentVersion)
+            .apply()
+        }
+        return
+      }
 
       val docRef = db.collection("appInstalls").document(installId)
       if (!isServerSynced) {
@@ -3094,6 +3969,12 @@ class FirestoreVideoRepository(
 
   suspend fun setInstallMarkedUninstalled(installId: String, markedUninstalled: Boolean): Result<Unit> {
     return try {
+      if (backendDb.isPostgresActive()) {
+        val ok = backendDb.writeDoc("appInstalls", installId, "update", mapOf("isMarkedUninstalled" to markedUninstalled))
+        if (!ok) return Result.failure(IllegalStateException("Failed to update install status on backend."))
+        notifyBackendChanged("appInstalls")
+        return Result.success(Unit)
+      }
       db.collection("appInstalls").document(installId)
         .update("isMarkedUninstalled", markedUninstalled)
         .await()
@@ -3106,6 +3987,12 @@ class FirestoreVideoRepository(
 
   suspend fun deleteAppInstallRecord(installId: String): Result<Unit> {
     return try {
+      if (backendDb.isPostgresActive()) {
+        val ok = backendDb.writeDoc("appInstalls", installId, "delete")
+        if (!ok) return Result.failure(IllegalStateException("Failed to delete install record on backend."))
+        notifyBackendChanged("appInstalls")
+        return Result.success(Unit)
+      }
       db.collection("appInstalls").document(installId).delete().await()
       Result.success(Unit)
     } catch (e: Exception) {
@@ -3167,85 +4054,130 @@ class FirestoreVideoRepository(
     )
   }
 
-  fun observeSupportChat(chatId: String): Flow<FirestoreSupportChat?> = callbackFlow {
-    if (chatId.isBlank()) {
-      trySend(null)
-      awaitClose { }
-      return@callbackFlow
-    }
-    val registration = db.collection("supportChats").document(chatId)
-      .addSnapshotListener { snapshot, error ->
-        if (error != null) {
-          Log.w(TAG, "Listen warning on supportChat $chatId: ${error.message}")
+  fun observeSupportChat(chatId: String): Flow<FirestoreSupportChat?> = postgresOrFirestoreFlow(
+    refreshKey = "supportChats",
+    pollIntervalMs = 10_000L,
+    fallbackValue = null,
+    fetchFromPostgres = {
+      if (chatId.isBlank()) null
+      else backendDb.getDoc("supportChats", chatId)?.let { (exists, json) ->
+        if (exists && json != null) BackendDbClient.parseSupportChat(com.example.data.remote.RemoteDoc(chatId, json))
+        else null
+      }
+    },
+    firestoreFlow = {
+      callbackFlow {
+        if (chatId.isBlank()) {
           trySend(null)
-          return@addSnapshotListener
+          awaitClose { }
+          return@callbackFlow
         }
-        val parsed = try {
-          snapshot?.let { parseSupportChatDoc(it) }
-        } catch (_: Exception) {
-          null
-        }
-        trySend(parsed)
-      }
-    awaitClose { registration.remove() }
-  }
-
-  fun observeAllSupportChats(): Flow<List<FirestoreSupportChat>> = callbackFlow {
-    val registration = db.collection("supportChats")
-      .addSnapshotListener { snapshot, error ->
-        if (error != null) {
-          Log.w(TAG, "Listen warning on supportChats: ${error.message}")
-          trySend(emptyList())
-          return@addSnapshotListener
-        }
-        val items = snapshot?.documents?.mapNotNull { doc ->
-          try {
-            parseSupportChatDoc(doc)
-          } catch (_: Exception) {
-            null
+        val registration = db.collection("supportChats").document(chatId)
+          .addSnapshotListener { snapshot, error ->
+            if (error != null) {
+              Log.w(TAG, "Listen warning on supportChat $chatId: ${error.message}")
+              trySend(null)
+              return@addSnapshotListener
+            }
+            val parsed = try {
+              snapshot?.let { parseSupportChatDoc(it) }
+            } catch (_: Exception) {
+              null
+            }
+            trySend(parsed)
           }
-        }?.sortedByDescending { it.lastMessageAt.toDate().time } ?: emptyList()
-        trySend(items)
+        awaitClose { registration.remove() }
       }
-    awaitClose { registration.remove() }
-  }
-
-  fun observeSupportMessages(chatId: String): Flow<List<FirestoreSupportMessage>> = callbackFlow {
-    if (chatId.isBlank()) {
-      trySend(emptyList())
-      awaitClose { }
-      return@callbackFlow
     }
-    val registration = db.collection("supportChats").document(chatId)
-      .collection("messages")
-      .addSnapshotListener { snapshot, error ->
-        if (error != null) {
-          Log.w(TAG, "Listen warning on supportMessages $chatId: ${error.message}")
-          trySend(emptyList())
-          return@addSnapshotListener
-        }
-        val items = snapshot?.documents?.mapNotNull { doc ->
-          try {
-            FirestoreSupportMessage(
-              messageId = doc.getString("messageId") ?: doc.id,
-              chatId = doc.getString("chatId") ?: chatId,
-              senderRole = doc.getString("senderRole") ?: SupportSenderRole.USER,
-              senderName = doc.getString("senderName") ?: "User",
-              text = doc.getString("text") ?: "",
-              createdAt = doc.getTimestamp("createdAt") ?: Timestamp.now()
-            )
-          } catch (_: Exception) {
-            null
+  )
+
+  fun observeAllSupportChats(): Flow<List<FirestoreSupportChat>> = postgresOrFirestoreFlow(
+    refreshKey = "supportChats",
+    pollIntervalMs = 15_000L,
+    fallbackValue = emptyList(),
+    fetchFromPostgres = {
+      backendDb.getCollection("supportChats")
+        ?.map { BackendDbClient.parseSupportChat(it) }
+        ?.sortedByDescending { it.lastMessageAt.toDate().time }
+    },
+    firestoreFlow = {
+      callbackFlow {
+        val registration = db.collection("supportChats")
+          .addSnapshotListener { snapshot, error ->
+            if (error != null) {
+              Log.w(TAG, "Listen warning on supportChats: ${error.message}")
+              trySend(emptyList())
+              return@addSnapshotListener
+            }
+            val items = snapshot?.documents?.mapNotNull { doc ->
+              try {
+                parseSupportChatDoc(doc)
+              } catch (_: Exception) {
+                null
+              }
+            }?.sortedByDescending { it.lastMessageAt.toDate().time } ?: emptyList()
+            trySend(items)
           }
-        }?.sortedWith(
+        awaitClose { registration.remove() }
+      }
+    }
+  )
+
+  fun observeSupportMessages(chatId: String): Flow<List<FirestoreSupportMessage>> = postgresOrFirestoreFlow(
+    refreshKey = "supportMessages:$chatId",
+    pollIntervalMs = 6_000L,
+    fallbackValue = emptyList(),
+    fetchFromPostgres = {
+      if (chatId.isBlank()) emptyList()
+      else backendDb.getCollection(
+        collection = "messages",
+        subpath = "supportChats/$chatId/messages"
+      )?.map { BackendDbClient.parseSupportMessage(it, chatId) }
+        ?.sortedWith(
           compareBy<FirestoreSupportMessage> { it.createdAt.seconds }
             .thenBy { it.createdAt.nanoseconds }
             .thenBy { it.messageId }
-        ) ?: emptyList()
-        trySend(items)
+        )
+    },
+    firestoreFlow = {
+      callbackFlow {
+        if (chatId.isBlank()) {
+          trySend(emptyList())
+          awaitClose { }
+          return@callbackFlow
+        }
+        val registration = db.collection("supportChats").document(chatId)
+          .collection("messages")
+          .addSnapshotListener { snapshot, error ->
+            if (error != null) {
+              Log.w(TAG, "Listen warning on supportMessages $chatId: ${error.message}")
+              trySend(emptyList())
+              return@addSnapshotListener
+            }
+            val items = snapshot?.documents?.mapNotNull { doc ->
+              try {
+                FirestoreSupportMessage(
+                  messageId = doc.getString("messageId") ?: doc.id,
+                  chatId = doc.getString("chatId") ?: chatId,
+                  senderRole = doc.getString("senderRole") ?: SupportSenderRole.USER,
+                  senderName = doc.getString("senderName") ?: "User",
+                  text = doc.getString("text") ?: "",
+                  createdAt = doc.getTimestamp("createdAt") ?: Timestamp.now()
+                )
+              } catch (_: Exception) {
+                null
+              }
+            }?.sortedWith(
+              compareBy<FirestoreSupportMessage> { it.createdAt.seconds }
+                .thenBy { it.createdAt.nanoseconds }
+                .thenBy { it.messageId }
+            ) ?: emptyList()
+            trySend(items)
+          }
+        awaitClose { registration.remove() }
       }
-    awaitClose { registration.remove() }
-  }
+    }
+  )
 
   suspend fun sendSupportMessage(
     chatId: String,
@@ -3277,6 +4209,81 @@ class FirestoreVideoRepository(
         ?: currentDeviceLabel()
       val messageId = "msg_" + System.currentTimeMillis() + "_" +
         UUID.randomUUID().toString().replace("-", "").take(8)
+
+      if (backendDb.isPostgresActive()) {
+        val existingPair = backendDb.getDoc("supportChats", cleanChatId)
+        val existingJson = if (existingPair?.first == true) existingPair.second else null
+        if (existingJson == null) {
+          if (senderRole != SupportSenderRole.USER) {
+            return Result.failure(IllegalStateException("User has not started this support chat yet."))
+          }
+          val chatPayload = mapOf(
+            "chatId" to cleanChatId,
+            "userName" to cleanSenderName,
+            "deviceLabel" to safeDeviceLabel,
+            "lastMessage" to cleanText,
+            "lastSenderRole" to SupportSenderRole.USER,
+            "lastMessageAt" to BackendDbClient.serverTimestampMarker(),
+            "createdAt" to BackendDbClient.serverTimestampMarker(),
+            "unreadByAdminCount" to 1L,
+            "unreadByUserCount" to 0L,
+            "status" to SupportChatStatus.OPEN
+          )
+          backendDb.writeDoc("supportChats", cleanChatId, "set", chatPayload)
+        } else {
+          val existingUserName = BackendDbClient.optStringClean(existingJson, "userName", "Guest User").ifBlank { "Guest User" }
+          val existingDeviceLabel = BackendDbClient.optStringClean(existingJson, "deviceLabel", safeDeviceLabel).ifBlank { safeDeviceLabel }
+          val existingStatus = BackendDbClient.optStringClean(existingJson, "status", SupportChatStatus.OPEN)
+          val currentAdminUnread = existingJson.optLong("unreadByAdminCount", 0L)
+          val currentUserUnread = existingJson.optLong("unreadByUserCount", 0L)
+          val updatedUserName = if (senderRole == SupportSenderRole.USER) cleanSenderName else existingUserName
+          val nextAdminUnread = if (senderRole == SupportSenderRole.USER) currentAdminUnread + 1L else 0L
+          val nextUserUnread = if (senderRole == SupportSenderRole.ADMIN) currentUserUnread + 1L else 0L
+          val nextStatus = if (senderRole == SupportSenderRole.USER) SupportChatStatus.OPEN else existingStatus
+          backendDb.writeDoc(
+            "supportChats",
+            cleanChatId,
+            "update",
+            mapOf(
+              "userName" to updatedUserName,
+              "deviceLabel" to existingDeviceLabel,
+              "lastMessage" to cleanText,
+              "lastSenderRole" to senderRole,
+              "lastMessageAt" to BackendDbClient.serverTimestampMarker(),
+              "unreadByAdminCount" to nextAdminUnread,
+              "unreadByUserCount" to nextUserUnread,
+              "status" to nextStatus
+            )
+          )
+        }
+        val msgPayload = mapOf(
+          "messageId" to messageId,
+          "chatId" to cleanChatId,
+          "senderRole" to senderRole,
+          "senderName" to cleanSenderName,
+          "text" to cleanText,
+          "createdAt" to BackendDbClient.serverTimestampMarker()
+        )
+        val ok = backendDb.writeDoc(
+          collection = "messages",
+          docId = messageId,
+          action = "set",
+          data = msgPayload,
+          subpath = "supportChats/$cleanChatId/messages"
+        )
+        if (!ok) return Result.failure(IllegalStateException("Failed to send support message on backend."))
+        notifyBackendChanged("supportChats", "supportMessages:$cleanChatId")
+        return Result.success(
+          FirestoreSupportMessage(
+            messageId = messageId,
+            chatId = cleanChatId,
+            senderRole = senderRole,
+            senderName = cleanSenderName,
+            text = cleanText,
+            createdAt = Timestamp.now()
+          )
+        )
+      }
 
       val chatRef = db.collection("supportChats").document(cleanChatId)
       val msgRef = chatRef.collection("messages").document(messageId)
@@ -3355,6 +4362,15 @@ class FirestoreVideoRepository(
   suspend fun markSupportChatReadByUser(chatId: String): Result<Unit> {
     return try {
       if (chatId.isBlank()) return Result.success(Unit)
+      if (backendDb.isPostgresActive()) {
+        val pair = backendDb.getDoc("supportChats", chatId)
+        val unread = pair?.second?.optLong("unreadByUserCount", 0L) ?: 0L
+        if (pair?.first == true && unread > 0L) {
+          backendDb.writeDoc("supportChats", chatId, "update", mapOf("unreadByUserCount" to 0L))
+          notifyBackendChanged("supportChats")
+        }
+        return Result.success(Unit)
+      }
       val snap = db.collection("supportChats").document(chatId).get().await()
       if (!snap.exists()) return Result.success(Unit)
       val unread = (snap.get("unreadByUserCount") as? Number)?.toLong() ?: 0L
@@ -3371,6 +4387,15 @@ class FirestoreVideoRepository(
   suspend fun markSupportChatReadByAdmin(chatId: String): Result<Unit> {
     return try {
       if (chatId.isBlank()) return Result.success(Unit)
+      if (backendDb.isPostgresActive()) {
+        val pair = backendDb.getDoc("supportChats", chatId)
+        val unread = pair?.second?.optLong("unreadByAdminCount", 0L) ?: 0L
+        if (pair?.first == true && unread > 0L) {
+          backendDb.writeDoc("supportChats", chatId, "update", mapOf("unreadByAdminCount" to 0L))
+          notifyBackendChanged("supportChats")
+        }
+        return Result.success(Unit)
+      }
       val snap = db.collection("supportChats").document(chatId).get().await()
       if (!snap.exists()) return Result.success(Unit)
       val unread = (snap.get("unreadByAdminCount") as? Number)?.toLong() ?: 0L
@@ -3389,6 +4414,12 @@ class FirestoreVideoRepository(
       if (status != SupportChatStatus.OPEN && status != SupportChatStatus.RESOLVED) {
         return Result.failure(IllegalArgumentException("Invalid support status: $status"))
       }
+      if (backendDb.isPostgresActive()) {
+        val ok = backendDb.writeDoc("supportChats", chatId, "update", mapOf("status" to status))
+        if (!ok) return Result.failure(IllegalStateException("Failed to update support status on backend."))
+        notifyBackendChanged("supportChats")
+        return Result.success(Unit)
+      }
       db.collection("supportChats").document(chatId)
         .update("status", status)
         .await()
@@ -3401,6 +4432,12 @@ class FirestoreVideoRepository(
 
   suspend fun deleteSupportChat(chatId: String): Result<Unit> {
     return try {
+      if (backendDb.isPostgresActive()) {
+        val ok = backendDb.writeDoc("supportChats", chatId, "delete")
+        if (!ok) return Result.failure(IllegalStateException("Failed to delete support chat on backend."))
+        notifyBackendChanged("supportChats", "supportMessages:$chatId")
+        return Result.success(Unit)
+      }
       val chatRef = db.collection("supportChats").document(chatId)
       val messagesSnap = chatRef.collection("messages").get().await()
       for (doc in messagesSnap.documents) {
