@@ -31,6 +31,10 @@ const {
   createPgFirestoreDb,
   serializeForRestApi,
 } = require("./pgFirestoreAdapter");
+const {
+  handlePrivacyPolicyRequest,
+  handlePrivacyPolicyPdfRequest,
+} = require("./privacyPolicy");
 
 const DATABASE_ID =
   process.env.FIRESTORE_DATABASE_ID ||
@@ -780,6 +784,31 @@ const server = http.createServer(async (req, res) => {
       : [];
     res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "public, max-age=3600" });
     res.end(JSON.stringify(body));
+    return;
+  }
+
+  if ((req.method === "GET" || req.method === "HEAD") && (pathname === "/privacy-policy" || pathname === "/privacy")) {
+    handlePrivacyPolicyRequest({
+      res,
+      method: req.method,
+      hostBaseUrl: resolvePublicHostBaseUrl(req),
+    });
+    return;
+  }
+
+  if ((req.method === "GET" || req.method === "HEAD") && pathname === "/privacy-policy.pdf") {
+    try {
+      await handlePrivacyPolicyPdfRequest({
+        res,
+        method: req.method,
+      });
+    } catch (err) {
+      console.error("Privacy Policy PDF error:", err);
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "text/plain" });
+        res.end("Privacy policy PDF error");
+      }
+    }
     return;
   }
 

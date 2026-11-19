@@ -1959,6 +1959,47 @@ test("handleSharePageRequest resolves Postgres stream URL with vv tag for old+ne
   );
 });
 
+test("handlePrivacyPolicyRequest and handlePrivacyPolicyPdfRequest serve Play Store HTML policy and valid PDF file", async () => {
+  const { handlePrivacyPolicyRequest, handlePrivacyPolicyPdfRequest } = require("./privacyPolicy");
+
+  const makeMockRes = () => {
+    const out = { statusCode: 0, headers: {}, chunks: [] };
+    return {
+      writeHead(code, headers) {
+        out.statusCode = code;
+        out.headers = headers || {};
+      },
+      end(chunk) {
+        if (chunk) out.chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+      },
+      out,
+      buffer() {
+        return Buffer.concat(out.chunks);
+      },
+      text() {
+        return Buffer.concat(out.chunks).toString("utf8");
+      },
+    };
+  };
+
+  const htmlRes = makeMockRes();
+  handlePrivacyPolicyRequest({ res: htmlRes, hostBaseUrl: "https://vidvora-share-bot.onrender.com" });
+  assert.equal(htmlRes.out.statusCode, 200);
+  assert.ok(htmlRes.text().includes("com.aistudio.vidvora.vstr"));
+  assert.ok(htmlRes.text().includes("teamaltamash@gmail.com"));
+  assert.ok(htmlRes.text().includes('id="data-deletion"'));
+  assert.ok(htmlRes.text().includes("https://vidvora-share-bot.onrender.com/privacy-policy.pdf"));
+
+  const pdfRes = makeMockRes();
+  await handlePrivacyPolicyPdfRequest({ res: pdfRes });
+  assert.equal(pdfRes.out.statusCode, 200);
+  assert.equal(pdfRes.out.headers["Content-Type"], "application/pdf");
+  const pdfBuf = pdfRes.buffer();
+  assert.ok(pdfBuf.length > 5000);
+  assert.equal(pdfBuf.subarray(0, 8).toString("ascii"), "%PDF-1.4");
+});
+
+
 
 
 
