@@ -1070,6 +1070,79 @@ class AdminViewModel(
     }
   }
 
+  fun updateDailyCreatorViews(
+    memberId: String,
+    views: Long,
+    ratePer1000: Double,
+    isAddition: Boolean,
+    cycleKey: String,
+    onResult: (Boolean, String?) -> Unit
+  ) {
+    if (!isSuperAdmin.value) {
+      onResult(false, "Sirf Superadmin hi daily views update kar sakta hai.")
+      return
+    }
+    if (views < 0L) {
+      onResult(false, "Please enter a valid views count (0 or more).")
+      return
+    }
+    if (ratePer1000 < 0.0) {
+      onResult(false, "Rate per 1,000 views cannot be negative.")
+      return
+    }
+    val resolvedCycleKey = cycleKey.trim().ifBlank { DailyViewsResetClock.currentCycleKeyIst() }
+    val updatedAtMs = System.currentTimeMillis()
+    viewModelScope.launch {
+      val result = firestoreVideoRepository.creditCreatorViewsAndEarning(
+        memberId = memberId,
+        viewsInput = views,
+        ratePer1000 = ratePer1000,
+        isAddition = isAddition,
+        dailyViewsCycleKey = resolvedCycleKey,
+        dailyViewsUpdatedAtMs = updatedAtMs,
+        allowZeroAddition = true
+      )
+      val updated = result.getOrNull()
+      if (result.isSuccess && updated != null) {
+        if (currentMember.value?.memberId == updated.memberId) {
+          adminAuthRepository.updateCurrentMember(updated)
+        }
+        val calculatedInr = FirestoreVideoRepository.calculateViewsEarning(views, ratePer1000)
+        val displayName = updated.name.ifBlank { "Member" }
+        _toastMessage.value = when {
+          isAddition && views == 0L ->
+            "$displayName done mark ho gaya (11:50 PM IST par wapas show hoga)"
+          isAddition ->
+            "$displayName: +$views views (+${com.example.data.model.formatInr(calculatedInr)}) updated! 11:50 PM IST par wapas show hoga."
+          else ->
+            "$displayName: Views set to $views (${com.example.data.model.formatInr(calculatedInr)})! 11:50 PM IST par wapas show hoga."
+        }
+        onResult(true, null)
+      } else {
+        val err = result.exceptionOrNull()?.message ?: "Failed to update daily views"
+        _toastMessage.value = "Error: $err"
+        onResult(false, err)
+      }
+    }
+  }
+
+  fun reopenDailyViewsMember(memberId: String, memberName: String) {
+    if (!isSuperAdmin.value) {
+      _toastMessage.value = "Sirf Superadmin hi profile re-open kar sakta hai."
+      return
+    }
+    viewModelScope.launch {
+      val result = firestoreVideoRepository.resetMemberDailyViewsCycle(memberId)
+      if (result.isSuccess) {
+        val label = memberName.ifBlank { "Profile" }
+        _toastMessage.value = "$label wapas pending list me show ho gaya!"
+      } else {
+        val err = result.exceptionOrNull()?.message ?: "Failed to re-open profile"
+        _toastMessage.value = "Error: $err"
+      }
+    }
+  }
+
   fun requestCreatorWithdrawal(
     amount: Double,
     upiId: String,

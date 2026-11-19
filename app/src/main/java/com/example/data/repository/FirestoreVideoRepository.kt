@@ -1952,7 +1952,9 @@ class FirestoreVideoRepository(
       viewRatePer1000 = (doc.get("viewRatePer1000") as? Number)?.toDouble()?.takeIf { it >= 0.0 }
         ?: DEFAULT_VIEW_RATE_PER_1000,
       allowedOptions = resolvedOptions,
-      hourlyViews = parsedHourlyViews
+      hourlyViews = parsedHourlyViews,
+      lastViewsUpdateCycleKey = doc.getString("lastViewsUpdateCycleKey")?.trim().orEmpty(),
+      lastViewsUpdatedAtMs = (doc.get("lastViewsUpdatedAtMs") as? Number)?.toLong()?.coerceAtLeast(0L) ?: 0L
     )
   }
 
@@ -3199,19 +3201,23 @@ class FirestoreVideoRepository(
     memberId: String,
     viewsInput: Long,
     ratePer1000: Double = DEFAULT_VIEW_RATE_PER_1000,
-    isAddition: Boolean = true
+    isAddition: Boolean = true,
+    dailyViewsCycleKey: String? = null,
+    dailyViewsUpdatedAtMs: Long = System.currentTimeMillis(),
+    allowZeroAddition: Boolean = false
   ): Result<FirestoreMember> {
     return try {
       val cleanId = memberId.trim()
       if (cleanId.isBlank()) {
         return Result.failure(IllegalArgumentException("Invalid member ID."))
       }
-      if (viewsInput < 0L || (isAddition && viewsInput <= 0L)) {
+      if (viewsInput < 0L || (isAddition && !allowZeroAddition && viewsInput <= 0L)) {
         return Result.failure(IllegalArgumentException("Please enter a valid views count."))
       }
       if (ratePer1000.isNaN() || ratePer1000.isInfinite() || ratePer1000 < 0.0) {
         return Result.failure(IllegalArgumentException("Rate per 1,000 views must be non-negative."))
       }
+      val cleanCycleKey = dailyViewsCycleKey?.trim()?.takeIf { it.isNotBlank() }
 
       if (backendDb.isPostgresActive()) {
         val direct = backendDb.getDoc("members", cleanId)
@@ -3229,15 +3235,20 @@ class FirestoreVideoRepository(
         } else {
           earningDeltaOrTotal
         }
+        val updateFields = mutableMapOf<String, Any>(
+          "creditedViews" to newCreditedViews,
+          "viewRatePer1000" to ratePer1000,
+          "totalEarning" to newTotalEarning
+        )
+        if (cleanCycleKey != null) {
+          updateFields["lastViewsUpdateCycleKey"] = cleanCycleKey
+          updateFields["lastViewsUpdatedAtMs"] = dailyViewsUpdatedAtMs
+        }
         val ok = backendDb.writeDoc(
           "members",
           targetDoc.id,
           "update",
-          mapOf(
-            "creditedViews" to newCreditedViews,
-            "viewRatePer1000" to ratePer1000,
-            "totalEarning" to newTotalEarning
-          )
+          updateFields
         )
         if (!ok) return Result.failure(IllegalStateException("Failed to credit views on backend."))
         notifyBackendChanged("members")
@@ -3245,7 +3256,9 @@ class FirestoreVideoRepository(
           currentMember.copy(
             creditedViews = newCreditedViews,
             viewRatePer1000 = ratePer1000,
-            totalEarning = newTotalEarning
+            totalEarning = newTotalEarning,
+            lastViewsUpdateCycleKey = cleanCycleKey ?: currentMember.lastViewsUpdateCycleKey,
+            lastViewsUpdatedAtMs = if (cleanCycleKey != null) dailyViewsUpdatedAtMs else currentMember.lastViewsUpdatedAtMs
           )
         )
       }
@@ -3280,24 +3293,72 @@ class FirestoreVideoRepository(
           earningDeltaOrTotal
         }
 
-        tx.update(
-          targetRef,
-          mapOf(
-            "creditedViews" to newCreditedViews,
-            "viewRatePer1000" to ratePer1000,
-            "totalEarning" to newTotalEarning
-          )
+        val updateFields = mutableMapOf<String, Any>(
+          "creditedViews" to newCreditedViews,
+          "viewRatePer1000" to ratePer1000,
+          "totalEarning" to newTotalEarning
         )
+        if (cleanCycleKey != null) {
+          updateFields["lastViewsUpdateCycleKey"] = cleanCycleKey
+          updateFields["lastViewsUpdatedAtMs"] = dailyViewsUpdatedAtMs
+        }
+
+        tx.update(targetRef, updateFields)
         currentMember.copy(
           creditedViews = newCreditedViews,
           viewRatePer1000 = ratePer1000,
-          totalEarning = newTotalEarning
+          totalEarning = newTotalEarning,
+          lastViewsUpdateCycleKey = cleanCycleKey ?: currentMember.lastViewsUpdateCycleKey,
+          lastViewsUpdatedAtMs = if (cleanCycleKey != null) dailyViewsUpdatedAtMs else currentMember.lastViewsUpdatedAtMs
         )
       }.await()
 
       Result.success(updatedMember)
     } catch (e: Exception) {
       Log.e(TAG, "Error crediting creator views & earning: ${e.message}", e)
+      Result.failure(e)
+    }
+  }
+
+  suspend fun resetMemberDailyViewsCycle(memberId: String): Result<Unit> {
+    return try {
+      val cleanId = memberId.trim()
+      if (cleanId.isBlank()) {
+        return Result.failure(IllegalArgumentException("Invalid member ID."))
+      }
+      val clearFields = mapOf<String, Any>(
+        "lastViewsUpdateCycleKey" to "",
+        "lastViewsUpdatedAtMs" to 0L
+      )
+      if (backendDb.isPostgresActive()) {
+        val direct = backendDb.getDoc("members", cleanId)
+        val targetDocId = if (direct?.first == true && direct.second != null) {
+          cleanId
+        } else {
+          backendDb.getCollection("members", field = "memberId", value = cleanId, limit = 1)?.firstOrNull()?.id
+            ?: return Result.failure(IllegalArgumentException("Member account no longer exists."))
+        }
+        val ok = backendDb.writeDoc("members", targetDocId, "update", clearFields)
+        if (!ok) return Result.failure(IllegalStateException("Failed to re-open profile on backend."))
+        notifyBackendChanged("members")
+        return Result.success(Unit)
+      }
+
+      val directRef = db.collection("members").document(cleanId)
+      val targetRef = if (directRef.get().await().exists()) {
+        directRef
+      } else {
+        val byField = db.collection("members")
+          .whereEqualTo("memberId", cleanId)
+          .limit(1)
+          .get()
+          .await()
+        byField.documents.firstOrNull()?.reference ?: directRef
+      }
+      targetRef.update(clearFields).await()
+      Result.success(Unit)
+    } catch (e: Exception) {
+      Log.e(TAG, "Error resetting member daily views cycle: ${e.message}", e)
       Result.failure(e)
     }
   }
@@ -4204,7 +4265,7 @@ class FirestoreVideoRepository(
 
   fun observeAllSupportChats(): Flow<List<FirestoreSupportChat>> = postgresOrFirestoreFlow(
     refreshKey = "supportChats",
-    pollIntervalMs = 15_000L,
+    pollIntervalMs = 5_000L,
     fallbackValue = emptyList(),
     fetchFromPostgres = {
       backendDb.getCollection("supportChats")

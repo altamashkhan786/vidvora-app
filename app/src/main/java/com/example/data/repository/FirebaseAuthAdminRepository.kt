@@ -9,12 +9,17 @@ import androidx.credentials.exceptions.GetCredentialCancellationException
 import com.example.R
 import com.example.data.model.FirestoreAdmin
 import com.example.data.model.FirestoreMember
+import com.example.data.model.MemberOption
+import com.example.data.model.MemberRole
+import com.example.notifications.AppNotificationHelper
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.firestore.FirebaseFirestore
+import java.net.URLDecoder
+import java.net.URLEncoder
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -55,24 +60,96 @@ class FirebaseAuthAdminRepository(
   private val _isLoading = MutableStateFlow(false)
   val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
+  private val _loginEventCounter = MutableStateFlow(0)
+  val loginEventCounter: StateFlow<Int> = _loginEventCounter.asStateFlow()
+
   private val _hasCustomAdminMasterKey = MutableStateFlow(
     creatorPrefs?.getString(KEY_SUPERADMIN_MASTER_KEY_HASH, null)?.length == 64
   )
   val hasCustomAdminMasterKey: StateFlow<Boolean> = _hasCustomAdminMasterKey.asStateFlow()
 
   init {
+    // Synchronously restore any saved Superadmin, Delegated Admin, Creator, or Google Admin session
+    // BEFORE attaching FirebaseAuth listener so there is never an accidental auto-logout flash.
+    hydratePersistedSessionSync()
+
     auth.addAuthStateListener { firebaseAuth ->
       val user = firebaseAuth.currentUser
       _currentAdminUser.value = user
+      // Never allow FirebaseAuth listener to disturb an active persisted Superadmin/Creator/Admin passkey session
+      if (hasPersistedNonGoogleSession()) {
+        return@addAuthStateListener
+      }
       if (user != null) {
         verifyAdminDocument(user.uid)
       } else {
-        // Only clear if not authenticated via dev master passkey, member, or delegated admin session
-        if (_adminRole.value != "admin (dev)" && _adminRole.value != "member" && _adminRole.value != "delegated_admin") {
+        // Only clear when no persisted non-Google session is active
+        if (!hasPersistedNonGoogleSession() &&
+          _adminRole.value != "admin (dev)" &&
+          _adminRole.value != "member" &&
+          _adminRole.value != "delegated_admin"
+        ) {
           _isAdminAuthenticated.value = false
           _adminRole.value = null
           _currentMember.value = null
         }
+      }
+    }
+  }
+
+  private fun hasPersistedNonGoogleSession(): Boolean {
+    val prefs = creatorPrefs ?: return false
+    val role = prefs.getString(KEY_PERSISTED_ROLE, null)?.trim()
+    if (role == "superadmin" || role == "member" || role == "delegated_admin") {
+      return true
+    }
+    return !prefs.getString(KEY_ACTIVE_CREATOR_MEMBER_ID, null).isNullOrBlank()
+  }
+
+  private fun hydratePersistedSessionSync() {
+    val prefs = creatorPrefs ?: return
+    val persistedRole = prefs.getString(KEY_PERSISTED_ROLE, null)?.trim()
+    val persistedMemberId = prefs.getString(KEY_ACTIVE_CREATOR_MEMBER_ID, null)?.trim()
+    val cachedMemberJson = prefs.getString(KEY_CACHED_MEMBER_JSON, null)
+
+    when {
+      persistedRole == "superadmin" -> {
+        _isAdminAuthenticated.value = true
+        _adminRole.value = "admin (dev)"
+        _currentMember.value = null
+      }
+      !persistedMemberId.isNullOrBlank() || persistedRole == "member" || persistedRole == "delegated_admin" -> {
+        val decoded = decodeMemberSessionPayload(cachedMemberJson)
+        val effectiveMember = when {
+          decoded != null && decoded.isActive -> decoded
+          !persistedMemberId.isNullOrBlank() -> {
+            val fallbackRole = if (persistedRole == "delegated_admin") MemberRole.ADMIN else MemberRole.CREATOR
+            FirestoreMember(
+              memberId = persistedMemberId,
+              name = if (fallbackRole == MemberRole.ADMIN) "Admin" else "Creator",
+              role = fallbackRole,
+              isActive = true,
+              allowedOptions = MemberOption.defaultKeysForRole(fallbackRole)
+            )
+          }
+          else -> null
+        }
+        if (effectiveMember != null) {
+          val resolvedRole = if (effectiveMember.isDelegatedAdmin() || persistedRole == "delegated_admin") {
+            "delegated_admin"
+          } else {
+            "member"
+          }
+          _isAdminAuthenticated.value = true
+          _adminRole.value = resolvedRole
+          _currentMember.value = effectiveMember
+        }
+      }
+      persistedRole == "google_admin" && auth.currentUser != null -> {
+        val savedGoogleRole = prefs.getString(KEY_PERSISTED_GOOGLE_ROLE, "admin")?.takeIf { it.isNotBlank() } ?: "admin"
+        _isAdminAuthenticated.value = true
+        _adminRole.value = savedGoogleRole
+        _currentMember.value = null
       }
     }
   }
@@ -106,6 +183,7 @@ class FirebaseAuthAdminRepository(
       _adminRole.value = "admin (dev)"
       _currentMember.value = null
       persistSuperadminSession()
+      _loginEventCounter.value = _loginEventCounter.value + 1
     }
     return isMatch
   }
@@ -140,6 +218,7 @@ class FirebaseAuthAdminRepository(
         _adminRole.value = "admin (dev)"
         _currentMember.value = null
         persistSuperadminSession()
+        _loginEventCounter.value = _loginEventCounter.value + 1
         return true
       }
     }
@@ -163,10 +242,14 @@ class FirebaseAuthAdminRepository(
     _isAdminAuthenticated.value = true
     _adminRole.value = resolvedRole
     _currentMember.value = member
-    persistCreatorSession(member.memberId, resolvedRole)
+    persistCreatorSession(member, resolvedRole)
+    _loginEventCounter.value = _loginEventCounter.value + 1
   }
 
   suspend fun restorePersistedSession(videoRepository: FirestoreVideoRepository) {
+    // Always re-hydrate synchronously first so slow networks never appear logged out
+    hydratePersistedSessionSync()
+
     val persistedRole = creatorPrefs?.getString(KEY_PERSISTED_ROLE, null)?.trim()
     val persistedMemberId = creatorPrefs?.getString(KEY_ACTIVE_CREATOR_MEMBER_ID, null)?.trim()
 
@@ -178,14 +261,22 @@ class FirebaseAuthAdminRepository(
     }
 
     if (!persistedMemberId.isNullOrBlank()) {
-      val liveMember = videoRepository.getMemberById(persistedMemberId)
+      // Quietly refresh member profile from backend; NEVER clear login on network error or Render cold start
+      val liveMember = runCatching {
+        videoRepository.getMemberById(persistedMemberId)
+      }.getOrNull()
+
       if (liveMember != null && liveMember.isActive) {
         val resolvedRole = if (liveMember.isDelegatedAdmin()) "delegated_admin" else "member"
         _isAdminAuthenticated.value = true
         _adminRole.value = resolvedRole
         _currentMember.value = liveMember
-        persistCreatorSession(liveMember.memberId, resolvedRole)
+        persistCreatorSession(liveMember, resolvedRole)
       } else if (liveMember != null && !liveMember.isActive) {
+        // Only clear session if the server explicitly confirmed the account was disabled
+        _isAdminAuthenticated.value = false
+        _adminRole.value = null
+        _currentMember.value = null
         clearPersistedCreatorSession()
       }
     }
@@ -194,24 +285,39 @@ class FirebaseAuthAdminRepository(
   private fun persistSuperadminSession() {
     creatorPrefs?.edit()
       ?.remove(KEY_ACTIVE_CREATOR_MEMBER_ID)
+      ?.remove(KEY_CACHED_MEMBER_JSON)
       ?.remove(KEY_CREATOR_UPLOADED_VIDEO_IDS)
+      ?.remove(KEY_PERSISTED_GOOGLE_ROLE)
       ?.putString(KEY_PERSISTED_ROLE, "superadmin")
-      ?.apply()
+      ?.commit()
   }
 
-  private fun persistCreatorSession(memberId: String, role: String) {
+  private fun persistCreatorSession(member: FirestoreMember, role: String) {
     creatorPrefs?.edit()
-      ?.putString(KEY_ACTIVE_CREATOR_MEMBER_ID, memberId)
+      ?.putString(KEY_ACTIVE_CREATOR_MEMBER_ID, member.memberId)
       ?.putString(KEY_PERSISTED_ROLE, role)
-      ?.apply()
+      ?.putString(KEY_CACHED_MEMBER_JSON, encodeMemberSessionPayload(member))
+      ?.remove(KEY_PERSISTED_GOOGLE_ROLE)
+      ?.commit()
+  }
+
+  private fun persistGoogleAdminSession(role: String) {
+    creatorPrefs?.edit()
+      ?.remove(KEY_ACTIVE_CREATOR_MEMBER_ID)
+      ?.remove(KEY_CACHED_MEMBER_JSON)
+      ?.putString(KEY_PERSISTED_ROLE, "google_admin")
+      ?.putString(KEY_PERSISTED_GOOGLE_ROLE, role)
+      ?.commit()
   }
 
   private fun clearPersistedCreatorSession() {
     creatorPrefs?.edit()
       ?.remove(KEY_ACTIVE_CREATOR_MEMBER_ID)
+      ?.remove(KEY_CACHED_MEMBER_JSON)
       ?.remove(KEY_PERSISTED_ROLE)
+      ?.remove(KEY_PERSISTED_GOOGLE_ROLE)
       ?.remove(KEY_CREATOR_UPLOADED_VIDEO_IDS)
-      ?.apply()
+      ?.commit()
   }
 
   fun updateCurrentMember(updatedMember: FirestoreMember) {
@@ -219,7 +325,7 @@ class FirebaseAuthAdminRepository(
       val updatedRole = if (updatedMember.isDelegatedAdmin()) "delegated_admin" else "member"
       _currentMember.value = updatedMember
       _adminRole.value = updatedRole
-      persistCreatorSession(updatedMember.memberId, updatedRole)
+      persistCreatorSession(updatedMember, updatedRole)
     }
   }
 
@@ -270,6 +376,8 @@ class FirebaseAuthAdminRepository(
         _isLoading.value = false
 
         if (isVerified) {
+          persistGoogleAdminSession(_adminRole.value ?: "admin")
+          _loginEventCounter.value = _loginEventCounter.value + 1
           Result.success(user)
         } else {
           Result.failure(SecurityException("Account '${user.email ?: user.uid}' is not authorized as an administrator in Firestore /admins."))
@@ -303,6 +411,9 @@ class FirebaseAuthAdminRepository(
         val verified = isActive && (role == "admin" || role == "superadmin")
         _isAdminAuthenticated.value = verified
         _adminRole.value = if (verified) role else null
+        if (verified && role != null) {
+          persistGoogleAdminSession(role)
+        }
         verified
       } else {
         // Bootstrap: If no admins exist in the collection yet, register the first authenticated user
@@ -317,6 +428,7 @@ class FirebaseAuthAdminRepository(
           db.collection("admins").document(uid).set(data).await()
           _isAdminAuthenticated.value = true
           _adminRole.value = "admin"
+          persistGoogleAdminSession("admin")
           Log.i(TAG, "First administrator auto-bootstrapped in Firestore: $uid")
           true
         } else {
@@ -332,19 +444,40 @@ class FirebaseAuthAdminRepository(
   }
 
   fun verifyAdminDocument(uid: String) {
-    _isLoading.value = true
+    // Protect persisted Superadmin/Delegated Admin/Creator sessions from background FirebaseAuth checks
+    if (hasPersistedNonGoogleSession()) {
+      _isLoading.value = false
+      return
+    }
+    val hasCachedGoogleSession = creatorPrefs?.getString(KEY_PERSISTED_ROLE, null) == "google_admin"
+    if (!hasCachedGoogleSession) {
+      _isLoading.value = true
+    }
     db.collection("admins").document(uid).get()
       .addOnSuccessListener { doc ->
+        if (hasPersistedNonGoogleSession()) {
+          _isLoading.value = false
+          return@addOnSuccessListener
+        }
         if (doc.exists()) {
           val isActive = doc.getBoolean("isActive") ?: false
           val role = doc.getString("role")
           val verified = isActive && (role == "admin" || role == "superadmin")
           _isAdminAuthenticated.value = verified
           _adminRole.value = if (verified) role else null
+          if (verified && role != null) {
+            persistGoogleAdminSession(role)
+          } else {
+            clearPersistedCreatorSession()
+          }
           _isLoading.value = false
         } else {
           db.collection("admins").limit(1).get()
             .addOnSuccessListener { snapshot ->
+              if (hasPersistedNonGoogleSession()) {
+                _isLoading.value = false
+                return@addOnSuccessListener
+              }
               if (snapshot.isEmpty) {
                 val data = hashMapOf(
                   "uid" to uid,
@@ -353,34 +486,48 @@ class FirebaseAuthAdminRepository(
                 )
                 db.collection("admins").document(uid).set(data)
                   .addOnSuccessListener {
-                    _isAdminAuthenticated.value = true
-                    _adminRole.value = "admin"
+                    if (!hasPersistedNonGoogleSession()) {
+                      _isAdminAuthenticated.value = true
+                      _adminRole.value = "admin"
+                      persistGoogleAdminSession("admin")
+                    }
                     _isLoading.value = false
                     Log.i(TAG, "Auto-bootstrapped initial admin via listener: $uid")
                   }
                   .addOnFailureListener { e ->
                     Log.w(TAG, "Failed to auto-bootstrap admin: ${e.message}")
-                    _isAdminAuthenticated.value = false
-                    _adminRole.value = null
+                    if (!hasPersistedNonGoogleSession() && !hasCachedGoogleSession) {
+                      _isAdminAuthenticated.value = false
+                      _adminRole.value = null
+                    }
                     _isLoading.value = false
                   }
               } else {
-                _isAdminAuthenticated.value = false
-                _adminRole.value = null
+                if (!hasPersistedNonGoogleSession()) {
+                  _isAdminAuthenticated.value = false
+                  _adminRole.value = null
+                  clearPersistedCreatorSession()
+                }
                 _isLoading.value = false
               }
             }
             .addOnFailureListener { e ->
               Log.w(TAG, "Error checking admins list: ${e.message}")
-              _isAdminAuthenticated.value = false
-              _adminRole.value = null
+              // Do not log out cached session on transient network failure
+              if (!hasPersistedNonGoogleSession() && !hasCachedGoogleSession) {
+                _isAdminAuthenticated.value = false
+                _adminRole.value = null
+              }
               _isLoading.value = false
             }
         }
       }
       .addOnFailureListener { e ->
         Log.w(TAG, "Error checking backend admin record: ${e.message}")
-        if (_adminRole.value != "admin (dev)" && _adminRole.value != "member" && _adminRole.value != "delegated_admin") {
+        // Never wipe a persisted session on offline/network error
+        if (!hasPersistedNonGoogleSession() && !hasCachedGoogleSession &&
+          _adminRole.value != "admin (dev)" && _adminRole.value != "member" && _adminRole.value != "delegated_admin"
+        ) {
           _isAdminAuthenticated.value = false
           _adminRole.value = null
         }
@@ -395,6 +542,7 @@ class FirebaseAuthAdminRepository(
     _currentAdminUser.value = null
     _currentMember.value = null
     clearPersistedCreatorSession()
+    appContext?.let { AppNotificationHelper.clearAdminSupportNotifiedState(it) }
   }
 
   companion object {
@@ -402,8 +550,79 @@ class FirebaseAuthAdminRepository(
     const val ADMIN_MASTER_KEY = "7827128212"
     private const val CREATOR_PREFS_NAME = "vidvora_creator_prefs"
     private const val KEY_ACTIVE_CREATOR_MEMBER_ID = "active_creator_member_id"
+    private const val KEY_CACHED_MEMBER_JSON = "cached_member_session_payload_v1"
     private const val KEY_PERSISTED_ROLE = "persisted_auth_role"
+    private const val KEY_PERSISTED_GOOGLE_ROLE = "persisted_google_admin_role"
     private const val KEY_CREATOR_UPLOADED_VIDEO_IDS = "creator_uploaded_video_ids"
     private const val KEY_SUPERADMIN_MASTER_KEY_HASH = "superadmin_master_key_hash"
+
+    private fun enc(value: String): String = URLEncoder.encode(value, "UTF-8")
+    private fun dec(value: String): String = try {
+      URLDecoder.decode(value, "UTF-8")
+    } catch (_: Exception) {
+      value
+    }
+
+    /**
+     * Pure-Kotlin deterministic serializer for caching [FirestoreMember] locally in SharedPreferences
+     * so Creator and Delegated Admin accounts stay logged in permanently even across offline launches.
+     */
+    fun encodeMemberSessionPayload(member: FirestoreMember): String {
+      val optionsEncoded = member.allowedOptions.joinToString(",") { enc(it) }
+      val pairs = listOf(
+        "memberId" to enc(member.memberId),
+        "name" to enc(member.name),
+        "emailOrPhone" to enc(member.emailOrPhone),
+        "passkey" to enc(member.passkey),
+        "role" to enc(member.role),
+        "isActive" to member.isActive.toString(),
+        "totalEarning" to member.totalEarning.toString(),
+        "creditedViews" to member.creditedViews.toString(),
+        "viewRatePer1000" to member.viewRatePer1000.toString(),
+        "allowedOptions" to optionsEncoded,
+        "lastViewsUpdateCycleKey" to enc(member.lastViewsUpdateCycleKey),
+        "lastViewsUpdatedAtMs" to member.lastViewsUpdatedAtMs.toString()
+      )
+      return pairs.joinToString("\n") { (k, v) -> "$k=$v" }
+    }
+
+    fun decodeMemberSessionPayload(raw: String?): FirestoreMember? {
+      if (raw.isNullOrBlank()) return null
+      return try {
+        val map = mutableMapOf<String, String>()
+        raw.lineSequence().forEach { line ->
+          val idx = line.indexOf('=')
+          if (idx > 0) {
+            map[line.substring(0, idx)] = line.substring(idx + 1)
+          }
+        }
+        val memberId = dec(map["memberId"].orEmpty()).trim()
+        if (memberId.isBlank()) return null
+        val role = MemberRole.normalize(dec(map["role"].orEmpty()))
+        val parsedOptions = map["allowedOptions"]
+          ?.split(',')
+          ?.map { dec(it).trim() }
+          ?.filter { it.isNotBlank() }
+          ?.let { MemberOption.sanitizeKeys(it) }
+          ?.takeIf { it.isNotEmpty() }
+          ?: MemberOption.defaultKeysForRole(role)
+        FirestoreMember(
+          memberId = memberId,
+          name = dec(map["name"].orEmpty()).ifBlank { if (role == MemberRole.ADMIN) "Admin" else "Creator" },
+          emailOrPhone = dec(map["emailOrPhone"].orEmpty()),
+          passkey = dec(map["passkey"].orEmpty()),
+          role = role,
+          isActive = map["isActive"]?.toBooleanStrictOrNull() ?: true,
+          totalEarning = map["totalEarning"]?.toDoubleOrNull() ?: 0.0,
+          creditedViews = map["creditedViews"]?.toLongOrNull() ?: 0L,
+          viewRatePer1000 = map["viewRatePer1000"]?.toDoubleOrNull() ?: 190.0,
+          allowedOptions = parsedOptions,
+          lastViewsUpdateCycleKey = dec(map["lastViewsUpdateCycleKey"].orEmpty()),
+          lastViewsUpdatedAtMs = map["lastViewsUpdatedAtMs"]?.toLongOrNull() ?: 0L
+        )
+      } catch (_: Exception) {
+        null
+      }
+    }
   }
 }

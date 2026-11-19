@@ -54,6 +54,7 @@ import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.CurrencyRupee
+import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Error
@@ -71,6 +72,7 @@ import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.filled.SupportAgent
@@ -173,7 +175,9 @@ fun AdminPanelScreen(
   viewModel: AdminViewModel,
   onNavigateBack: () -> Unit,
   onPlayVideo: (String) -> Unit,
-  onPlayVideoItem: ((FirestoreVideo) -> Unit)? = null
+  onPlayVideoItem: ((FirestoreVideo) -> Unit)? = null,
+  openSupportRequest: Pair<Int, String?>? = null,
+  onOpenSupportRequestConsumed: () -> Unit = {}
 ) {
   val focusManager = LocalFocusManager.current
   val keyboardController = LocalSoftwareKeyboardController.current
@@ -227,6 +231,7 @@ fun AdminPanelScreen(
   val snackbarHostState = remember { SnackbarHostState() }
 
   var selectedTab by remember { mutableIntStateOf(0) }
+  var selectedCreatorTab by remember { mutableIntStateOf(0) }
   var installStatusFilter by remember { mutableStateOf("ALL") }
   var showUploadDialog by remember { mutableStateOf(false) }
   var showAddMemberDialog by remember { mutableStateOf(false) }
@@ -241,7 +246,21 @@ fun AdminPanelScreen(
   var deletingVideoId by remember { mutableStateOf<String?>(null) }
   var deletingMemberId by remember { mutableStateOf<String?>(null) }
   var memberSearchQuery by remember { mutableStateOf("") }
+  var dailyViewsNowMs by remember { mutableStateOf(System.currentTimeMillis()) }
+  var dailyViewsSearchQuery by remember { mutableStateOf("") }
+  var dailyViewsRoleFilter by remember { mutableStateOf(DailyViewsRoleFilter.ALL) }
+  var showDailyViewsDoneToday by remember { mutableStateOf(false) }
+  var dailyViewsTargetMember by remember { mutableStateOf<MemberStats?>(null) }
   var showLoginDialogOnRestricted by remember { mutableStateOf(false) }
+
+  LaunchedEffect(isSuperAdmin) {
+    if (isSuperAdmin) {
+      while (true) {
+        dailyViewsNowMs = System.currentTimeMillis()
+        kotlinx.coroutines.delay(15_000L)
+      }
+    }
+  }
   val telegramLink by viewModel.telegramLink.collectAsState()
   val telegramCreatorBotLink by viewModel.telegramCreatorBotLink.collectAsState()
   val telegramFinanceBotLink by viewModel.telegramFinanceBotLink.collectAsState()
@@ -535,8 +554,30 @@ fun AdminPanelScreen(
   val hasAdminTabs = isSuperAdmin || isDelegatedAdmin ||
     canManageMembers || canManagePayouts || canSendNotifications || canManageTelegram || canViewAppStats || canManageSupportChat || canManageEvents
 
+  val dailyViewsCycleKey = DailyViewsResetClock.currentCycleKeyIst(dailyViewsNowMs)
+  val dailyViewsPendingCount = remember(memberStatsList, dailyViewsCycleKey) {
+    memberStatsList.count { !DailyViewsResetClock.isUpdatedInCurrentCycle(it.member, dailyViewsCycleKey) }
+  }
+  val dailyViewsDoneCount = (memberStatsList.size - dailyViewsPendingCount).coerceAtLeast(0)
+
+  val lifetimeAnalytics = remember(videos, memberStatsList, allWithdrawalRequests) {
+    computeAdminLifetimeAnalytics(
+      videos = videos,
+      memberStatsList = memberStatsList,
+      withdrawalRequests = allWithdrawalRequests
+    )
+  }
+
+  val hasSettingsSection = isSuperAdmin || isDelegatedAdmin || canManageTelegram || canChangeMasterKey
+
   val visibleTabs = buildList {
-    if (isSuperAdmin || canUploadVideos || canManageVideos || canManageTelegram) {
+    if (hasAdminTabs) {
+      add(AdminSectionTab.OVERVIEW)
+    }
+    if (isSuperAdmin) {
+      add(AdminSectionTab.UPDATE_VIEWS)
+    }
+    if (isSuperAdmin || canUploadVideos || canManageVideos) {
       add(AdminSectionTab.VIDEOS)
     }
     if (isSuperAdmin || canManageMembers) {
@@ -545,26 +586,107 @@ fun AdminPanelScreen(
     if (isSuperAdmin || canManagePayouts) {
       add(AdminSectionTab.PAYOUTS)
     }
-    if (isSuperAdmin || canSendNotifications) {
-      add(AdminSectionTab.NOTIFY)
-    }
     if (isSuperAdmin || canViewAppStats) {
       add(AdminSectionTab.STATS)
     }
     if (isSuperAdmin || canManageSupportChat) {
       add(AdminSectionTab.SUPPORT)
     }
+    if (isSuperAdmin || canSendNotifications) {
+      add(AdminSectionTab.NOTIFY)
+    }
     if (isSuperAdmin || canManageEvents) {
       add(AdminSectionTab.EVENTS)
+    }
+    if (hasAdminTabs && hasSettingsSection) {
+      add(AdminSectionTab.SETTINGS)
     }
   }
   val safeTabIndex = if (visibleTabs.isEmpty()) 0 else selectedTab.coerceIn(0, visibleTabs.lastIndex)
   val currentAdminTab = visibleTabs.getOrNull(safeTabIndex)
 
+  // Ensure Android 13+ notification permission is requested when Admin logs in so instant support alerts appear
+  val adminNotificationPermissionLauncher = rememberLauncherForActivityResult(
+    contract = ActivityResultContracts.RequestPermission()
+  ) { granted ->
+    if (granted && (isSuperAdmin || (isDelegatedAdmin && canManageSupportChat))) {
+      com.example.notifications.AppNotificationHelper.notifyAdminSupportMessages(
+        context = context,
+        chats = supportChats,
+        forceNotifyUnreadOnLogin = true
+      )
+    }
+  }
+
+  LaunchedEffect(hasAccess, isSuperAdmin, isDelegatedAdmin, canManageSupportChat) {
+    if (hasAccess && (isSuperAdmin || (isDelegatedAdmin && canManageSupportChat))) {
+      if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU &&
+        !com.example.notifications.AppNotificationHelper.hasNotificationPermission(context)
+      ) {
+        adminNotificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+      }
+    }
+  }
+
+  // Open Support tab (and specific chat if tapped from notification) when launched via Support alert notification
+  LaunchedEffect(openSupportRequest, visibleTabs, hasAccess) {
+    val request = openSupportRequest ?: return@LaunchedEffect
+    if (!hasAccess) return@LaunchedEffect
+    val supportTabIdx = visibleTabs.indexOf(AdminSectionTab.SUPPORT)
+    if (supportTabIdx >= 0) {
+      selectedTab = supportTabIdx
+      val targetChatId = request.second?.trim()?.takeIf { it.isNotBlank() }
+      if (targetChatId != null) {
+        viewModel.markSupportChatReadByAdmin(targetChatId)
+        activeSupportChatId = targetChatId
+      }
+      onOpenSupportRequestConsumed()
+    }
+  }
+
+  val creatorLifetimeAnalytics = remember(myCreditedViews, activeMember, myEarningSummary, myWithdrawalRequests) {
+    computeCreatorLifetimeAnalytics(
+      creditedViews = myCreditedViews,
+      viewRatePer1000 = activeMember?.viewRatePer1000 ?: FirestoreVideoRepository.DEFAULT_VIEW_RATE_PER_1000,
+      summary = myEarningSummary,
+      withdrawalRequests = myWithdrawalRequests
+    )
+  }
+
+  val hasCreatorToolsTab = canUploadVideos || canViewEarnings || canRequestWithdrawal || canChangeMasterKey || canManageTelegram
+  val creatorVisibleTabs = buildList {
+    if (isCurrentMember && !hasAdminTabs) {
+      add(CreatorSectionTab.OVERVIEW)
+      if (canUploadVideos || canManageVideos) {
+        add(CreatorSectionTab.VIDEOS)
+      }
+      if (canViewEarnings || canRequestWithdrawal) {
+        add(CreatorSectionTab.EARNINGS)
+      }
+      if (hasCreatorToolsTab) {
+        add(CreatorSectionTab.TOOLS)
+      }
+    }
+  }
+  val safeCreatorTabIndex = if (creatorVisibleTabs.isEmpty()) 0 else selectedCreatorTab.coerceIn(0, creatorVisibleTabs.lastIndex)
+  val currentCreatorTab = creatorVisibleTabs.getOrNull(safeCreatorTabIndex)
+
+  BackHandler(enabled = hasAdminTabs && currentAdminTab != null && currentAdminTab != AdminSectionTab.OVERVIEW) {
+    val overviewIdx = visibleTabs.indexOf(AdminSectionTab.OVERVIEW)
+    if (overviewIdx >= 0) {
+      selectedTab = overviewIdx
+      coroutineScope.launch { listState.animateScrollToItem(0) }
+    }
+  }
+
+  BackHandler(enabled = isCurrentMember && !hasAdminTabs && currentCreatorTab != null && currentCreatorTab != CreatorSectionTab.OVERVIEW) {
+    selectedCreatorTab = 0
+    coroutineScope.launch { listState.animateScrollToItem(0) }
+  }
+
   val showFab = canUploadVideos && (
-    !hasAdminTabs ||
-      currentAdminTab == AdminSectionTab.VIDEOS ||
-      (isCurrentMember && visibleTabs.isEmpty())
+    (hasAdminTabs && (currentAdminTab == AdminSectionTab.OVERVIEW || currentAdminTab == AdminSectionTab.VIDEOS)) ||
+      (!hasAdminTabs && (currentCreatorTab == null || currentCreatorTab == CreatorSectionTab.OVERVIEW || currentCreatorTab == CreatorSectionTab.VIDEOS))
     )
 
   Scaffold(
@@ -756,568 +878,382 @@ fun AdminPanelScreen(
           }
         }
 
-        // Personal Change Master Key card (shown whenever CHANGE_MASTER_KEY option is enabled for Admin/Creator)
-        if (canChangeMasterKey) {
-          item {
-            Card(
-              shape = RoundedCornerShape(16.dp),
-              colors = CardDefaults.cardColors(containerColor = MasalaSurface),
-              border = androidx.compose.foundation.BorderStroke(1.dp, MasalaGold.copy(alpha = 0.4f)),
-              modifier = Modifier
-                .fillMaxWidth()
-                .testTag("creator_master_key_card")
-            ) {
-              Row(
-                modifier = Modifier
-                  .fillMaxWidth()
-                  .padding(14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-              ) {
-                Row(
-                  verticalAlignment = Alignment.CenterVertically,
-                  modifier = Modifier.weight(1f)
-                ) {
-                  Box(
-                    modifier = Modifier
-                      .size(38.dp)
-                      .clip(CircleShape)
-                      .background(MasalaGold.copy(alpha = 0.16f)),
-                    contentAlignment = Alignment.Center
-                  ) {
-                    Icon(
-                      imageVector = Icons.Default.Key,
-                      contentDescription = null,
-                      tint = MasalaGold,
-                      modifier = Modifier.size(20.dp)
-                    )
-                  }
-                  Spacer(modifier = Modifier.width(12.dp))
-                  Column {
-                    Text(
-                      text = when {
-                        isSuperAdmin -> "Superadmin Password"
-                        isDelegatedAdmin -> "Admin Password"
-                        else -> "Creator Password"
-                      },
-                      color = MasalaTextPrimary,
-                      fontSize = 13.sp,
-                      fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                      text = when {
-                        isSuperAdmin && hasCustomAdminMasterKey -> "Custom Admin Password active • Tap to update anytime"
-                        isSuperAdmin -> "Update your Admin login Password anytime"
-                        else -> "Update your login Password anytime"
-                      },
-                      color = MasalaTextSecondary,
-                      fontSize = 11.sp
-                    )
-                  }
-                }
-
-                Spacer(modifier = Modifier.width(8.dp))
-
-                OutlinedButton(
-                  onClick = { showChangeMasterKeyDialog = true },
-                  shape = RoundedCornerShape(8.dp),
-                  contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                  border = androidx.compose.foundation.BorderStroke(1.dp, MasalaGold.copy(alpha = 0.65f)),
-                  colors = ButtonDefaults.outlinedButtonColors(contentColor = MasalaGold),
-                  modifier = Modifier.testTag("creator_change_master_key_button")
-                ) {
-                  Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(14.dp))
-                  Spacer(modifier = Modifier.width(4.dp))
-                  Text("Change Password", fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
-                }
-              }
-            }
-          }
-        }
-
-        // Self-Hosted In-App Update Control Card (front & center for Superadmin & Admins)
-        if (isSuperAdmin || isDelegatedAdmin || canManageTelegram) {
-          item {
-            AdminAppUpdateCard(
-              config = appUpdateConfig,
-              currentAppVersionCode = BuildConfig.VERSION_CODE,
-              currentAppVersionName = BuildConfig.VERSION_NAME,
-              onEditClick = { showAppUpdateDialog = true }
-            )
-          }
-        }
-
-        // Creator Chat Support card: lets Creator message VidVora Support Team directly (cannot reply to others)
-        if (isCurrentMember && !canManageSupportChat && activeMember != null) {
-          item {
-            CreatorSupportBannerCard(
-              chat = myCreatorSupportChat,
-              onOpenChat = {
-                viewModel.markCreatorSupportChatRead()
-                showCreatorSupportDialog = true
-              }
-            )
-          }
-        }
-
-        // Creator Events & Gift Announcements card (all active Creators can view gift announcements)
-        if (isCurrentMember && activeMember != null) {
-          item {
-            CreatorEventsBannerCard(
-              activeEvents = activeCreatorEvents,
-              onOpenEvents = { showCreatorEventsDialog = true }
-            )
-          }
-        }
-
-        // Telegram Auto-Upload Bot Quick Card (for Creators & Admins with Upload privilege)
-        if (canUploadVideos || canManageTelegram) {
-          item {
-            TelegramUploadBotCard(
-              botLink = telegramCreatorBotLink,
-              memberPasskey = activeMember?.passkey,
-              canConfigureBot = canManageTelegram,
-              onCopyLoginCommand = { cmd ->
-                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                clipboard.setPrimaryClip(ClipData.newPlainText("Bot Login Command", cmd))
-                Toast.makeText(context, "Copied /login command! Paste it in Telegram Bot.", Toast.LENGTH_SHORT).show()
-              },
-              onOpenBot = { cleanBotUrl ->
-                try {
-                  context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(cleanBotUrl)))
-                } catch (e: Exception) {
-                  Toast.makeText(context, "Could not open Telegram: ${e.message}", Toast.LENGTH_SHORT).show()
-                }
-              },
-              onConfigureBot = { showTelegramDialog = true }
-            )
-          }
-        }
-
-        // Telegram Creator Finance Bot Quick Card (for Creators checking earnings/withdrawals & Admins managing payouts)
-        if (canViewEarnings || canRequestWithdrawal || canManagePayouts || canManageTelegram) {
-          item {
-            TelegramFinanceBotCard(
-              botLink = telegramFinanceBotLink,
-              memberPasskey = activeMember?.passkey,
-              isSuperAdmin = isSuperAdmin,
-              canConfigureBot = canManageTelegram,
-              onCopyLoginCommand = { cmd ->
-                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                clipboard.setPrimaryClip(ClipData.newPlainText("Finance Bot Login Command", cmd))
-                Toast.makeText(context, "Copied /login command! Paste it in Finance Bot.", Toast.LENGTH_SHORT).show()
-              },
-              onOpenBot = { cleanBotUrl ->
-                try {
-                  context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(cleanBotUrl)))
-                } catch (e: Exception) {
-                  Toast.makeText(context, "Could not open Telegram: ${e.message}", Toast.LENGTH_SHORT).show()
-                }
-              },
-              onConfigureBot = { showTelegramDialog = true }
-            )
-          }
-        }
-
-        // Personal Earnings & Withdrawal section (shown whenever VIEW_EARNINGS or REQUEST_WITHDRAWAL is granted)
-        if (!isSuperAdmin && (canViewEarnings || canRequestWithdrawal)) {
-          item {
-            CreatorEarningsSection(
-              summary = myEarningSummary,
-              requests = myWithdrawalRequests,
-              onRequestWithdrawClick = { showWithdrawDialog = true },
-              showWithdrawButton = canRequestWithdrawal,
-              creditedViews = if (isCurrentMember) myCreditedViews else null
-            )
-          }
-        }
-
         // ==========================================================
-        // SECTION A: PURE CREATOR PORTAL (when no Admin-level tabs are granted)
+        // SECTION A: CLEAN, STRUCTURED CREATOR PORTAL HUB
         // ==========================================================
         if (isCurrentMember && !hasAdminTabs) {
-          if (canUploadVideos || canManageVideos) {
-            item {
-              Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-              ) {
-                StatCard(
-                  title = "MY VIDEOS",
-                  value = "${myMemberVideos.size}",
-                  color = MasalaTextPrimary,
-                  modifier = Modifier.weight(1f)
-                )
-                StatCard(
-                  title = "MY TOTAL VIEWS",
-                  value = "$myCreditedViews",
-                  color = MasalaRedAccent,
-                  modifier = Modifier.weight(1f)
-                )
-                StatCard(
-                  title = "ACTIVE VIDEOS",
-                  value = "${myMemberVideos.count { it.isActive }}",
-                  color = MasalaSuccess,
-                  modifier = Modifier.weight(1f)
-                )
-              }
-            }
-          }
+          val myVideoIds = myMemberVideos.map { it.videoId }.toSet()
+          val myActiveLinksCount = accessLinks.count { it.videoId in myVideoIds && it.isActive }
+          val myActiveVideosCount = myMemberVideos.count { it.isActive }
 
-          if (canUploadVideos && !canManageVideos) {
-            item {
-              Card(
-                shape = RoundedCornerShape(14.dp),
-                colors = CardDefaults.cardColors(containerColor = MasalaSurface),
-                border = androidx.compose.foundation.BorderStroke(1.dp, MasalaCardBorder),
-                modifier = Modifier.fillMaxWidth()
-              ) {
-                Column(
-                  modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(20.dp),
-                  horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                  Icon(Icons.Default.CloudUpload, contentDescription = null, tint = MasalaGold, modifier = Modifier.size(34.dp))
-                  Spacer(modifier = Modifier.height(8.dp))
-                  Text("Upload Videos Enabled", color = MasalaTextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                  Spacer(modifier = Modifier.height(4.dp))
-                  Text(
-                    text = "Tap the Upload button below to upload videos and generate shareable links.",
-                    color = MasalaTextSecondary,
-                    fontSize = 12.sp
+          if (creatorVisibleTabs.size > 1) {
+            item(key = "creator_pill_navigation") {
+              val creatorPills = creatorVisibleTabs.map { tab ->
+                when (tab) {
+                  CreatorSectionTab.OVERVIEW -> AdminNavPillItem(
+                    label = "Overview",
+                    icon = Icons.Default.Dashboard,
+                    accentColor = MasalaGold,
+                    testTag = "creator_tab_overview"
+                  )
+                  CreatorSectionTab.VIDEOS -> AdminNavPillItem(
+                    label = if (canManageVideos) "My Videos" else "Upload",
+                    icon = Icons.Default.VideoFile,
+                    badge = if (canManageVideos) "${myMemberVideos.size}" else null,
+                    accentColor = MasalaRedPrimary,
+                    testTag = "creator_tab_videos"
+                  )
+                  CreatorSectionTab.EARNINGS -> AdminNavPillItem(
+                    label = "Earnings",
+                    icon = Icons.Default.Payments,
+                    badge = formatInr(myEarningSummary.availableBalance),
+                    accentColor = MasalaSuccess,
+                    testTag = "creator_tab_earnings"
+                  )
+                  CreatorSectionTab.TOOLS -> AdminNavPillItem(
+                    label = "Bots & Settings",
+                    icon = Icons.Default.Settings,
+                    accentColor = MasalaGold,
+                    testTag = "creator_tab_tools"
                   )
                 }
               }
+
+              AdminPillNavigationBar(
+                items = creatorPills,
+                selectedIndex = safeCreatorTabIndex,
+                onSelectIndex = { newIdx ->
+                  selectedCreatorTab = newIdx
+                  coroutineScope.launch { listState.animateScrollToItem(0) }
+                }
+              )
             }
           }
 
-          if (canManageVideos) {
-            item(key = "creator_videos_header") {
-              Column(modifier = Modifier.fillMaxWidth()) {
-                Text(
-                  text = "My Uploaded Videos (${myMemberVideos.size})",
-                  color = MasalaTextPrimary,
-                  fontSize = 16.sp,
-                  fontWeight = FontWeight.Bold
-                )
-                Text(
-                  text = "Manage your uploaded videos and shareable active links",
-                  color = MasalaTextMuted,
-                  fontSize = 11.sp
-                )
-              }
-            }
-
-            if (myMemberVideos.isEmpty()) {
-              item {
-                Card(
-                  shape = RoundedCornerShape(14.dp),
-                  colors = CardDefaults.cardColors(containerColor = MasalaSurface),
-                  border = androidx.compose.foundation.BorderStroke(1.dp, MasalaCardBorder),
-                  modifier = Modifier.fillMaxWidth()
-                ) {
-                  Column(
-                    modifier = Modifier
-                      .fillMaxWidth()
-                      .padding(28.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                  ) {
-                    Icon(Icons.Default.CloudUpload, contentDescription = null, tint = MasalaTextMuted, modifier = Modifier.size(40.dp))
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Text("No videos uploaded yet", color = MasalaTextPrimary, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                      text = if (canUploadVideos) "Tap the upload button below to upload your first video."
-                      else "Videos uploaded to your account will appear here.",
-                      color = MasalaTextSecondary,
-                      fontSize = 12.sp
-                    )
-                  }
-                }
-              }
-            } else {
-              items(myMemberVideos, key = { it.videoId }) { video ->
-                val associatedLinks = accessLinks.filter { it.videoId == video.videoId }
-                AdminVideoCard(
-                  video = video,
-                  links = associatedLinks,
-                  canDelete = false,
-                  showViewCount = false,
-                  shareLinkBaseUrl = shareLinkBaseUrl,
-                  onToggleVideoActive = { viewModel.toggleVideoStatus(video) },
-                  onToggleLinkActive = { link -> viewModel.toggleLinkStatus(link) },
-                  onEditVideo = { editingVideo = video },
-                  onDeleteVideo = { },
-                  onDeleteLink = { linkId -> viewModel.deleteLink(linkId) },
-                  onCopyLink = { rawOrLinkId ->
-                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    val shareUrl = FirestoreVideoRepository.buildShareableVideoUrl(rawOrLinkId, shareLinkBaseUrl)
-                    val clip = ClipData.newPlainText("VidVora Link", shareUrl)
-                    clipboard.setPrimaryClip(clip)
-                    Toast.makeText(context, "Copied video link to clipboard", Toast.LENGTH_SHORT).show()
-                  },
-                  onPlay = { linkOrVideoId ->
-                    if (onPlayVideoItem != null) {
-                      onPlayVideoItem(video)
-                    } else {
-                      onPlayVideo(linkOrVideoId)
-                    }
-                  }
-                )
-              }
-            }
-          }
-        } else if (visibleTabs.isNotEmpty()) {
-          // ==========================================================
-          // SECTION B: ADMIN / PERMISSION-GATED MULTI-TAB PANEL
-          // ==========================================================
-          if (visibleTabs.size > 1) {
-            item {
-              val tabContent: @Composable () -> Unit = {
-                visibleTabs.forEachIndexed { index, tab ->
-                  when (tab) {
-                    AdminSectionTab.VIDEOS -> Tab(
-                      selected = safeTabIndex == index,
-                      onClick = { selectedTab = index },
-                      icon = { Icon(Icons.Default.VideoFile, contentDescription = null, modifier = Modifier.size(16.dp)) },
-                      text = {
-                        val countText = if (canManageVideos) {
-                          val listSize = if (isCurrentMember) myMemberVideos.size else videos.size
-                          "Videos ($listSize)"
-                        } else {
-                          "Upload"
-                        }
-                        Text(countText, fontWeight = FontWeight.Bold, fontSize = 10.sp, maxLines = 1, softWrap = false)
-                      },
-                      selectedContentColor = MasalaRedPrimary,
-                      unselectedContentColor = MasalaTextSecondary
-                    )
-                    AdminSectionTab.MEMBERS -> Tab(
-                      selected = safeTabIndex == index,
-                      onClick = { selectedTab = index },
-                      icon = { Icon(Icons.Default.Group, contentDescription = null, modifier = Modifier.size(16.dp)) },
-                      text = {
-                        Text("Members (${memberStatsList.size})", fontWeight = FontWeight.Bold, fontSize = 10.sp, maxLines = 1, softWrap = false)
-                      },
-                      selectedContentColor = MasalaRedPrimary,
-                      unselectedContentColor = MasalaTextSecondary
-                    )
-                    AdminSectionTab.PAYOUTS -> Tab(
-                      selected = safeTabIndex == index,
-                      onClick = { selectedTab = index },
-                      icon = { Icon(Icons.Default.Payments, contentDescription = null, modifier = Modifier.size(16.dp)) },
-                      text = {
-                        Text(
-                          text = if (pendingPayoutsCount > 0) "Payout ($pendingPayoutsCount)" else "Payouts",
-                          fontWeight = FontWeight.Bold,
-                          fontSize = 10.sp,
-                          maxLines = 1,
-                          softWrap = false
-                        )
-                      },
-                      selectedContentColor = MasalaRedPrimary,
-                      unselectedContentColor = MasalaTextSecondary
-                    )
-                    AdminSectionTab.NOTIFY -> Tab(
-                      selected = safeTabIndex == index,
-                      onClick = { selectedTab = index },
-                      icon = { Icon(Icons.Default.NotificationsActive, contentDescription = null, modifier = Modifier.size(16.dp)) },
-                      text = {
-                        Text("Notify", fontWeight = FontWeight.Bold, fontSize = 10.sp, maxLines = 1, softWrap = false)
-                      },
-                      selectedContentColor = MasalaRedPrimary,
-                      unselectedContentColor = MasalaTextSecondary,
-                      modifier = Modifier.testTag("admin_tab_notify")
-                    )
-                    AdminSectionTab.STATS -> Tab(
-                      selected = safeTabIndex == index,
-                      onClick = { selectedTab = index },
-                      icon = { Icon(Icons.Default.Smartphone, contentDescription = null, modifier = Modifier.size(16.dp)) },
-                      text = {
-                        Text(
-                          text = "Installs (${appInstallStats.totalDownloads})",
-                          fontWeight = FontWeight.Bold,
-                          fontSize = 10.sp,
-                          maxLines = 1,
-                          softWrap = false
-                        )
-                      },
-                      selectedContentColor = MasalaRedPrimary,
-                      unselectedContentColor = MasalaTextSecondary,
-                      modifier = Modifier.testTag("admin_tab_installs")
-                    )
-                    AdminSectionTab.SUPPORT -> Tab(
-                      selected = safeTabIndex == index,
-                      onClick = { selectedTab = index },
-                      icon = { Icon(Icons.Default.SupportAgent, contentDescription = null, modifier = Modifier.size(16.dp)) },
-                      text = {
-                        Text(
-                          text = if (unreadSupportChatsCount > 0) "Support ($unreadSupportChatsCount)" else "Support",
-                          fontWeight = FontWeight.Bold,
-                          fontSize = 10.sp,
-                          maxLines = 1,
-                          softWrap = false
-                        )
-                      },
-                      selectedContentColor = MasalaRedPrimary,
-                      unselectedContentColor = MasalaTextSecondary,
-                      modifier = Modifier.testTag("admin_tab_support")
-                    )
-                    AdminSectionTab.EVENTS -> Tab(
-                      selected = safeTabIndex == index,
-                      onClick = { selectedTab = index },
-                      icon = { Icon(Icons.Default.CardGiftcard, contentDescription = null, modifier = Modifier.size(16.dp)) },
-                      text = {
-                        Text(
-                          text = if (activeCreatorEvents.isNotEmpty()) "Events (${activeCreatorEvents.size})" else "Events",
-                          fontWeight = FontWeight.Bold,
-                          fontSize = 10.sp,
-                          maxLines = 1,
-                          softWrap = false
-                        )
-                      },
-                      selectedContentColor = MasalaRedPrimary,
-                      unselectedContentColor = MasalaTextSecondary,
-                      modifier = Modifier.testTag("admin_tab_events")
-                    )
-                  }
-                }
-              }
-
-              if (visibleTabs.size > 4) {
-                ScrollableTabRow(
-                  selectedTabIndex = safeTabIndex,
-                  edgePadding = 4.dp,
-                  containerColor = MasalaSurface,
-                  contentColor = MasalaRedPrimary,
-                  indicator = { tabPositions ->
-                    TabRowDefaults.SecondaryIndicator(
-                      modifier = Modifier.tabIndicatorOffset(tabPositions[safeTabIndex]),
-                      color = MasalaRedPrimary
-                    )
-                  },
-                  modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .border(1.dp, MasalaCardBorder, RoundedCornerShape(12.dp))
-                ) {
-                  tabContent()
-                }
-              } else {
-                TabRow(
-                  selectedTabIndex = safeTabIndex,
-                  containerColor = MasalaSurface,
-                  contentColor = MasalaRedPrimary,
-                  indicator = { tabPositions ->
-                    TabRowDefaults.SecondaryIndicator(
-                      modifier = Modifier.tabIndicatorOffset(tabPositions[safeTabIndex]),
-                      color = MasalaRedPrimary
-                    )
-                  },
-                  modifier = Modifier
-                    .clip(RoundedCornerShape(12.dp))
-                    .border(1.dp, MasalaCardBorder, RoundedCornerShape(12.dp))
-                ) {
-                  tabContent()
-                }
-              }
+          val jumpToCreatorTab: (CreatorSectionTab) -> Unit = { target ->
+            val idx = creatorVisibleTabs.indexOf(target)
+            if (idx >= 0) {
+              selectedCreatorTab = idx
+              coroutineScope.launch { listState.animateScrollToItem(0) }
             }
           }
 
-          when (currentAdminTab) {
-            AdminSectionTab.VIDEOS -> {
-              if (canManageVideos) {
-                val displayedVideos = if (isCurrentMember) myMemberVideos else videos
-                val displayedViews = if (isCurrentMember) myCreditedViews else totalViews
-                val displayedActiveLinks = if (isCurrentMember) {
-                  val ids = myMemberVideos.map { it.videoId }.toSet()
-                  accessLinks.count { it.videoId in ids && it.isActive }
-                } else {
-                  activeLinksCount
+          when (currentCreatorTab) {
+            CreatorSectionTab.OVERVIEW -> {
+              val hasUnreadSupport = (myCreatorSupportChat?.unreadByUserCount ?: 0L) > 0L
+              val creatorTiles = buildList {
+                if (canUploadVideos || canManageVideos) {
+                  add(
+                    AdminToolTile(
+                      title = "My Videos",
+                      subtitle = "$myActiveLinksCount active share links",
+                      icon = Icons.Default.VideoFile,
+                      accentColor = MasalaRedPrimary,
+                      badge = "${myMemberVideos.size}",
+                      testTag = "creator_tile_videos",
+                      onClick = { jumpToCreatorTab(CreatorSectionTab.VIDEOS) }
+                    )
+                  )
                 }
+                if (canViewEarnings || canRequestWithdrawal) {
+                  add(
+                    AdminToolTile(
+                      title = "Earnings & UPI",
+                      subtitle = "Paid ${formatInr(myEarningSummary.paidAmount)}",
+                      icon = Icons.Default.Payments,
+                      accentColor = MasalaSuccess,
+                      badge = formatInr(myEarningSummary.availableBalance),
+                      testTag = "creator_tile_earnings",
+                      onClick = { jumpToCreatorTab(CreatorSectionTab.EARNINGS) }
+                    )
+                  )
+                }
+                if (canUploadVideos) {
+                  add(
+                    AdminToolTile(
+                      title = "Upload Video",
+                      subtitle = "Upload & get share link",
+                      icon = Icons.Default.CloudUpload,
+                      accentColor = Color(0xFF26C6DA),
+                      testTag = "creator_tile_upload",
+                      onClick = { showUploadDialog = true }
+                    )
+                  )
+                }
+                if (!canManageSupportChat && activeMember != null) {
+                  add(
+                    AdminToolTile(
+                      title = "Support Chat",
+                      subtitle = "Message VidVora Team",
+                      icon = Icons.Default.SupportAgent,
+                      accentColor = Color(0xFFB388FF),
+                      badge = if (hasUnreadSupport) "New" else null,
+                      testTag = "creator_tile_support",
+                      onClick = {
+                        viewModel.markCreatorSupportChatRead()
+                        showCreatorSupportDialog = true
+                      }
+                    )
+                  )
+                }
+                if (activeMember != null) {
+                  add(
+                    AdminToolTile(
+                      title = "Events & Gifts",
+                      subtitle = "Contests & creator rewards",
+                      icon = Icons.Default.CardGiftcard,
+                      accentColor = Color(0xFFFF7043),
+                      badge = if (activeCreatorEvents.isNotEmpty()) "${activeCreatorEvents.size} Live" else null,
+                      testTag = "creator_tile_events",
+                      onClick = { showCreatorEventsDialog = true }
+                    )
+                  )
+                }
+                if (hasCreatorToolsTab) {
+                  add(
+                    AdminToolTile(
+                      title = "Bots & Settings",
+                      subtitle = "Telegram Bots & Password",
+                      icon = Icons.Default.Settings,
+                      accentColor = MasalaGold,
+                      testTag = "creator_tile_tools",
+                      onClick = { jumpToCreatorTab(CreatorSectionTab.TOOLS) }
+                    )
+                  )
+                }
+              }
 
+              creatorOverviewDashboardContent(
+                analytics = creatorLifetimeAnalytics,
+                showEarningsCard = canViewEarnings || canRequestWithdrawal,
+                myVideosCount = myMemberVideos.size,
+                myActiveVideosCount = myActiveVideosCount,
+                myActiveLinksCount = myActiveLinksCount,
+                toolTiles = creatorTiles,
+                onLifetimeViewsClick = {
+                  if (canViewEarnings || canRequestWithdrawal) jumpToCreatorTab(CreatorSectionTab.EARNINGS)
+                  else jumpToCreatorTab(CreatorSectionTab.VIDEOS)
+                },
+                onLifetimeWithdrawalsClick = if (canViewEarnings || canRequestWithdrawal) {
+                  { jumpToCreatorTab(CreatorSectionTab.EARNINGS) }
+                } else null
+              )
+            }
+
+            CreatorSectionTab.VIDEOS -> {
+              item(key = "creator_videos_tab_header") {
+                AdminSectionHeaderBanner(
+                  title = "My Uploaded Videos (${myMemberVideos.size})",
+                  subtitle = "Manage your videos, toggle links, and copy shareable URLs",
+                  accentColor = MasalaRedPrimary
+                )
+              }
+
+              item(key = "creator_videos_tab_stats") {
+                Row(
+                  modifier = Modifier.fillMaxWidth(),
+                  horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                  StatCard(
+                    title = "MY VIDEOS",
+                    value = formatIndianCount(myMemberVideos.size.toLong()),
+                    color = MasalaTextPrimary,
+                    modifier = Modifier.weight(1f)
+                  )
+                  StatCard(
+                    title = "LIFETIME VIEWS",
+                    value = formatIndianCount(myCreditedViews),
+                    color = MasalaRedAccent,
+                    modifier = Modifier.weight(1f)
+                  )
+                  StatCard(
+                    title = "ACTIVE VIDEOS",
+                    value = formatIndianCount(myActiveVideosCount.toLong()),
+                    color = MasalaSuccess,
+                    modifier = Modifier.weight(1f)
+                  )
+                }
+              }
+
+              if (canUploadVideos && !canManageVideos) {
                 item {
-                  Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                  Card(
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = MasalaSurface),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, MasalaCardBorder),
+                    modifier = Modifier.fillMaxWidth()
                   ) {
-                    StatCard(
-                      title = if (isCurrentMember) "MY VIDEOS" else "TOTAL VIDEOS",
-                      value = "${displayedVideos.size}",
-                      color = MasalaTextPrimary,
-                      modifier = Modifier.weight(1f)
-                    )
-                    StatCard(
-                      title = if (isCurrentMember) "MY VIEWS" else "TOTAL VIEWS",
-                      value = "$displayedViews",
-                      color = MasalaRedAccent,
-                      modifier = Modifier.weight(1f)
-                    )
-                    StatCard(
-                      title = "ACTIVE LINKS",
-                      value = "$displayedActiveLinks",
-                      color = MasalaSuccess,
-                      modifier = Modifier.weight(1f)
-                    )
-                    if (isSuperAdmin || canManageMembers) {
-                      StatCard(
-                        title = "MEMBERS",
-                        value = "${memberStatsList.size}",
-                        color = MasalaGold,
-                        modifier = Modifier.weight(1f)
+                    Column(
+                      modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(20.dp),
+                      horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                      Icon(Icons.Default.CloudUpload, contentDescription = null, tint = MasalaGold, modifier = Modifier.size(34.dp))
+                      Spacer(modifier = Modifier.height(8.dp))
+                      Text("Upload Videos Enabled", color = MasalaTextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                      Spacer(modifier = Modifier.height(4.dp))
+                      Text(
+                        text = "Tap the Upload button below to upload videos and generate shareable links.",
+                        color = MasalaTextSecondary,
+                        fontSize = 12.sp
                       )
                     }
                   }
                 }
               }
 
-              if (canViewAppStats) {
-                item {
-                  val statsIndex = visibleTabs.indexOf(AdminSectionTab.STATS)
-                  AdminAppInstallsOverviewBanner(
-                    stats = appInstallStats,
-                    onOpenDetails = { if (statsIndex >= 0) selectedTab = statsIndex }
+              if (canManageVideos) {
+                if (myMemberVideos.isEmpty()) {
+                  item {
+                    Card(
+                      shape = RoundedCornerShape(14.dp),
+                      colors = CardDefaults.cardColors(containerColor = MasalaSurface),
+                      border = androidx.compose.foundation.BorderStroke(1.dp, MasalaCardBorder),
+                      modifier = Modifier.fillMaxWidth()
+                    ) {
+                      Column(
+                        modifier = Modifier
+                          .fillMaxWidth()
+                          .padding(28.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                      ) {
+                        Icon(Icons.Default.CloudUpload, contentDescription = null, tint = MasalaTextMuted, modifier = Modifier.size(40.dp))
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text("No videos uploaded yet", color = MasalaTextPrimary, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                          text = if (canUploadVideos) "Tap the upload button below to upload your first video."
+                          else "Videos uploaded to your account will appear here.",
+                          color = MasalaTextSecondary,
+                          fontSize = 12.sp
+                        )
+                      }
+                    }
+                  }
+                } else {
+                  items(myMemberVideos, key = { it.videoId }) { video ->
+                    val associatedLinks = accessLinks.filter { it.videoId == video.videoId }
+                    AdminVideoCard(
+                      video = video,
+                      links = associatedLinks,
+                      canDelete = false,
+                      showViewCount = false,
+                      shareLinkBaseUrl = shareLinkBaseUrl,
+                      onToggleVideoActive = { viewModel.toggleVideoStatus(video) },
+                      onToggleLinkActive = { link -> viewModel.toggleLinkStatus(link) },
+                      onEditVideo = { editingVideo = video },
+                      onDeleteVideo = { },
+                      onDeleteLink = { linkId -> viewModel.deleteLink(linkId) },
+                      onCopyLink = { rawOrLinkId ->
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        val shareUrl = FirestoreVideoRepository.buildShareableVideoUrl(rawOrLinkId, shareLinkBaseUrl)
+                        val clip = ClipData.newPlainText("VidVora Link", shareUrl)
+                        clipboard.setPrimaryClip(clip)
+                        Toast.makeText(context, "Copied video link to clipboard", Toast.LENGTH_SHORT).show()
+                      },
+                      onPlay = { linkOrVideoId ->
+                        if (onPlayVideoItem != null) {
+                          onPlayVideoItem(video)
+                        } else {
+                          onPlayVideo(linkOrVideoId)
+                        }
+                      }
+                    )
+                  }
+                }
+              }
+            }
+
+            CreatorSectionTab.EARNINGS -> {
+              item(key = "creator_earnings_lifetime_hero") {
+                CreatorLifetimeWithdrawalHeroCard(analytics = creatorLifetimeAnalytics)
+              }
+
+              item(key = "creator_earnings_details_card") {
+                CreatorEarningsSection(
+                  summary = myEarningSummary,
+                  requests = myWithdrawalRequests,
+                  onRequestWithdrawClick = { showWithdrawDialog = true },
+                  showWithdrawButton = canRequestWithdrawal,
+                  creditedViews = myCreditedViews
+                )
+              }
+            }
+
+            CreatorSectionTab.TOOLS -> {
+              item(key = "creator_tools_bots_header") {
+                AdminSectionHeaderBanner(
+                  title = "Telegram Bots",
+                  subtitle = "Upload videos & check earnings directly from Telegram",
+                  accentColor = Color(0xFF229ED9)
+                )
+              }
+
+              if (canUploadVideos || canManageTelegram) {
+                item(key = "creator_tools_upload_bot") {
+                  TelegramUploadBotCard(
+                    botLink = telegramCreatorBotLink,
+                    memberPasskey = activeMember?.passkey,
+                    canConfigureBot = canManageTelegram,
+                    onCopyLoginCommand = { cmd ->
+                      val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                      clipboard.setPrimaryClip(ClipData.newPlainText("Bot Login Command", cmd))
+                      Toast.makeText(context, "Copied /login command! Paste it in Telegram Bot.", Toast.LENGTH_SHORT).show()
+                    },
+                    onOpenBot = { cleanBotUrl ->
+                      try {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(cleanBotUrl)))
+                      } catch (e: Exception) {
+                        Toast.makeText(context, "Could not open Telegram: ${e.message}", Toast.LENGTH_SHORT).show()
+                      }
+                    },
+                    onConfigureBot = { showTelegramDialog = true }
                   )
                 }
               }
 
-              if (canManagePayouts) {
-                item {
-                  val payoutsIndex = visibleTabs.indexOf(AdminSectionTab.PAYOUTS)
-                  AdminWithdrawalSummarySection(
-                    requests = allWithdrawalRequests,
-                    onOpenPayoutsTab = { if (payoutsIndex >= 0) selectedTab = payoutsIndex },
-                    onMarkProcessing = { req -> statusUpdateTarget = req to WithdrawalStatus.PROCESSING },
-                    onMarkDone = { req -> statusUpdateTarget = req to WithdrawalStatus.DONE }
+              if (canViewEarnings || canRequestWithdrawal || canManageTelegram) {
+                item(key = "creator_tools_finance_bot") {
+                  TelegramFinanceBotCard(
+                    botLink = telegramFinanceBotLink,
+                    memberPasskey = activeMember?.passkey,
+                    isSuperAdmin = false,
+                    canConfigureBot = canManageTelegram,
+                    onCopyLoginCommand = { cmd ->
+                      val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                      clipboard.setPrimaryClip(ClipData.newPlainText("Finance Bot Login Command", cmd))
+                      Toast.makeText(context, "Copied /login command! Paste it in Finance Bot.", Toast.LENGTH_SHORT).show()
+                    },
+                    onOpenBot = { cleanBotUrl ->
+                      try {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(cleanBotUrl)))
+                      } catch (e: Exception) {
+                        Toast.makeText(context, "Could not open Telegram: ${e.message}", Toast.LENGTH_SHORT).show()
+                      }
+                    },
+                    onConfigureBot = { showTelegramDialog = true }
                   )
                 }
               }
 
-              if (canManageSupportChat) {
-                item {
-                  val supportIndex = visibleTabs.indexOf(AdminSectionTab.SUPPORT)
-                  val openSupportCount = supportChats.count { it.status == SupportChatStatus.OPEN }
-                  AdminSupportOverviewBanner(
-                    totalChats = supportChats.size,
-                    unreadChatsCount = unreadSupportChatsCount,
-                    openChatsCount = openSupportCount,
-                    onOpenSupportTab = { if (supportIndex >= 0) selectedTab = supportIndex }
-                  )
-                }
+              item(key = "creator_tools_account_header") {
+                AdminSectionHeaderBanner(
+                  title = "Account & Support",
+                  subtitle = "Update login password, view events, or contact support team",
+                  accentColor = MasalaGold
+                )
               }
 
-              if (canManageTelegram) {
-                item {
-                  val configuredCategories = allTelegramCategories.count { it.link.isNotBlank() }
-                  val totalCategories = allTelegramCategories.size
+              if (canChangeMasterKey) {
+                item(key = "creator_tools_password_card") {
                   Card(
                     shape = RoundedCornerShape(16.dp),
                     colors = CardDefaults.cardColors(containerColor = MasalaSurface),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, MasalaCardBorder),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, MasalaGold.copy(alpha = 0.4f)),
                     modifier = Modifier
                       .fillMaxWidth()
-                      .testTag("admin_telegram_config_card")
+                      .testTag("creator_master_key_card")
                   ) {
                     Row(
                       modifier = Modifier
@@ -1334,41 +1270,28 @@ fun AdminPanelScreen(
                           modifier = Modifier
                             .size(38.dp)
                             .clip(CircleShape)
-                            .background(Color(0xFF229ED9).copy(alpha = 0.2f)),
+                            .background(MasalaGold.copy(alpha = 0.16f)),
                           contentAlignment = Alignment.Center
                         ) {
                           Icon(
-                            imageVector = Icons.AutoMirrored.Filled.Send,
+                            imageVector = Icons.Default.Key,
                             contentDescription = null,
-                            tint = Color(0xFF229ED9),
+                            tint = MasalaGold,
                             modifier = Modifier.size(20.dp)
                           )
                         }
                         Spacer(modifier = Modifier.width(12.dp))
                         Column {
                           Text(
-                            text = "Telegram & Share Link Previews",
+                            text = "Creator Password",
                             color = MasalaTextPrimary,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Bold
                           )
                           Text(
-                            text = "$telegramLink • $configuredCategories/$totalCategories categories",
-                            color = MasalaGold,
-                            fontSize = 11.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                          )
-                          Text(
-                            text = if (shareLinkBaseUrl.isBlank()) {
-                              "Thumbnail + Link Ready • Add Share Preview URL below for automatic link cards"
-                            } else {
-                              "HD Link Thumbnails Active: $shareLinkBaseUrl"
-                            },
-                            color = if (shareLinkBaseUrl.isBlank()) MasalaTextSecondary else MasalaSuccess,
-                            fontSize = 10.sp,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
+                            text = "Update your login Password anytime",
+                            color = MasalaTextSecondary,
+                            fontSize = 11.sp
                           )
                         }
                       }
@@ -1376,17 +1299,343 @@ fun AdminPanelScreen(
                       Spacer(modifier = Modifier.width(8.dp))
 
                       OutlinedButton(
-                        onClick = { showTelegramDialog = true },
+                        onClick = { showChangeMasterKeyDialog = true },
                         shape = RoundedCornerShape(8.dp),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, MasalaGold.copy(alpha = 0.6f)),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, MasalaGold.copy(alpha = 0.65f)),
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = MasalaGold),
-                        modifier = Modifier.testTag("edit_telegram_link_button")
+                        modifier = Modifier.testTag("creator_change_master_key_button")
                       ) {
                         Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(14.dp))
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text("Edit / Add", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Text("Change Password", fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
                       }
                     }
+                  }
+                }
+              }
+
+              if (!canManageSupportChat && activeMember != null) {
+                item(key = "creator_tools_support_card") {
+                  CreatorSupportBannerCard(
+                    chat = myCreatorSupportChat,
+                    onOpenChat = {
+                      viewModel.markCreatorSupportChatRead()
+                      showCreatorSupportDialog = true
+                    }
+                  )
+                }
+              }
+
+              if (activeMember != null) {
+                item(key = "creator_tools_events_card") {
+                  CreatorEventsBannerCard(
+                    activeEvents = activeCreatorEvents,
+                    onOpenEvents = { showCreatorEventsDialog = true }
+                  )
+                }
+              }
+            }
+
+            null -> Unit
+          }
+        } else if (visibleTabs.isNotEmpty()) {
+          // ==========================================================
+          // SECTION B: CLEAN, STRUCTURED ADMIN / SUPERADMIN HUB
+          // ==========================================================
+          if (visibleTabs.size > 1) {
+            item(key = "admin_pill_navigation") {
+              val pillItems = visibleTabs.map { tab ->
+                when (tab) {
+                  AdminSectionTab.OVERVIEW -> AdminNavPillItem(
+                    label = "Overview",
+                    icon = Icons.Default.Dashboard,
+                    accentColor = MasalaGold,
+                    testTag = "admin_tab_overview"
+                  )
+                  AdminSectionTab.UPDATE_VIEWS -> AdminNavPillItem(
+                    label = "Update Views",
+                    icon = Icons.Default.Visibility,
+                    badge = if (dailyViewsPendingCount > 0) "$dailyViewsPendingCount" else "✓",
+                    accentColor = MasalaGold,
+                    testTag = "admin_tab_update_views"
+                  )
+                  AdminSectionTab.VIDEOS -> AdminNavPillItem(
+                    label = if (canManageVideos) "Videos" else "Upload",
+                    icon = Icons.Default.VideoFile,
+                    badge = if (canManageVideos) "${if (isCurrentMember) myMemberVideos.size else videos.size}" else null,
+                    accentColor = MasalaRedPrimary,
+                    testTag = "admin_tab_videos"
+                  )
+                  AdminSectionTab.MEMBERS -> AdminNavPillItem(
+                    label = "Members",
+                    icon = Icons.Default.Group,
+                    badge = "${memberStatsList.size}",
+                    accentColor = Color(0xFF26C6DA),
+                    testTag = "admin_tab_members"
+                  )
+                  AdminSectionTab.PAYOUTS -> AdminNavPillItem(
+                    label = "Payouts",
+                    icon = Icons.Default.Payments,
+                    badge = if (pendingPayoutsCount > 0) "$pendingPayoutsCount" else null,
+                    accentColor = MasalaSuccess,
+                    testTag = "admin_tab_payouts"
+                  )
+                  AdminSectionTab.STATS -> AdminNavPillItem(
+                    label = "Installs",
+                    icon = Icons.Default.Smartphone,
+                    badge = "${appInstallStats.totalDownloads}",
+                    accentColor = Color(0xFF4FC3F7),
+                    testTag = "admin_tab_installs"
+                  )
+                  AdminSectionTab.SUPPORT -> AdminNavPillItem(
+                    label = "Support",
+                    icon = Icons.Default.SupportAgent,
+                    badge = if (unreadSupportChatsCount > 0) "$unreadSupportChatsCount" else null,
+                    accentColor = Color(0xFFB388FF),
+                    testTag = "admin_tab_support"
+                  )
+                  AdminSectionTab.NOTIFY -> AdminNavPillItem(
+                    label = "Notify",
+                    icon = Icons.Default.NotificationsActive,
+                    accentColor = MasalaWarning,
+                    testTag = "admin_tab_notify"
+                  )
+                  AdminSectionTab.EVENTS -> AdminNavPillItem(
+                    label = "Events",
+                    icon = Icons.Default.CardGiftcard,
+                    badge = if (activeCreatorEvents.isNotEmpty()) "${activeCreatorEvents.size}" else null,
+                    accentColor = Color(0xFFFF7043),
+                    testTag = "admin_tab_events"
+                  )
+                  AdminSectionTab.SETTINGS -> AdminNavPillItem(
+                    label = "Settings",
+                    icon = Icons.Default.Settings,
+                    accentColor = MasalaGold,
+                    testTag = "admin_tab_settings"
+                  )
+                }
+              }
+
+              AdminPillNavigationBar(
+                items = pillItems,
+                selectedIndex = safeTabIndex,
+                onSelectIndex = { newIdx ->
+                  selectedTab = newIdx
+                  coroutineScope.launch { listState.animateScrollToItem(0) }
+                }
+              )
+            }
+          }
+
+          when (currentAdminTab) {
+            AdminSectionTab.OVERVIEW -> {
+              val jumpToTab: (AdminSectionTab) -> Unit = { target ->
+                val idx = visibleTabs.indexOf(target)
+                if (idx >= 0) {
+                  selectedTab = idx
+                  coroutineScope.launch { listState.animateScrollToItem(0) }
+                }
+              }
+              val nextResetCountdown = DailyViewsResetClock.formatCountdown(
+                DailyViewsResetClock.msUntilNextResetIst(dailyViewsNowMs)
+              )
+              val openSupportCount = supportChats.count { it.status == SupportChatStatus.OPEN }
+
+              val overviewTiles = buildList {
+                if (isSuperAdmin) {
+                  add(
+                    AdminToolTile(
+                      title = "Update Views",
+                      subtitle = "Reset 11:50 PM IST ($nextResetCountdown)",
+                      icon = Icons.Default.Visibility,
+                      accentColor = MasalaGold,
+                      badge = if (dailyViewsPendingCount > 0) "$dailyViewsPendingCount Pending" else "Done ✓",
+                      testTag = "overview_tile_update_views",
+                      onClick = { jumpToTab(AdminSectionTab.UPDATE_VIEWS) }
+                    )
+                  )
+                }
+                if (isSuperAdmin || canManagePayouts) {
+                  add(
+                    AdminToolTile(
+                      title = "Payouts",
+                      subtitle = "Paid ${formatInr(lifetimeAnalytics.lifetimeWithdrawalTotalPaid)}",
+                      icon = Icons.Default.Payments,
+                      accentColor = MasalaSuccess,
+                      badge = if (pendingPayoutsCount > 0) "$pendingPayoutsCount Open" else "Clear",
+                      testTag = "overview_tile_payouts",
+                      onClick = { jumpToTab(AdminSectionTab.PAYOUTS) }
+                    )
+                  )
+                }
+                if (isSuperAdmin || canUploadVideos || canManageVideos) {
+                  val vidsCount = if (isCurrentMember) myMemberVideos.size else videos.size
+                  add(
+                    AdminToolTile(
+                      title = "Videos & Links",
+                      subtitle = "$activeLinksCount active share links",
+                      icon = Icons.Default.VideoFile,
+                      accentColor = MasalaRedPrimary,
+                      badge = "$vidsCount",
+                      testTag = "overview_tile_videos",
+                      onClick = { jumpToTab(AdminSectionTab.VIDEOS) }
+                    )
+                  )
+                }
+                if (isSuperAdmin || canManageMembers) {
+                  add(
+                    AdminToolTile(
+                      title = "Creators & Admins",
+                      subtitle = "Roles, passkeys & earnings",
+                      icon = Icons.Default.Group,
+                      accentColor = Color(0xFF26C6DA),
+                      badge = "${memberStatsList.size}",
+                      testTag = "overview_tile_members",
+                      onClick = { jumpToTab(AdminSectionTab.MEMBERS) }
+                    )
+                  )
+                }
+                if (isSuperAdmin || canViewAppStats) {
+                  add(
+                    AdminToolTile(
+                      title = "App Installs",
+                      subtitle = "${appInstallStats.currentlyInstalledCount} active devices",
+                      icon = Icons.Default.Smartphone,
+                      accentColor = Color(0xFF4FC3F7),
+                      badge = "${appInstallStats.totalDownloads}",
+                      testTag = "overview_tile_installs",
+                      onClick = { jumpToTab(AdminSectionTab.STATS) }
+                    )
+                  )
+                }
+                if (isSuperAdmin || canManageSupportChat) {
+                  add(
+                    AdminToolTile(
+                      title = "Support Inbox",
+                      subtitle = "$openSupportCount open conversations",
+                      icon = Icons.Default.SupportAgent,
+                      accentColor = Color(0xFFB388FF),
+                      badge = if (unreadSupportChatsCount > 0) "$unreadSupportChatsCount New" else "${supportChats.size}",
+                      testTag = "overview_tile_support",
+                      onClick = { jumpToTab(AdminSectionTab.SUPPORT) }
+                    )
+                  )
+                }
+                if (isSuperAdmin || canSendNotifications) {
+                  add(
+                    AdminToolTile(
+                      title = "Notifications",
+                      subtitle = "Send alerts to all users",
+                      icon = Icons.Default.NotificationsActive,
+                      accentColor = MasalaWarning,
+                      badge = if (notifications.isNotEmpty()) "${notifications.size}" else null,
+                      testTag = "overview_tile_notify",
+                      onClick = { jumpToTab(AdminSectionTab.NOTIFY) }
+                    )
+                  )
+                }
+                if (isSuperAdmin || canManageEvents) {
+                  add(
+                    AdminToolTile(
+                      title = "Creator Events",
+                      subtitle = "Gifts & reward contests",
+                      icon = Icons.Default.CardGiftcard,
+                      accentColor = Color(0xFFFF7043),
+                      badge = if (activeCreatorEvents.isNotEmpty()) "${activeCreatorEvents.size} Live" else null,
+                      testTag = "overview_tile_events",
+                      onClick = { jumpToTab(AdminSectionTab.EVENTS) }
+                    )
+                  )
+                }
+                if (hasSettingsSection) {
+                  add(
+                    AdminToolTile(
+                      title = "Settings & Bots",
+                      subtitle = "Telegram, Update & Password",
+                      icon = Icons.Default.Settings,
+                      accentColor = MasalaGold,
+                      testTag = "overview_tile_settings",
+                      onClick = { jumpToTab(AdminSectionTab.SETTINGS) }
+                    )
+                  )
+                }
+              }
+
+              adminOverviewDashboardContent(
+                analytics = lifetimeAnalytics,
+                showLifetimeViews = isSuperAdmin || canManageVideos || canManageMembers,
+                showLifetimeWithdrawals = isSuperAdmin || canManagePayouts,
+                totalVideos = if (isCurrentMember) myMemberVideos.size else videos.size,
+                activeLinks = activeLinksCount,
+                totalMembers = memberStatsList.size,
+                totalInstalls = appInstallStats.totalDownloads,
+                toolTiles = overviewTiles,
+                onLifetimeViewsClick = {
+                  if (isSuperAdmin) jumpToTab(AdminSectionTab.UPDATE_VIEWS)
+                  else jumpToTab(AdminSectionTab.VIDEOS)
+                },
+                onLifetimeWithdrawalsClick = if (isSuperAdmin || canManagePayouts) {
+                  { jumpToTab(AdminSectionTab.PAYOUTS) }
+                } else null
+              )
+
+              // For delegated Admins who also have personal earnings/withdrawals or events/support enabled
+              if (!isSuperAdmin && (canViewEarnings || canRequestWithdrawal)) {
+                item(key = "admin_personal_earnings_card") {
+                  CreatorEarningsSection(
+                    summary = myEarningSummary,
+                    requests = myWithdrawalRequests,
+                    onRequestWithdrawClick = { showWithdrawDialog = true },
+                    showWithdrawButton = canRequestWithdrawal,
+                    creditedViews = if (isCurrentMember) myCreditedViews else null
+                  )
+                }
+              }
+            }
+
+            AdminSectionTab.VIDEOS -> {
+              if (canManageVideos) {
+                val displayedVideos = if (isCurrentMember) myMemberVideos else videos
+                val displayedViews = if (isCurrentMember) myCreditedViews else totalViews
+                val displayedActiveLinks = if (isCurrentMember) {
+                  val ids = myMemberVideos.map { it.videoId }.toSet()
+                  accessLinks.count { it.videoId in ids && it.isActive }
+                } else {
+                  activeLinksCount
+                }
+
+                item(key = "videos_tab_header") {
+                  AdminSectionHeaderBanner(
+                    title = if (isCurrentMember) "My Videos (${displayedVideos.size})" else "Videos & Share Links (${displayedVideos.size})",
+                    subtitle = "Upload new videos, manage active status, and copy clean share links",
+                    accentColor = MasalaRedPrimary
+                  )
+                }
+
+                item(key = "videos_tab_stats") {
+                  Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                  ) {
+                    StatCard(
+                      title = if (isCurrentMember) "MY VIDEOS" else "TOTAL VIDEOS",
+                      value = formatIndianCount(displayedVideos.size.toLong()),
+                      color = MasalaTextPrimary,
+                      modifier = Modifier.weight(1f)
+                    )
+                    StatCard(
+                      title = if (isCurrentMember) "MY VIEWS" else "LIFETIME VIEWS",
+                      value = formatIndianCount(displayedViews),
+                      color = MasalaRedAccent,
+                      modifier = Modifier.weight(1f)
+                    )
+                    StatCard(
+                      title = "ACTIVE LINKS",
+                      value = formatIndianCount(displayedActiveLinks.toLong()),
+                      color = MasalaSuccess,
+                      modifier = Modifier.weight(1f)
+                    )
                   }
                 }
               }
@@ -1700,8 +1949,12 @@ fun AdminPanelScreen(
 
             AdminSectionTab.PAYOUTS -> {
               // ==========================================================
-              // PAYOUTS & CREATOR EARNINGS TAB
+              // PAYOUTS & LIFETIME WITHDRAWAL BREAKDOWN TAB
               // ==========================================================
+              item(key = "payouts_lifetime_hero") {
+                LifetimeWithdrawalHeroCard(analytics = lifetimeAnalytics)
+              }
+
               item {
                 val totalPendingOrProcessing = allWithdrawalRequests
                   .filter { it.status == WithdrawalStatus.PENDING || it.status == WithdrawalStatus.PROCESSING }
@@ -2015,6 +2268,26 @@ fun AdminPanelScreen(
               )
             }
 
+            AdminSectionTab.UPDATE_VIEWS -> {
+              if (isSuperAdmin) {
+                adminUpdateCreatorViewsTabContent(
+                  memberStatsList = memberStatsList,
+                  currentCycleKey = dailyViewsCycleKey,
+                  nowIstMs = dailyViewsNowMs,
+                  searchQuery = dailyViewsSearchQuery,
+                  onSearchQueryChange = { dailyViewsSearchQuery = it },
+                  roleFilter = dailyViewsRoleFilter,
+                  onRoleFilterChange = { dailyViewsRoleFilter = it },
+                  showDoneToday = showDailyViewsDoneToday,
+                  onToggleShowDoneToday = { showDailyViewsDoneToday = !showDailyViewsDoneToday },
+                  onUpdateViewsClick = { stats -> dailyViewsTargetMember = stats },
+                  onReopenMemberClick = { stats ->
+                    viewModel.reopenDailyViewsMember(stats.member.memberId, stats.member.name)
+                  }
+                )
+              }
+            }
+
             AdminSectionTab.EVENTS -> {
               adminEventsTabContent(
                 events = creatorEvents,
@@ -2033,6 +2306,243 @@ fun AdminPanelScreen(
                 },
                 onDeleteEventClick = { event -> deletingCreatorEventId = event.eventId }
               )
+            }
+
+            AdminSectionTab.SETTINGS -> {
+              // ==========================================================
+              // SETTINGS, TELEGRAM BOTS, APP UPDATE & SECURITY TAB
+              // ==========================================================
+              item(key = "settings_telegram_header") {
+                AdminSectionHeaderBanner(
+                  title = "Telegram & Share Links",
+                  subtitle = "Configure Telegram channels, share link previews, Upload Bot, and Finance Bot",
+                  accentColor = Color(0xFF229ED9)
+                )
+              }
+
+              if (canManageTelegram) {
+                item(key = "settings_telegram_config_card") {
+                  val configuredCategories = allTelegramCategories.count { it.link.isNotBlank() }
+                  val totalCategories = allTelegramCategories.size
+                  Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MasalaSurface),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, MasalaCardBorder),
+                    modifier = Modifier
+                      .fillMaxWidth()
+                      .testTag("admin_telegram_config_card")
+                  ) {
+                    Row(
+                      modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                      verticalAlignment = Alignment.CenterVertically,
+                      horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                      Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                      ) {
+                        Box(
+                          modifier = Modifier
+                            .size(38.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF229ED9).copy(alpha = 0.2f)),
+                          contentAlignment = Alignment.Center
+                        ) {
+                          Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Send,
+                            contentDescription = null,
+                            tint = Color(0xFF229ED9),
+                            modifier = Modifier.size(20.dp)
+                          )
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                          Text(
+                            text = "Telegram & Share Link Previews",
+                            color = MasalaTextPrimary,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold
+                          )
+                          Text(
+                            text = "$telegramLink • $configuredCategories/$totalCategories categories",
+                            color = MasalaGold,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                          )
+                          Text(
+                            text = if (shareLinkBaseUrl.isBlank()) {
+                              "Add Share Preview URL for automatic link cards"
+                            } else {
+                              "HD Link Thumbnails Active: $shareLinkBaseUrl"
+                            },
+                            color = if (shareLinkBaseUrl.isBlank()) MasalaTextSecondary else MasalaSuccess,
+                            fontSize = 10.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                          )
+                        }
+                      }
+
+                      Spacer(modifier = Modifier.width(8.dp))
+
+                      OutlinedButton(
+                        onClick = { showTelegramDialog = true },
+                        shape = RoundedCornerShape(8.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, MasalaGold.copy(alpha = 0.6f)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = MasalaGold),
+                        modifier = Modifier.testTag("edit_telegram_link_button")
+                      ) {
+                        Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Edit / Add", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                      }
+                    }
+                  }
+                }
+              }
+
+              if (canUploadVideos || canManageTelegram) {
+                item(key = "settings_upload_bot_card") {
+                  TelegramUploadBotCard(
+                    botLink = telegramCreatorBotLink,
+                    memberPasskey = activeMember?.passkey,
+                    canConfigureBot = canManageTelegram,
+                    onCopyLoginCommand = { cmd ->
+                      val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                      clipboard.setPrimaryClip(ClipData.newPlainText("Bot Login Command", cmd))
+                      Toast.makeText(context, "Copied /login command! Paste it in Telegram Bot.", Toast.LENGTH_SHORT).show()
+                    },
+                    onOpenBot = { cleanBotUrl ->
+                      try {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(cleanBotUrl)))
+                      } catch (e: Exception) {
+                        Toast.makeText(context, "Could not open Telegram: ${e.message}", Toast.LENGTH_SHORT).show()
+                      }
+                    },
+                    onConfigureBot = { showTelegramDialog = true }
+                  )
+                }
+              }
+
+              if (canViewEarnings || canRequestWithdrawal || canManagePayouts || canManageTelegram) {
+                item(key = "settings_finance_bot_card") {
+                  TelegramFinanceBotCard(
+                    botLink = telegramFinanceBotLink,
+                    memberPasskey = activeMember?.passkey,
+                    isSuperAdmin = isSuperAdmin,
+                    canConfigureBot = canManageTelegram,
+                    onCopyLoginCommand = { cmd ->
+                      val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                      clipboard.setPrimaryClip(ClipData.newPlainText("Finance Bot Login Command", cmd))
+                      Toast.makeText(context, "Copied /login command! Paste it in Finance Bot.", Toast.LENGTH_SHORT).show()
+                    },
+                    onOpenBot = { cleanBotUrl ->
+                      try {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(cleanBotUrl)))
+                      } catch (e: Exception) {
+                        Toast.makeText(context, "Could not open Telegram: ${e.message}", Toast.LENGTH_SHORT).show()
+                      }
+                    },
+                    onConfigureBot = { showTelegramDialog = true }
+                  )
+                }
+              }
+
+              item(key = "settings_app_security_header") {
+                AdminSectionHeaderBanner(
+                  title = "App Updates & Account Security",
+                  subtitle = "Push self-hosted APK updates and manage your admin login password",
+                  accentColor = MasalaGold
+                )
+              }
+
+              if (isSuperAdmin || isDelegatedAdmin || canManageTelegram) {
+                item(key = "settings_app_update_card") {
+                  AdminAppUpdateCard(
+                    config = appUpdateConfig,
+                    currentAppVersionCode = BuildConfig.VERSION_CODE,
+                    currentAppVersionName = BuildConfig.VERSION_NAME,
+                    onEditClick = { showAppUpdateDialog = true }
+                  )
+                }
+              }
+
+              if (canChangeMasterKey) {
+                item(key = "settings_change_password_card") {
+                  Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MasalaSurface),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, MasalaGold.copy(alpha = 0.4f)),
+                    modifier = Modifier
+                      .fillMaxWidth()
+                      .testTag("creator_master_key_card")
+                  ) {
+                    Row(
+                      modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                      verticalAlignment = Alignment.CenterVertically,
+                      horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                      Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                      ) {
+                        Box(
+                          modifier = Modifier
+                            .size(38.dp)
+                            .clip(CircleShape)
+                            .background(MasalaGold.copy(alpha = 0.16f)),
+                          contentAlignment = Alignment.Center
+                        ) {
+                          Icon(
+                            imageVector = Icons.Default.Key,
+                            contentDescription = null,
+                            tint = MasalaGold,
+                            modifier = Modifier.size(20.dp)
+                          )
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                          Text(
+                            text = if (isSuperAdmin) "Superadmin Password" else "Admin Password",
+                            color = MasalaTextPrimary,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold
+                          )
+                          Text(
+                            text = if (isSuperAdmin && hasCustomAdminMasterKey) {
+                              "Custom Admin Password active • Tap to update anytime"
+                            } else {
+                              "Update your login Password anytime"
+                            },
+                            color = MasalaTextSecondary,
+                            fontSize = 11.sp
+                          )
+                        }
+                      }
+
+                      Spacer(modifier = Modifier.width(8.dp))
+
+                      OutlinedButton(
+                        onClick = { showChangeMasterKeyDialog = true },
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, MasalaGold.copy(alpha = 0.65f)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = MasalaGold),
+                        modifier = Modifier.testTag("creator_change_master_key_button")
+                      ) {
+                        Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Change Password", fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
+                      }
+                    }
+                  }
+                }
+              }
             }
 
             null -> Unit
@@ -2240,6 +2750,26 @@ fun AdminPanelScreen(
       containerColor = MasalaSurface,
       shape = RoundedCornerShape(16.dp)
     )
+  }
+
+  // Daily Update Creator Views Dialog (Superadmin Only — Auto-Hides until 11:50 PM IST)
+  if (isSuperAdmin) {
+    dailyViewsTargetMember?.let { targetStats ->
+      DailyUpdateViewsDialog(
+        memberStats = targetStats,
+        onDismiss = { dailyViewsTargetMember = null },
+        onSaveDailyViews = { views, ratePer1000, isAddition, onDone ->
+          viewModel.updateDailyCreatorViews(
+            memberId = targetStats.member.memberId,
+            views = views,
+            ratePer1000 = ratePer1000,
+            isAddition = isAddition,
+            cycleKey = DailyViewsResetClock.currentCycleKeyIst(),
+            onResult = onDone
+          )
+        }
+      )
+    }
   }
 
   // Edit Main & Category-wise Telegram Channel Links Dialog (Add, Edit Name/Link, or Delete ANY Category + Creator Bot)
@@ -3626,13 +4156,23 @@ private fun UploadVideoDialog(
 }
 
 private enum class AdminSectionTab {
+  OVERVIEW,
+  UPDATE_VIEWS,
   VIDEOS,
   MEMBERS,
   PAYOUTS,
-  NOTIFY,
   STATS,
   SUPPORT,
-  EVENTS
+  NOTIFY,
+  EVENTS,
+  SETTINGS
+}
+
+private enum class CreatorSectionTab {
+  OVERVIEW,
+  VIDEOS,
+  EARNINGS,
+  TOOLS
 }
 
 @Composable

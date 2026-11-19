@@ -489,7 +489,9 @@ class BackendDbClient(
         creditedViews = d.optLong("creditedViews", 0L).coerceAtLeast(0L),
         viewRatePer1000 = safeRate,
         allowedOptions = resolvedOptions,
-        hourlyViews = parsedHourly
+        hourlyViews = parsedHourly,
+        lastViewsUpdateCycleKey = optStringClean(d, "lastViewsUpdateCycleKey", ""),
+        lastViewsUpdatedAtMs = d.optLong("lastViewsUpdatedAtMs", 0L).coerceAtLeast(0L)
       )
     }
 

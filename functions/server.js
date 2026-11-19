@@ -36,6 +36,13 @@ const {
   handlePrivacyPolicyRequest,
   handlePrivacyPolicyPdfRequest,
 } = require("./privacyPolicy");
+const {
+  getWpAutoPosterEnvConfig,
+  convertAndPublishWordPressItem,
+  runWordPressAutoSync,
+  startWordPressAutoPosterScheduler,
+  getWordPressAutoPosterStatus,
+} = require("./wpAutoPoster");
 
 const DATABASE_ID =
   process.env.FIRESTORE_DATABASE_ID ||
@@ -410,6 +417,7 @@ const server = http.createServer(async (req, res) => {
         (process.env.TELEGRAM_API_ID || "").trim() && (process.env.TELEGRAM_API_HASH || "").trim()
       ),
       otpEmailConfigured: isEmailTransportConfigured(),
+      wpAutoPosterConfigured: getWpAutoPosterEnvConfig().enabled,
       mediaQueueDepth,
     };
 
@@ -1080,6 +1088,98 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ==================== WORDPRESS AUTO-VIDEO CONVERTER & TELEGRAM CHANNEL AUTO-POSTER ====================
+  if (
+    pathname === "/wp-autopost/status" ||
+    pathname === "/wp-autopost/sync" ||
+    pathname === "/wp-autopost/webhook"
+  ) {
+    setCorsHeaders(res, "GET, POST, OPTIONS");
+    if (req.method === "OPTIONS") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    const wpCfg = getWpAutoPosterEnvConfig();
+    let parsedBody = {};
+    if (req.method === "POST") {
+      try {
+        parsedBody = await readJsonBody(req);
+      } catch (bodyErr) {
+        sendJson(res, 400, { ok: false, error: `Invalid JSON body: ${bodyErr?.message || "parse error"}` });
+        return;
+      }
+    }
+
+    const suppliedSecret = String(
+      urlObj.searchParams.get("secret") ||
+        urlObj.searchParams.get("key") ||
+        req.headers["x-vidvora-key"] ||
+        req.headers["x-wp-secret"] ||
+        parsedBody?.secret ||
+        ""
+    ).trim();
+
+    if (wpCfg.secret) {
+      const isAuthorized =
+        suppliedSecret === wpCfg.secret || (await verifyAdminMigrationKey(suppliedSecret));
+      if (!isAuthorized) {
+        sendJson(res, 403, {
+          ok: false,
+          error: "Unauthorized. Pass ?secret=YOUR_WP_AUTOPOST_SECRET (or X-WP-Secret header).",
+        });
+        return;
+      }
+    }
+
+    if (pathname === "/wp-autopost/status") {
+      sendJson(res, 200, { ok: true, ...getWordPressAutoPosterStatus() });
+      return;
+    }
+
+    if (pathname === "/wp-autopost/sync") {
+      try {
+        const result = await runWordPressAutoSync({
+          db,
+          publicBaseUrl: resolvePublicHostBaseUrl(req),
+        });
+        sendJson(res, result.ok === false ? 400 : 200, result);
+      } catch (syncErr) {
+        console.error("WP Auto-Poster sync error:", syncErr);
+        sendJson(res, 500, { ok: false, error: syncErr?.message || "WordPress sync failed" });
+      }
+      return;
+    }
+
+    if (pathname === "/wp-autopost/webhook") {
+      if (req.method !== "POST") {
+        sendJson(res, 200, {
+          ok: true,
+          message: "VidVora WordPress Auto-Poster Webhook Active. Send POST JSON with title & videoUrl.",
+        });
+        return;
+      }
+      try {
+        const targetChannels = parsedBody.channelId || parsedBody.channels || wpCfg.channels;
+        const result = await convertAndPublishWordPressItem({
+          db,
+          item: parsedBody,
+          siteUrl: parsedBody.siteUrl || wpCfg.siteUrl,
+          channels: targetChannels,
+          publicBaseUrl: resolvePublicHostBaseUrl(req),
+          uploaderMemberId: wpCfg.uploaderMemberId,
+          uploaderName: parsedBody.uploaderName || wpCfg.uploaderName,
+        });
+        sendJson(res, 200, { ok: true, ...result });
+      } catch (hookErr) {
+        console.error("WP Auto-Poster webhook error:", hookErr);
+        sendJson(res, 500, { ok: false, error: hookErr?.message || "WordPress webhook failed" });
+      }
+      return;
+    }
+  }
+
   res.writeHead(404, { "Content-Type": "text/plain" });
   res.end("Not found");
 });
@@ -1160,4 +1260,8 @@ server.listen(PORT, () => {
       .catch((err) => console.error("PostgreSQL schema init warning:", err?.message || err));
   }
   autoRegisterTelegramWebhook();
+  const bootPublicBase = (process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "")
+    .trim()
+    .replace(/\/+$/, "");
+  startWordPressAutoPosterScheduler({ db, publicBaseUrl: bootPublicBase });
 });

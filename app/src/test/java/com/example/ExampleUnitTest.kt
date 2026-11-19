@@ -1090,4 +1090,270 @@ class ExampleUnitTest {
     assertTrue(promotedAdmin.hasOption(com.example.data.model.MemberOption.MANAGE_MEMBERS))
     assertTrue(promotedAdmin.hasOption(com.example.data.model.MemberOption.MANAGE_PAYOUTS))
   }
+
+  @Test
+  fun dailyViewsResetClock_rollsOverAt1150PmIstAndHidesUpdatedProfiles() {
+    val istFormat = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).apply {
+      timeZone = java.util.TimeZone.getTimeZone("Asia/Kolkata")
+    }
+    fun istMs(ts: String): Long = istFormat.parse(ts)!!.time
+
+    // 11:49:59 PM IST on Nov 19 is still the Nov 19 cycle
+    val beforeReset = istMs("2026-11-19 23:49:59")
+    assertEquals("2026-11-19", com.example.ui.screens.admin.DailyViewsResetClock.currentCycleKeyIst(beforeReset))
+    assertEquals(1_000L, com.example.ui.screens.admin.DailyViewsResetClock.msUntilNextResetIst(beforeReset))
+
+    // Exactly 11:50:00 PM IST on Nov 19 rolls over to the Nov 20 cycle so ALL profiles reappear!
+    val exactReset = istMs("2026-11-19 23:50:00")
+    assertEquals("2026-11-20", com.example.ui.screens.admin.DailyViewsResetClock.currentCycleKeyIst(exactReset))
+    assertEquals(86_400_000L, com.example.ui.screens.admin.DailyViewsResetClock.msUntilNextResetIst(exactReset))
+
+    // Midnight (12:00 AM IST Nov 20) and afternoon (3:30 PM IST Nov 20) share the same Nov 20 cycle
+    val midnightIst = istMs("2026-11-20 00:00:00")
+    val afternoonIst = istMs("2026-11-20 15:30:00")
+    assertEquals("2026-11-20", com.example.ui.screens.admin.DailyViewsResetClock.currentCycleKeyIst(midnightIst))
+    assertEquals("2026-11-20", com.example.ui.screens.admin.DailyViewsResetClock.currentCycleKeyIst(afternoonIst))
+    assertEquals("23h 50m", com.example.ui.screens.admin.DailyViewsResetClock.formatCountdown(
+      com.example.ui.screens.admin.DailyViewsResetClock.msUntilNextResetIst(midnightIst)
+    ))
+
+    // Creator updated at 12:05 AM IST on Nov 20 stays hidden all day until 11:50 PM IST Nov 20
+    val updatedCreator = com.example.data.model.FirestoreMember(
+      memberId = "mem_daily_1",
+      name = "Rohan Creator",
+      lastViewsUpdateCycleKey = "2026-11-20",
+      lastViewsUpdatedAtMs = istMs("2026-11-20 00:05:00")
+    )
+    assertTrue(
+      com.example.ui.screens.admin.DailyViewsResetClock.isUpdatedInCurrentCycle(updatedCreator, "2026-11-20")
+    )
+    // At 11:50:00 PM IST on Nov 20, cycle rolls to Nov 21 -> profile automatically reappears!
+    val nextNightReset = istMs("2026-11-20 23:50:00")
+    val nextCycleKey = com.example.ui.screens.admin.DailyViewsResetClock.currentCycleKeyIst(nextNightReset)
+    assertEquals("2026-11-21", nextCycleKey)
+    org.junit.Assert.assertFalse(
+      com.example.ui.screens.admin.DailyViewsResetClock.isUpdatedInCurrentCycle(updatedCreator, nextCycleKey)
+    )
+  }
+
+  @Test
+  fun adminLifetimeAnalytics_computesLifetimeViewsAndCreatorAdminWithdrawals() {
+    val creator = com.example.data.model.FirestoreMember(
+      memberId = "mem_creator_1",
+      name = "Rohan",
+      role = com.example.data.model.MemberRole.CREATOR,
+      creditedViews = 2500L
+    )
+    val subAdmin = com.example.data.model.FirestoreMember(
+      memberId = "mem_admin_1",
+      name = "Sameer",
+      role = com.example.data.model.MemberRole.ADMIN,
+      creditedViews = 1500L
+    )
+    val memberStats = listOf(
+      com.example.data.model.MemberStats(
+        member = creator,
+        videoCount = 2,
+        totalViews = 20_500L,
+        videos = emptyList(),
+        viewsLast24Hours = 320L
+      ),
+      com.example.data.model.MemberStats(
+        member = subAdmin,
+        videoCount = 1,
+        totalViews = 4_500L,
+        videos = emptyList(),
+        viewsLast24Hours = 180L
+      )
+    )
+    val videos = listOf(
+      com.example.data.model.FirestoreVideo(videoId = "v1", totalViews = 12_000L),
+      com.example.data.model.FirestoreVideo(videoId = "v2", totalViews = 8_500L),
+      com.example.data.model.FirestoreVideo(videoId = "v3", totalViews = 4_500L)
+    )
+    val withdrawals = listOf(
+      com.example.data.model.FirestoreWithdrawalRequest(
+        requestId = "w1",
+        memberId = "mem_creator_1",
+        amount = 1500.0,
+        status = com.example.data.model.WithdrawalStatus.DONE
+      ),
+      com.example.data.model.FirestoreWithdrawalRequest(
+        requestId = "w2",
+        memberId = "mem_admin_1",
+        amount = 2200.0,
+        status = com.example.data.model.WithdrawalStatus.DONE
+      ),
+      com.example.data.model.FirestoreWithdrawalRequest(
+        requestId = "w3",
+        memberId = "mem_creator_1",
+        amount = 800.0,
+        status = com.example.data.model.WithdrawalStatus.PENDING
+      ),
+      com.example.data.model.FirestoreWithdrawalRequest(
+        requestId = "w4",
+        memberId = "mem_admin_1",
+        amount = 600.0,
+        status = com.example.data.model.WithdrawalStatus.PROCESSING
+      ),
+      com.example.data.model.FirestoreWithdrawalRequest(
+        requestId = "w5",
+        memberId = "mem_creator_1",
+        amount = 999.0,
+        status = com.example.data.model.WithdrawalStatus.REJECTED
+      )
+    )
+
+    val analytics = com.example.ui.screens.admin.computeAdminLifetimeAnalytics(
+      videos = videos,
+      memberStatsList = memberStats,
+      withdrawalRequests = withdrawals
+    )
+
+    assertEquals(25_000L, analytics.lifetimeVideoViews)
+    assertEquals(4_000L, analytics.lifetimeCreditedViews)
+    assertEquals(500L, analytics.viewsLast24Hours)
+    assertEquals(3700.0, analytics.lifetimeWithdrawalTotalPaid, 0.001)
+    assertEquals(1500.0, analytics.lifetimeCreatorWithdrawalPaid, 0.001)
+    assertEquals(2200.0, analytics.lifetimeAdminWithdrawalPaid, 0.001)
+    assertEquals(2, analytics.lifetimePaidTransactionCount)
+    assertEquals(1400.0, analytics.pendingOrProcessingAmount, 0.001)
+    assertEquals(2, analytics.pendingOrProcessingCount)
+    assertEquals("1,25,400", com.example.ui.screens.admin.formatIndianCount(125_400L))
+
+    val creatorSummary = com.example.data.model.EarningSummary(
+      totalEarning = 3800.0,
+      pendingOrProcessingAmount = 800.0,
+      paidAmount = 1500.0,
+      availableBalance = 1500.0
+    )
+    val creatorAnalytics = com.example.ui.screens.admin.computeCreatorLifetimeAnalytics(
+      creditedViews = 20_000L,
+      viewRatePer1000 = 190.0,
+      summary = creatorSummary,
+      withdrawalRequests = withdrawals.filter { it.memberId == "mem_creator_1" }
+    )
+    assertEquals(20_000L, creatorAnalytics.lifetimeCreditedViews)
+    assertEquals(190.0, creatorAnalytics.viewRatePer1000, 0.001)
+    assertEquals(1500.0, creatorAnalytics.lifetimeWithdrawalPaid, 0.001)
+    assertEquals(1, creatorAnalytics.paidTransactionCount)
+    assertEquals(800.0, creatorAnalytics.pendingOrProcessingAmount, 0.001)
+    assertEquals(1500.0, creatorAnalytics.availableBalance, 0.001)
+  }
+
+  @Test
+  fun memberSessionPayload_roundTripsCreatorAndDelegatedAdminOfflinePersistence() {
+    val creator = com.example.data.model.FirestoreMember(
+      memberId = "mem_creator_99",
+      name = "Rakesh & Sons (Creator)",
+      emailOrPhone = "rakesh+1@gmail.com",
+      passkey = "pass=123&ok",
+      role = com.example.data.model.MemberRole.CREATOR,
+      isActive = true,
+      totalEarning = 4250.75,
+      creditedViews = 22_500L,
+      viewRatePer1000 = 210.0,
+      allowedOptions = listOf(
+        com.example.data.model.MemberOption.UPLOAD_VIDEOS.key,
+        com.example.data.model.MemberOption.VIEW_EARNINGS.key,
+        com.example.data.model.MemberOption.REQUEST_WITHDRAWAL.key
+      ),
+      lastViewsUpdateCycleKey = "2026-11-19",
+      lastViewsUpdatedAtMs = 1_795_000_000_000L
+    )
+
+    val encoded = com.example.data.repository.FirebaseAuthAdminRepository.encodeMemberSessionPayload(creator)
+    val decoded = com.example.data.repository.FirebaseAuthAdminRepository.decodeMemberSessionPayload(encoded)
+    assertNotNull(decoded)
+    assertEquals(creator.memberId, decoded!!.memberId)
+    assertEquals(creator.name, decoded.name)
+    assertEquals(creator.emailOrPhone, decoded.emailOrPhone)
+    assertEquals(creator.passkey, decoded.passkey)
+    assertEquals(creator.role, decoded.role)
+    assertEquals(true, decoded.isActive)
+    assertEquals(creator.totalEarning, decoded.totalEarning, 0.001)
+    assertEquals(creator.creditedViews, decoded.creditedViews)
+    assertEquals(creator.viewRatePer1000, decoded.viewRatePer1000, 0.001)
+    assertEquals(creator.allowedOptions, decoded.allowedOptions)
+    assertEquals(creator.lastViewsUpdateCycleKey, decoded.lastViewsUpdateCycleKey)
+    assertEquals(creator.lastViewsUpdatedAtMs, decoded.lastViewsUpdatedAtMs)
+
+    org.junit.Assert.assertNull(
+      com.example.data.repository.FirebaseAuthAdminRepository.decodeMemberSessionPayload("")
+    )
+  }
+
+  @Test
+  fun adminSupportAlerts_notifyLiveNewMessagesAndForceNotifyUnreadOnLogin() {
+    val t1 = com.google.firebase.Timestamp(1_795_000_100L, 0)
+    val t2 = com.google.firebase.Timestamp(1_795_000_200L, 0)
+    val t3 = com.google.firebase.Timestamp(1_795_000_300L, 0)
+
+    val chatCreator = com.example.data.model.FirestoreSupportChat(
+      chatId = "creator_1",
+      userName = "Aman Creator",
+      lastMessage = "Sir mera payment check kar dijiye",
+      lastSenderRole = com.example.data.model.SupportSenderRole.USER,
+      lastMessageAt = t1,
+      unreadByAdminCount = 1L
+    )
+    val chatUserRead = com.example.data.model.FirestoreSupportChat(
+      chatId = "user_read",
+      userName = "Viewer",
+      lastMessage = "Thanks!",
+      lastSenderRole = com.example.data.model.SupportSenderRole.ADMIN,
+      lastMessageAt = t1,
+      unreadByAdminCount = 0L
+    )
+
+    // 1. Live mode: brand-new unread message triggers immediately; read chat ignored
+    val liveFirst = com.example.notifications.AppNotificationHelper.selectSupportChatsToNotify(
+      chats = listOf(chatCreator, chatUserRead),
+      previouslyNotifiedSignatures = emptySet(),
+      forceNotifyAllUnreadOnLogin = false
+    )
+    assertEquals(1, liveFirst.chatsToNotify.size)
+    assertEquals("creator_1", liveFirst.chatsToNotify[0].chatId)
+
+    // 2. Duplicate poll with same unread message must NOT re-notify
+    val liveDuplicate = com.example.notifications.AppNotificationHelper.selectSupportChatsToNotify(
+      chats = listOf(chatCreator, chatUserRead),
+      previouslyNotifiedSignatures = liveFirst.updatedSignatures,
+      forceNotifyAllUnreadOnLogin = false
+    )
+    assertEquals(0, liveDuplicate.chatsToNotify.size)
+
+    // 3. Creator sends a 2nd message -> signature changes -> notifies immediately
+    val chatCreatorSecondMsg = chatCreator.copy(
+      lastMessage = "Please reply fast",
+      lastMessageAt = t2,
+      unreadByAdminCount = 2L
+    )
+    val liveSecond = com.example.notifications.AppNotificationHelper.selectSupportChatsToNotify(
+      chats = listOf(chatCreatorSecondMsg, chatUserRead),
+      previouslyNotifiedSignatures = liveDuplicate.updatedSignatures,
+      forceNotifyAllUnreadOnLogin = false
+    )
+    assertEquals(1, liveSecond.chatsToNotify.size)
+    assertEquals("Please reply fast", liveSecond.chatsToNotify[0].lastMessage)
+
+    // 4. Login mode (forceNotifyAllUnreadOnLogin = true): notifies ALL unread chats immediately even if seen earlier
+    val chatNewUser = com.example.data.model.FirestoreSupportChat(
+      chatId = "user_2",
+      userName = "Riya",
+      lastMessage = "Video link open nahi ho raha",
+      lastSenderRole = com.example.data.model.SupportSenderRole.USER,
+      lastMessageAt = t3,
+      unreadByAdminCount = 1L
+    )
+    val onLoginDecision = com.example.notifications.AppNotificationHelper.selectSupportChatsToNotify(
+      chats = listOf(chatCreatorSecondMsg, chatNewUser, chatUserRead),
+      previouslyNotifiedSignatures = liveSecond.updatedSignatures,
+      forceNotifyAllUnreadOnLogin = true
+    )
+    assertEquals(2, onLoginDecision.chatsToNotify.size)
+    // Sorted newest first
+    assertEquals("user_2", onLoginDecision.chatsToNotify[0].chatId)
+    assertEquals("creator_1", onLoginDecision.chatsToNotify[1].chatId)
+  }
 }

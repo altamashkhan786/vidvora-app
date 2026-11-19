@@ -63,6 +63,8 @@ class MainActivity : ComponentActivity() {
   private lateinit var consentManager: ConsentManager
   private lateinit var adManager: AdManager
   private val pendingDeepLinkState = mutableStateOf<String?>(null)
+  private val pendingOpenAdminSupportState = mutableStateOf<Pair<Int, String?>?>(null)
+  private var supportNotificationRequestCounter = 0
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
@@ -102,6 +104,7 @@ class MainActivity : ComponentActivity() {
       adManager.appOpenAdManager.suppressNextColdLaunchAd()
     }
     pendingDeepLinkState.value = initialDeepLink
+    handleAdminSupportIntent(intent)
 
     setContent {
       MyApplicationTheme {
@@ -128,6 +131,8 @@ class MainActivity : ComponentActivity() {
             adminAuthRepository = firebaseAuthAdminRepository,
             deepLinkToken = pendingDeepLinkState.value,
             onDeepLinkConsumed = { pendingDeepLinkState.value = null },
+            pendingOpenAdminSupport = pendingOpenAdminSupportState.value,
+            onOpenAdminSupportConsumed = { pendingOpenAdminSupportState.value = null },
             adManager = adManager
           )
           VideoShareModeDialogHost()
@@ -145,6 +150,26 @@ class MainActivity : ComponentActivity() {
         adManager.appOpenAdManager.suppressNextColdLaunchAd()
       }
       pendingDeepLinkState.value = extracted
+    }
+    handleAdminSupportIntent(intent)
+  }
+
+  private fun handleAdminSupportIntent(intent: Intent?) {
+    val openSupport = intent?.getBooleanExtra(
+      com.example.notifications.AppNotificationHelper.EXTRA_OPEN_ADMIN_SUPPORT,
+      false
+    ) == true
+    if (openSupport) {
+      if (::adManager.isInitialized) {
+        adManager.appOpenAdManager.suppressNextColdLaunchAd()
+      }
+      val chatId = intent?.getStringExtra(
+        com.example.notifications.AppNotificationHelper.EXTRA_SUPPORT_CHAT_ID
+      )?.trim()?.takeIf { it.isNotBlank() }
+      supportNotificationRequestCounter += 1
+      pendingOpenAdminSupportState.value = supportNotificationRequestCounter to chatId
+      intent?.removeExtra(com.example.notifications.AppNotificationHelper.EXTRA_OPEN_ADMIN_SUPPORT)
+      intent?.removeExtra(com.example.notifications.AppNotificationHelper.EXTRA_SUPPORT_CHAT_ID)
     }
   }
 
@@ -201,6 +226,8 @@ fun VidVoraApp(
   adminAuthRepository: FirebaseAuthAdminRepository,
   deepLinkToken: String?,
   onDeepLinkConsumed: () -> Unit = {},
+  pendingOpenAdminSupport: Pair<Int, String?>? = null,
+  onOpenAdminSupportConsumed: () -> Unit = {},
   adManager: AdManager? = null
 ) {
   val context = androidx.compose.ui.platform.LocalContext.current
@@ -209,6 +236,7 @@ fun VidVoraApp(
   var returnScreenAfterPlayer by remember { mutableStateOf<AppScreen>(AppScreen.Home) }
   var isOpeningDeepLink by remember { mutableStateOf(!deepLinkToken.isNullOrBlank()) }
   var activeDeepLinkRequestId by remember { mutableIntStateOf(0) }
+  var activeOpenSupportRequest by remember { mutableStateOf<Pair<Int, String?>?>(null) }
 
   // Keep ad manager updated on player status to strictly prevent ads during video playback
   LaunchedEffect(currentScreen) {
@@ -225,6 +253,48 @@ fun VidVoraApp(
 
   LaunchedEffect(Unit) {
     adminAuthRepository.restorePersistedSession(firestoreVideoRepository)
+  }
+
+  // Global Admin Support Message Alert Watcher:
+  // Notifies Superadmin & Support-enabled Delegated Admins immediately upon login AND live whenever
+  // any Creator or User sends a new support message (regardless of which screen Admin is viewing).
+  val isAdminAuthenticated by adminAuthRepository.isAdminAuthenticated.collectAsState()
+  val adminRole by adminAuthRepository.adminRole.collectAsState()
+  val authMember by adminAuthRepository.currentMember.collectAsState()
+  val liveMember by adminViewModel.liveCurrentMember.collectAsState()
+  val loginEventCounter by adminAuthRepository.loginEventCounter.collectAsState()
+  val activeMemberForAlerts = liveMember ?: authMember
+  val canReceiveAdminSupportAlerts = isAdminAuthenticated && (
+    (activeMemberForAlerts == null && (adminRole == "admin" || adminRole == "superadmin" || adminRole == "admin (dev)")) ||
+      (activeMemberForAlerts != null &&
+        activeMemberForAlerts.isActive &&
+        activeMemberForAlerts.isDelegatedAdmin() &&
+        activeMemberForAlerts.hasOption(com.example.data.model.MemberOption.MANAGE_SUPPORT_CHAT))
+    )
+
+  LaunchedEffect(canReceiveAdminSupportAlerts, loginEventCounter) {
+    if (!canReceiveAdminSupportAlerts) return@LaunchedEffect
+    var handledInitialLoginBurst = false
+    firestoreVideoRepository.observeAllSupportChats().collect { chats ->
+      val shouldForceOnLogin = !handledInitialLoginBurst
+      com.example.notifications.AppNotificationHelper.notifyAdminSupportMessages(
+        context = context,
+        chats = chats,
+        forceNotifyUnreadOnLogin = shouldForceOnLogin
+      )
+      if (chats.isNotEmpty() && com.example.notifications.AppNotificationHelper.hasNotificationPermission(context)) {
+        handledInitialLoginBurst = true
+      }
+    }
+  }
+
+  // Route taps on Admin Support notifications directly into Admin Panel -> Support tab
+  LaunchedEffect(pendingOpenAdminSupport) {
+    if (pendingOpenAdminSupport != null) {
+      activeOpenSupportRequest = pendingOpenAdminSupport
+      currentScreen = AppScreen.Admin
+      onOpenAdminSupportConsumed()
+    }
   }
 
   // Handle incoming deep link on launch or onNewIntent (monetized with quick Pre-Play Ad check)
@@ -304,6 +374,8 @@ fun VidVoraApp(
       is AppScreen.Admin -> {
         AdminPanelScreen(
           viewModel = adminViewModel,
+          openSupportRequest = activeOpenSupportRequest,
+          onOpenSupportRequestConsumed = { activeOpenSupportRequest = null },
           onNavigateBack = {
             currentScreen = AppScreen.Home
           },

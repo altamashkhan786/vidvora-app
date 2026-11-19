@@ -188,7 +188,9 @@ data class FirestoreMember(
   val creditedViews: Long = 0L,
   val viewRatePer1000: Double = 190.0,
   val allowedOptions: List<String> = MemberOption.defaultKeysForRole(MemberRole.CREATOR),
-  val hourlyViews: Map<String, Long> = emptyMap()
+  val hourlyViews: Map<String, Long> = emptyMap(),
+  val lastViewsUpdateCycleKey: String = "",
+  val lastViewsUpdatedAtMs: Long = 0L
 ) {
   fun isPasskeyMatch(inputKey: String): Boolean {
     return isActive && passkey.trim().equals(inputKey.trim(), ignoreCase = false)

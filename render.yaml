@@ -44,4 +44,16 @@ services:
         sync: false
       - key: OTP_EMAIL_WEBHOOK_URL
         sync: false
+      - key: WP_SITE_URL
+        sync: false
+      - key: WP_TELEGRAM_CHANNEL_ID
+        sync: false
+      - key: WP_AUTOPOST_SECRET
+        sync: false
+      - key: WP_POLL_INTERVAL_SECONDS
+        value: "300"
+      - key: WP_MAX_POSTS_PER_RUN
+        value: "3"
+      - key: WP_UPLOADER_NAME
+        value: "VidVora Admin"
 
