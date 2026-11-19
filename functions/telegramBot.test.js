@@ -1999,6 +1999,274 @@ test("handlePrivacyPolicyRequest and handlePrivacyPolicyPdfRequest serve Play St
   assert.equal(pdfBuf.subarray(0, 8).toString("ascii"), "%PDF-1.4");
 });
 
+test("handleStreamPublicVideo streams HTTP 206 Range directly from Telegram without full download and caches getFile URL", async () => {
+  const { PassThrough, Readable } = require("stream");
+  const { handleStreamPublicVideo, signStreamTarget } = require("./telegramBot");
+
+  const fakeVideoId = `vid_direct_206_${Date.now()}`;
+  const fullPayload = Buffer.from("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789");
+  const secret = "fast-stream-secret";
+  const sig = signStreamTarget(fakeVideoId, "video", secret);
+
+  const mockDb = {
+    collection: (name) => {
+      if (name === "appConfig") {
+        return {
+          doc: () => ({
+            get: async () => ({ exists: true, data: () => ({ botToken: "999:FASTTOKEN" }) }),
+          }),
+        };
+      }
+      if (name === "videos") {
+        return {
+          doc: (id) => ({
+            get: async () =>
+              id === fakeVideoId
+                ? {
+                    exists: true,
+                    data: () => ({
+                      videoId: fakeVideoId,
+                      isActive: true,
+                      tgFileId: `tg_fast_206_${Date.now()}`,
+                    }),
+                  }
+                : { exists: false },
+          }),
+        };
+      }
+      return { doc: () => ({ get: async () => ({ exists: false }) }) };
+    },
+  };
+
+  let getFileCalls = 0;
+  let rangeFetchCount = 0;
+  const origFetch = global.fetch;
+  global.fetch = async (url, init = {}) => {
+    if (String(url).includes("/getFile")) {
+      getFileCalls += 1;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          result: { file_path: "videos/direct_206.mp4", file_size: fullPayload.length },
+        }),
+      };
+    }
+    if (String(url).includes("/file/bot")) {
+      rangeFetchCount += 1;
+      const range = String(init?.headers?.Range || "");
+      const m = range.match(/^bytes=(\d+)-(\d+)$/);
+      assert.ok(m, `Expected Range header, got: ${range}`);
+      const start = parseInt(m[1], 10);
+      const end = parseInt(m[2], 10);
+      const slice = fullPayload.subarray(start, end + 1);
+      return {
+        ok: true,
+        status: 206,
+        headers: new Map([
+          ["content-type", "application/octet-stream"],
+          ["content-range", `bytes ${start}-${end}/${fullPayload.length}`],
+          ["content-length", String(slice.length)],
+        ]),
+        body: Readable.from([slice]),
+      };
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  const makeMockStreamRes = () => {
+    const stream = new PassThrough();
+    const chunks = [];
+    let statusCode = 0;
+    let headers = {};
+    const done = new Promise((resolve) => {
+      stream.on("data", (c) => chunks.push(c));
+      stream.on("end", () => resolve({ statusCode, headers, body: Buffer.concat(chunks) }));
+      stream.on("finish", () => {
+        if (!stream.readableEnded) stream.end();
+      });
+    });
+    stream.writeHead = (code, hdrs) => {
+      statusCode = code;
+      headers = hdrs || {};
+    };
+    const origEnd = stream.end.bind(stream);
+    stream.end = (chunk, ...rest) => {
+      if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      return origEnd(...rest);
+    };
+    return { res: stream, done };
+  };
+
+  try {
+    const req1 = makeMockStreamRes();
+    await handleStreamPublicVideo({
+      videoId: fakeVideoId,
+      kind: "video",
+      sig,
+      method: "GET",
+      rangeHeader: "bytes=0-4",
+      res: req1.res,
+      db: mockDb,
+      storage: null,
+      playbackSecret: secret,
+    });
+    const r1 = await req1.done;
+    assert.equal(r1.statusCode, 206);
+    assert.equal(r1.headers["Content-Type"], "video/mp4");
+    assert.equal(r1.headers["Content-Range"], `bytes 0-4/${fullPayload.length}`);
+    assert.equal(r1.headers["Content-Length"], 5);
+    assert.equal(r1.body.toString(), "ABCDE");
+
+    // Second range probe should reuse cached getFile URL (getFileCalls stays 1!)
+    const req2 = makeMockStreamRes();
+    await handleStreamPublicVideo({
+      videoId: fakeVideoId,
+      kind: "video",
+      sig,
+      method: "GET",
+      rangeHeader: "bytes=26-30",
+      res: req2.res,
+      db: mockDb,
+      storage: null,
+      playbackSecret: secret,
+    });
+    const r2 = await req2.done;
+    assert.equal(r2.statusCode, 206);
+    assert.equal(r2.body.toString(), "01234");
+    assert.equal(getFileCalls, 1);
+    assert.equal(rangeFetchCount, 2);
+  } finally {
+    global.fetch = origFetch;
+  }
+});
+
+test("handleTelegramUpdate text fallback disables Telegram web page preview so generic VidVora OG banner never appears", async () => {
+  const { handleTelegramUpdate, hashToken } = require("./telegramBot");
+
+  const srcCode = "GM-NOPREVIEW1";
+  const srcHash = hashToken(srcCode);
+  const store = new Map([
+    [
+      "appConfig/telegramBot",
+      {
+        botToken: "123:TEST",
+      },
+    ],
+    [
+      "members/mem_noprev",
+      {
+        memberId: "mem_noprev",
+        name: "Creator Clean",
+        role: "CREATOR",
+        isActive: true,
+      },
+    ],
+    [
+      "telegramBotSessions/900123",
+      {
+        telegramUserId: "900123",
+        role: "CREATOR",
+        memberId: "mem_noprev",
+        memberName: "Creator Clean",
+        uploadCount: 0,
+      },
+    ],
+    [
+      "accessLinks/link_src_1",
+      {
+        linkId: "link_src_1",
+        videoId: "vid_src_1",
+        tokenHash: srcHash,
+        isActive: true,
+      },
+    ],
+    [
+      "videos/vid_src_1",
+      {
+        videoId: "vid_src_1",
+        title: "Clean Fallback Test",
+        storagePath: "https://vidvora-share-bot.onrender.com/streamPublicVideo?videoId=vid_src_1&sig=abc",
+        thumbnailPath: null,
+        isActive: true,
+      },
+    ],
+  ]);
+
+  const mockDb = {
+    collection: (col) => {
+      const makeQuery = (filters = []) => ({
+        where: (field, op, val) => makeQuery([...filters, { field, val }]),
+        limit: () => makeQuery(filters),
+        get: async () => {
+          const matches = [];
+          for (const [k, v] of store.entries()) {
+            if (k.startsWith(`${col}/`) && filters.every((f) => v[f.field] === f.val)) {
+              matches.push({ exists: true, id: k.split("/")[1], data: () => v });
+            }
+          }
+          return { empty: matches.length === 0, docs: matches };
+        },
+      });
+      return {
+        doc: (id) => ({
+          get: async () => {
+            const v = store.get(`${col}/${id}`);
+            return v ? { exists: true, id, data: () => v } : { exists: false, id };
+          },
+          set: async (data, opts) => {
+            const prev = opts?.merge ? store.get(`${col}/${id}`) || {} : {};
+            store.set(`${col}/${id}`, { ...prev, ...data });
+          },
+        }),
+        where: (field, op, val) => makeQuery([{ field, val }]),
+      };
+    },
+  };
+
+  const editPayloads = [];
+  const origFetch = global.fetch;
+  global.fetch = async (url, init = {}) => {
+    const urlStr = String(url);
+    const body = init.body ? JSON.parse(init.body) : {};
+    if (urlStr.endsWith("/sendMessage")) {
+      return { ok: true, status: 200, json: async () => ({ ok: true, result: { message_id: 777 } }) };
+    }
+    if (urlStr.endsWith("/editMessageText")) {
+      editPayloads.push(body);
+      return { ok: true, status: 200, json: async () => ({ ok: true, result: { message_id: 777 } }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true, result: true }) };
+  };
+
+  try {
+    const result = await handleTelegramUpdate({
+      update: {
+        message: {
+          message_id: 101,
+          chat: { id: 900123 },
+          from: { id: 900123 },
+          text: `https://vidvora-share-bot.onrender.com/share?link=${srcCode}`,
+        },
+      },
+      db: mockDb,
+      storage: null,
+      botToken: "123:TEST",
+      functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+      playbackSecret: "sec",
+    });
+
+    assert.equal(result.ok, true);
+    assert.ok(editPayloads.length >= 1);
+    const finalEdit = editPayloads[editPayloads.length - 1];
+    assert.equal(finalEdit.disable_web_page_preview, true);
+    assert.deepEqual(finalEdit.link_preview_options, { is_disabled: true });
+  } finally {
+    global.fetch = origFetch;
+  }
+});
+
 
 
 

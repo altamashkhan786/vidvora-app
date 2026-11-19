@@ -583,25 +583,31 @@ const server = http.createServer(async (req, res) => {
         }
 
         const uploadedBy = String(vData.uploadedBy || "admin");
-        const didCredit = await creditVideoViewAndCreator({
-          targetDb: db,
-          videoId,
-          uploadedBy,
-          currentMemberId,
-        });
-
+        const isSelfCreatorView =
+          Boolean(currentMemberId) &&
+          String(currentMemberId).trim() === uploadedBy;
         const currentViews = Number(vData.totalViews || 0) || 0;
         const serializedVideo = serializeForRestApi({
           ...vData,
           videoId,
-          totalViews: didCredit ? currentViews + 1 : currentViews,
+          totalViews: isSelfCreatorView ? currentViews : currentViews + 1,
         });
 
+        // Respond immediately for fast video start; persist view/creator earnings credit asynchronously
         sendJson(res, 200, {
           ok: true,
           backend: activeDbBackend,
           status: "success",
           video: serializedVideo,
+        });
+
+        void creditVideoViewAndCreator({
+          targetDb: db,
+          videoId,
+          uploadedBy,
+          currentMemberId,
+        }).catch((creditErr) => {
+          console.warn("Background creditVideoViewAndCreator error:", creditErr?.message || creditErr);
         });
       } catch (err) {
         console.error("API /api/resolve-video error:", err);

@@ -451,7 +451,8 @@ async function postConvertedVideoToChannel({
     chat_id: channelId,
     text: caption,
     parse_mode: "HTML",
-    disable_web_page_preview: false,
+    disable_web_page_preview: true,
+    link_preview_options: { is_disabled: true },
     reply_markup: replyMarkup,
   });
   if (!msgRes?.ok) {

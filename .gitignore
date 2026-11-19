@@ -18,5 +18,6 @@ local.properties
 debug.keystore
 *-debug.log
 node_modules/
+release/*.apk
 
 

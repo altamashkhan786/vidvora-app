@@ -306,8 +306,8 @@ fun PlayerScreen(
   val exoPlayer = remember(resolvedPlaybackUri, useSoftwareDecoderFallback, retryTrigger) {
     val httpDataSourceFactory = DefaultHttpDataSource.Factory()
       .setAllowCrossProtocolRedirects(true)
-      .setConnectTimeoutMs(45000)
-      .setReadTimeoutMs(45000)
+      .setConnectTimeoutMs(15_000)
+      .setReadTimeoutMs(25_000)
       .setUserAgent("VidVoraPlayer/1.0 (Android)")
     val dataSourceFactory = DefaultDataSource.Factory(context, httpDataSourceFactory)
 
@@ -341,10 +341,10 @@ fun PlayerScreen(
 
     val loadControl = DefaultLoadControl.Builder()
       .setBufferDurationsMs(
-        /* minBufferMs = */ 15_000,
-        /* maxBufferMs = */ 50_000,
-        /* bufferForPlaybackMs = */ 350,
-        /* bufferForPlaybackAfterRebufferMs = */ 1_200
+        /* minBufferMs = */ 8_000,
+        /* maxBufferMs = */ 30_000,
+        /* bufferForPlaybackMs = */ 150,
+        /* bufferForPlaybackAfterRebufferMs = */ 600
       )
       .setPrioritizeTimeOverSizeThresholds(true)
       .build()

@@ -220,6 +220,7 @@ fun AdminPanelScreen(
   val creatorEvents by viewModel.creatorEvents.collectAsState()
   val activeCreatorEvents by viewModel.activeCreatorEvents.collectAsState()
   val appInstalls by viewModel.appInstalls.collectAsState()
+  val emulatorInstallsCount by viewModel.emulatorInstallsCount.collectAsState()
   val appInstallStats by viewModel.appInstallStats.collectAsState()
   val inactivityWindowDays by viewModel.inactivityWindowDays.collectAsState()
 
@@ -2237,6 +2238,10 @@ fun AdminPanelScreen(
                 },
                 onDeleteInstallRecord = { installId ->
                   viewModel.deleteAppInstallRecord(installId)
+                },
+                emulatorRecordsCount = emulatorInstallsCount,
+                onCleanupEmulatorRecords = {
+                  viewModel.cleanupEmulatorInstallRecords()
                 }
               )
             }

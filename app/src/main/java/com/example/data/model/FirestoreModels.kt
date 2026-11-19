@@ -411,6 +411,29 @@ data class FirestoreSupportMessage(
   val createdAt: Timestamp = Timestamp.now()
 )
 
+fun isEmulatorDeviceLabel(deviceLabel: String): Boolean {
+  val norm = deviceLabel.trim().lowercase(Locale.US)
+  if (norm.isBlank()) return false
+  return norm.contains("sdk_gphone") ||
+    norm.contains("gphone64") ||
+    norm.contains("android sdk built for") ||
+    norm.contains("emulator") ||
+    norm.contains("goldfish") ||
+    norm.contains("ranchu") ||
+    norm.contains("genymotion") ||
+    norm.contains("bluestacks") ||
+    norm.contains("noxplayer") ||
+    norm.contains("vbox86") ||
+    norm.contains("cuttlefish") ||
+    norm.contains("aosp on ") ||
+    norm == "unknown generic" ||
+    norm == "google sdk"
+}
+
+fun filterRealAppInstalls(installs: List<FirestoreAppInstall>): List<FirestoreAppInstall> {
+  return installs.filterNot { isEmulatorDeviceLabel(it.deviceLabel) }
+}
+
 fun isEstimatedUninstalled(
   install: FirestoreAppInstall,
   inactiveDaysThreshold: Int = 14,
@@ -428,16 +451,17 @@ fun computeAppInstallStats(
   inactiveDaysThreshold: Int = 14,
   nowMs: Long = System.currentTimeMillis()
 ): AppInstallStats {
-  val totalDownloads = installs.size
+  val realInstalls = filterRealAppInstalls(installs)
+  val totalDownloads = realInstalls.size
   val safeDays = inactiveDaysThreshold.coerceAtLeast(1)
   val dayMs = 86_400_000L
-  val uninstalledCount = installs.count { isEstimatedUninstalled(it, safeDays, nowMs) }
+  val uninstalledCount = realInstalls.count { isEstimatedUninstalled(it, safeDays, nowMs) }
   val currentlyInstalledCount = (totalDownloads - uninstalledCount).coerceAtLeast(0)
-  val downloadsToday = installs.count {
+  val downloadsToday = realInstalls.count {
     val age = nowMs - it.firstInstalledAt.toDate().time
     age in 0L..dayMs
   }
-  val activeLast24hCount = installs.count {
+  val activeLast24hCount = realInstalls.count {
     !it.isMarkedUninstalled && (nowMs - it.lastSeenAt.toDate().time) in 0L..dayMs
   }
   val retentionPercent = if (totalDownloads > 0) {

@@ -1356,4 +1356,58 @@ class ExampleUnitTest {
     assertEquals("user_2", onLoginDecision.chatsToNotify[0].chatId)
     assertEquals("creator_1", onLoginDecision.chatsToNotify[1].chatId)
   }
+
+  @Test
+  fun appInstallTracking_excludesEmulatorsFromDeviceListAndStats() {
+    assertTrue(com.example.data.model.isEmulatorDeviceLabel("Google sdk_gphone64_arm64"))
+    assertTrue(com.example.data.model.isEmulatorDeviceLabel("Android SDK built for x86"))
+    assertTrue(com.example.data.model.isEmulatorDeviceLabel("Genymotion Pixel"))
+    assertTrue(com.example.data.model.isEmulatorDeviceLabel("Google Emulator"))
+    org.junit.Assert.assertFalse(com.example.data.model.isEmulatorDeviceLabel("Samsung SM-M326B"))
+    org.junit.Assert.assertFalse(com.example.data.model.isEmulatorDeviceLabel("Vivo V2060"))
+    org.junit.Assert.assertFalse(com.example.data.model.isEmulatorDeviceLabel("Google Pixel 8"))
+
+    val nowMs = 1_760_000_000_000L
+    val recentTs = com.google.firebase.Timestamp(java.util.Date(nowMs - 3_600_000L))
+    val installs = listOf(
+      com.example.data.model.FirestoreAppInstall(
+        installId = "dev_samsung_1",
+        firstInstalledAt = recentTs,
+        lastSeenAt = recentTs,
+        appVersion = "1.7",
+        deviceLabel = "Samsung SM-M326B",
+        sessionCount = 3L
+      ),
+      com.example.data.model.FirestoreAppInstall(
+        installId = "inst_emu_1",
+        firstInstalledAt = recentTs,
+        lastSeenAt = recentTs,
+        appVersion = "1.6",
+        deviceLabel = "Google sdk_gphone64_arm64",
+        sessionCount = 1L
+      ),
+      com.example.data.model.FirestoreAppInstall(
+        installId = "dev_vivo_1",
+        firstInstalledAt = recentTs,
+        lastSeenAt = recentTs,
+        appVersion = "1.7",
+        deviceLabel = "Vivo V2060",
+        sessionCount = 4L
+      )
+    )
+
+    val realOnly = com.example.data.model.filterRealAppInstalls(installs)
+    assertEquals(2, realOnly.size)
+    assertTrue(realOnly.none { it.installId == "inst_emu_1" })
+
+    val stats = com.example.data.model.computeAppInstallStats(
+      installs = installs,
+      inactiveDaysThreshold = 14,
+      nowMs = nowMs
+    )
+    assertEquals(2, stats.totalDownloads)
+    assertEquals(2, stats.currentlyInstalledCount)
+    assertEquals(0, stats.uninstalledCount)
+    assertEquals(100, stats.retentionPercent)
+  }
 }

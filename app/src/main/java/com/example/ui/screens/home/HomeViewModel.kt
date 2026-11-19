@@ -17,6 +17,7 @@ import com.example.data.model.VideoToken
 import com.example.data.repository.FirebaseAuthAdminRepository
 import com.example.data.repository.FirestoreVideoRepository
 import com.example.data.repository.VideoRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -191,8 +192,10 @@ class HomeViewModel(
         when (firestoreResult) {
           is TokenValidationResult.Success -> {
             _isLoading.value = false
-            localVideoRepository.recordWatchHistory(firestoreResult.video)
             onSuccess(firestoreResult.video)
+            viewModelScope.launch(Dispatchers.IO) {
+              runCatching { localVideoRepository.recordWatchHistory(firestoreResult.video) }
+            }
             return@launch
           }
           is TokenValidationResult.TokenDeactivated -> {
@@ -219,8 +222,10 @@ class HomeViewModel(
         ) {
           is TokenValidationResult.Success -> {
             _isLoading.value = false
-            localVideoRepository.recordWatchHistory(localResult.video)
             onSuccess(localResult.video)
+            viewModelScope.launch(Dispatchers.IO) {
+              runCatching { localVideoRepository.recordWatchHistory(localResult.video) }
+            }
           }
           is TokenValidationResult.TokenNotFound -> {
             _isLoading.value = false

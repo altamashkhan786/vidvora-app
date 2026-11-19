@@ -25,6 +25,8 @@ import com.example.data.model.TelegramCategoryItem
 import com.example.data.model.TelegramConfig
 import com.example.data.model.WithdrawalStatus
 import com.example.data.model.computeAppInstallStats
+import com.example.data.model.filterRealAppInstalls
+import com.example.data.model.isEmulatorDeviceLabel
 import com.example.data.repository.FirebaseAuthAdminRepository
 import com.example.data.repository.FirestoreVideoRepository
 import com.example.data.repository.VideoCreationResult
@@ -479,10 +481,20 @@ class AdminViewModel(
     .map { list -> list.filter { it.isActive } }
     .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-  val appInstalls: StateFlow<List<FirestoreAppInstall>> =
+  private val rawAppInstalls: StateFlow<List<FirestoreAppInstall>> =
     firestoreVideoRepository.getAllAppInstallsFlow()
       .catch { emit(emptyList()) }
       .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+  val appInstalls: StateFlow<List<FirestoreAppInstall>> =
+    rawAppInstalls
+      .map { list -> filterRealAppInstalls(list) }
+      .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+  val emulatorInstallsCount: StateFlow<Int> =
+    rawAppInstalls
+      .map { list -> list.count { isEmulatorDeviceLabel(it.deviceLabel) } }
+      .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
   val supportChats: StateFlow<List<FirestoreSupportChat>> =
     firestoreVideoRepository.observeAllSupportChats()
@@ -668,6 +680,30 @@ class AdminViewModel(
         _toastMessage.value = "Install record removed"
       } else {
         _toastMessage.value = "Failed to remove install record"
+      }
+    }
+  }
+
+  fun cleanupEmulatorInstallRecords() {
+    if (!canPerform(MemberOption.VIEW_APP_STATS)) {
+      _toastMessage.value = "You do not have permission to clean up install records."
+      return
+    }
+    val emulatorIds = rawAppInstalls.value
+      .filter { isEmulatorDeviceLabel(it.deviceLabel) }
+      .map { it.installId }
+      .filter { it.isNotBlank() }
+    if (emulatorIds.isEmpty()) {
+      _toastMessage.value = "No emulator test records found"
+      return
+    }
+    viewModelScope.launch {
+      val result = firestoreVideoRepository.deleteAppInstallRecordsBatch(emulatorIds)
+      if (result.isSuccess) {
+        val removed = result.getOrDefault(0)
+        _toastMessage.value = "Cleaned $removed emulator test record${if (removed == 1) "" else "s"}"
+      } else {
+        _toastMessage.value = "Failed to clean emulator records"
       }
     }
   }

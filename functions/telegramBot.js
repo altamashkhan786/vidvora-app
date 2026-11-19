@@ -1611,6 +1611,7 @@ async function handleTelegramUpdate({
     let finalThumbPath = null;
     let forwardedPreviewVideoFileId = null;
     let forwardedPreviewPhotoFileId = null;
+    let fallbackTelegramThumbFileId = null;
     let tgFileIdForDoc = null;
     let tgChatIdForDoc = null;
     let tgMessageIdForDoc = null;
@@ -1643,6 +1644,10 @@ async function handleTelegramUpdate({
       // reuse its Telegram file_id directly instead of spawning ffmpeg or downloading anything.
       if (message.video && message.video.file_id) {
         forwardedPreviewVideoFileId = String(message.video.file_id);
+        const videoThumb = message.video.thumbnail || message.video.thumb;
+        if (videoThumb && videoThumb.file_id) {
+          fallbackTelegramThumbFileId = String(videoThumb.file_id);
+        }
       } else if (Array.isArray(message.photo) && message.photo.length > 0) {
         const largestPhoto = message.photo[message.photo.length - 1];
         if (largestPhoto && largestPhoto.file_id) {
@@ -1651,6 +1656,10 @@ async function handleTelegramUpdate({
       }
     } else if (isVideoMsg) {
       const mediaObj = incomingMediaObj;
+      const incomingThumbObj = mediaObj.thumbnail || mediaObj.thumb;
+      if (incomingThumbObj && incomingThumbObj.file_id) {
+        fallbackTelegramThumbFileId = String(incomingThumbObj.file_id);
+      }
       const fallbackName = mediaObj.file_name || "Creator Video";
       const parsedMeta = parseTitleAndDescription(message.caption, fallbackName);
       title = parsedMeta.title;
@@ -1988,6 +1997,8 @@ async function handleTelegramUpdate({
           message_id: statusMsg.message_id,
           text: caption,
           parse_mode: "HTML",
+          disable_web_page_preview: true,
+          link_preview_options: { is_disabled: true },
           reply_markup: watchInlineMarkup,
         });
       } catch (_) {
@@ -2005,9 +2016,38 @@ async function handleTelegramUpdate({
           chat_id: chatId,
           message_id: statusMsg.message_id,
           text: plainText,
+          disable_web_page_preview: true,
+          link_preview_options: { is_disabled: true },
           reply_markup: watchInlineMarkup,
         });
       }
+    };
+
+    const trySendPhotoFallbackOrText = async () => {
+      const photoCandidate =
+        forwardedPreviewPhotoFileId ||
+        (fs.existsSync(thumbPath) && fs.statSync(thumbPath).size > 0 ? thumbPath : null) ||
+        fallbackTelegramThumbFileId ||
+        finalThumbPath;
+      if (photoCandidate) {
+        try {
+          await sendTelegramPhoto(apiBase, botToken, {
+            chatId,
+            imagePathOrUri: photoCandidate,
+            caption,
+            watchUrl,
+            replyToMessageId: message.message_id,
+          });
+          await telegramApiJson(apiBase, botToken, "deleteMessage", {
+            chat_id: chatId,
+            message_id: statusMsg.message_id,
+          }).catch(() => {});
+          return;
+        } catch (_) {
+          // Fall through to clean text without generic web preview box
+        }
+      }
+      await sendFallbackLinkText();
     };
 
     if (forwardedPreviewVideoFileId) {
@@ -2024,7 +2064,7 @@ async function handleTelegramUpdate({
           message_id: statusMsg.message_id,
         }).catch(() => {});
       } catch (_) {
-        await sendFallbackLinkText();
+        await trySendPhotoFallbackOrText();
       }
     } else if (fs.existsSync(clipPath) && fs.statSync(clipPath).size > 0) {
       try {
@@ -2040,26 +2080,10 @@ async function handleTelegramUpdate({
           message_id: statusMsg.message_id,
         }).catch(() => {});
       } catch (_) {
-        await sendFallbackLinkText();
-      }
-    } else if (forwardedPreviewPhotoFileId || finalThumbPath) {
-      try {
-        await sendTelegramPhoto(apiBase, botToken, {
-          chatId,
-          imagePathOrUri: forwardedPreviewPhotoFileId || finalThumbPath,
-          caption,
-          watchUrl,
-          replyToMessageId: message.message_id,
-        });
-        await telegramApiJson(apiBase, botToken, "deleteMessage", {
-          chat_id: chatId,
-          message_id: statusMsg.message_id,
-        }).catch(() => {});
-      } catch (_) {
-        await sendFallbackLinkText();
+        await trySendPhotoFallbackOrText();
       }
     } else {
-      await sendFallbackLinkText();
+      await trySendPhotoFallbackOrText();
     }
 
     return { ok: true, videoId, linkId, rawToken };
@@ -2091,6 +2115,9 @@ const VIDEO_DOC_CACHE_TTL_MS = 10 * 60 * 1000;
 const MAX_VIDEO_DOC_CACHE = 1000;
 const videoDocCache = new Map();
 const inflightTelegramDownloads = new Map();
+const TELEGRAM_FILE_URL_CACHE_TTL_MS = 40 * 60 * 1000;
+const MAX_TELEGRAM_FILE_URL_CACHE = 500;
+const telegramFileUrlCache = new Map();
 
 function parseHttpByteRange(rangeHeader, fileSize) {
   if (!rangeHeader || !Number.isFinite(fileSize) || fileSize <= 0) return null;
@@ -2148,6 +2175,188 @@ async function pruneStreamCacheIfNeeded() {
   }
 }
 
+async function resolveTelegramBotDownloadUrl({ tgFileId, db, forceRefresh = false }) {
+  const cleanFileId = String(tgFileId || "").trim();
+  const nowMs = Date.now();
+  if (!forceRefresh) {
+    const cached = telegramFileUrlCache.get(cleanFileId);
+    if (cached && nowMs - cached.cachedAt < TELEGRAM_FILE_URL_CACHE_TTL_MS) {
+      return cached;
+    }
+  }
+
+  const { botToken, apiBase } = await resolveBotRuntimeConfig(db);
+  if (!botToken) {
+    const err = new Error("Bot token unavailable for stream.");
+    err.statusCode = 500;
+    throw err;
+  }
+
+  const fileInfo = await telegramApiJson(apiBase, botToken, "getFile", { file_id: cleanFileId });
+  const downloadUrl = String(fileInfo.file_path || "").startsWith("http")
+    ? fileInfo.file_path
+    : `${apiBase}/file/bot${botToken}/${fileInfo.file_path}`;
+  const fileSize = Number(fileInfo.file_size || 0) || 0;
+
+  if (telegramFileUrlCache.size >= MAX_TELEGRAM_FILE_URL_CACHE) {
+    const oldestKey = telegramFileUrlCache.keys().next().value;
+    if (oldestKey) telegramFileUrlCache.delete(oldestKey);
+  }
+  const entry = { downloadUrl, fileSize, cachedAt: nowMs };
+  telegramFileUrlCache.set(cleanFileId, entry);
+  return entry;
+}
+
+function getHeaderValue(headers, name) {
+  if (!headers) return "";
+  if (typeof headers.get === "function") {
+    return String(headers.get(name) || "");
+  }
+  const lower = String(name).toLowerCase();
+  return String(headers[lower] || headers[name] || "");
+}
+
+async function streamTelegramBotVideoFast({
+  videoId,
+  tgFileId,
+  method = "GET",
+  rangeHeader,
+  res,
+  db,
+}) {
+  const safeId = String(videoId).replace(/[^a-zA-Z0-9_-]/g, "_");
+  const cachedPath = path.join(STREAM_CACHE_DIR, `${safeId}.mp4`);
+  const isHead = String(method || "GET").toUpperCase() === "HEAD";
+
+  // 1. Instant local /tmp hit if already cached (e.g., recently uploaded video with +faststart)
+  try {
+    const existing = await fs.promises.stat(cachedPath);
+    if (existing.isFile() && existing.size > 0) {
+      await serveLocalFileWithRange({
+        filePath: cachedPath,
+        contentType: "video/mp4",
+        method,
+        rangeHeader,
+        cacheControl: "private, no-cache",
+        res,
+      });
+      return;
+    }
+  } catch (_) {
+    // Cache miss — stream directly from Telegram with zero full-file wait
+  }
+
+  // 2. Resolve cached Telegram CDN URL (avoids repeated getFile round-trips on ExoPlayer range probes)
+  let resolved = await resolveTelegramBotDownloadUrl({ tgFileId, db });
+  const reqHeaders = {};
+  if (rangeHeader) {
+    reqHeaders.Range = rangeHeader;
+  }
+
+  let upstream = await fetch(resolved.downloadUrl, {
+    method: isHead ? "HEAD" : "GET",
+    headers: reqHeaders,
+  });
+
+  // If cached Telegram file_path expired (401/404/410), refresh once via getFile
+  if (!upstream.ok && (upstream.status === 401 || upstream.status === 404 || upstream.status === 410)) {
+    telegramFileUrlCache.delete(String(tgFileId || "").trim());
+    resolved = await resolveTelegramBotDownloadUrl({ tgFileId, db, forceRefresh: true });
+    upstream = await fetch(resolved.downloadUrl, {
+      method: isHead ? "HEAD" : "GET",
+      headers: reqHeaders,
+    });
+  }
+
+  if (!upstream.ok && upstream.status !== 206) {
+    const err = new Error("Unable to stream video from Telegram.");
+    err.statusCode = upstream.status === 416 ? 416 : 502;
+    throw err;
+  }
+
+  // 3. Fast path: Upstream supports Range (206) or no Range was requested (HEAD / full GET stream)
+  // Pipe bytes straight to ExoPlayer immediately without downloading the entire file first!
+  const upstreamContentRange = getHeaderValue(upstream.headers, "content-range");
+  const upstreamContentLength = getHeaderValue(upstream.headers, "content-length");
+  const canDirectStream =
+    upstream.status === 206 ||
+    !rangeHeader ||
+    isHead;
+
+  if (canDirectStream && (isHead || upstream.body || !rangeHeader)) {
+    const responseStatus = upstream.status === 206 ? 206 : 200;
+    const outHeaders = {
+      "Content-Type": "video/mp4",
+      "Accept-Ranges": "bytes",
+      "Cache-Control": "private, no-cache",
+    };
+    if (upstreamContentRange) {
+      outHeaders["Content-Range"] = upstreamContentRange;
+    }
+    if (upstreamContentLength) {
+      const parsedLen = Number(upstreamContentLength);
+      outHeaders["Content-Length"] = Number.isFinite(parsedLen) && parsedLen >= 0 ? parsedLen : upstreamContentLength;
+    } else if (isHead && resolved.fileSize > 0) {
+      outHeaders["Content-Length"] = resolved.fileSize;
+    }
+
+    res.writeHead(responseStatus, outHeaders);
+    if (isHead) {
+      res.end();
+      return;
+    }
+
+    if (upstream.body) {
+      const nodeStream =
+        typeof upstream.body.pipe === "function"
+          ? upstream.body
+          : Readable.fromWeb(upstream.body);
+      if (typeof res.on === "function") {
+        res.on("close", () => {
+          if (typeof nodeStream.destroy === "function") nodeStream.destroy();
+        });
+      }
+      await new Promise((resolveStream) => {
+        nodeStream.on("error", () => {
+          if (!res.writableEnded) res.end();
+          resolveStream();
+        });
+        res.on("finish", resolveStream);
+        res.on("close", resolveStream);
+        nodeStream.pipe(res);
+      });
+      return;
+    }
+
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    res.end(buf);
+    return;
+  }
+
+  // 4. Fallback when upstream ignored Range header (returned 200 for a Range request):
+  // Save that already-open response directly into /tmp cache (1 fetch total) and serve exact byte range.
+  await fs.promises.mkdir(STREAM_CACHE_DIR, { recursive: true });
+  const tmpPart = `${cachedPath}.part.${crypto.randomBytes(4).toString("hex")}`;
+  const written = await writeFetchResponseToFile(upstream, tmpPart);
+  if (!written) {
+    await fs.promises.unlink(tmpPart).catch(() => {});
+    const err = new Error("Empty video file from Telegram.");
+    err.statusCode = 502;
+    throw err;
+  }
+  await fs.promises.rename(tmpPart, cachedPath);
+  pruneStreamCacheIfNeeded();
+
+  await serveLocalFileWithRange({
+    filePath: cachedPath,
+    contentType: "video/mp4",
+    method,
+    rangeHeader,
+    cacheControl: "private, no-cache",
+    res,
+  });
+}
+
 async function ensureTelegramVideoCached({ videoId, tgFileId, db }) {
   const safeId = String(videoId).replace(/[^a-zA-Z0-9_-]/g, "_");
   const cachedPath = path.join(STREAM_CACHE_DIR, `${safeId}.mp4`);
@@ -2167,17 +2376,7 @@ async function ensureTelegramVideoCached({ videoId, tgFileId, db }) {
 
   const downloadPromise = (async () => {
     await fs.promises.mkdir(STREAM_CACHE_DIR, { recursive: true });
-    const { botToken, apiBase } = await resolveBotRuntimeConfig(db);
-    if (!botToken) {
-      const err = new Error("Bot token unavailable for stream.");
-      err.statusCode = 500;
-      throw err;
-    }
-
-    const fileInfo = await telegramApiJson(apiBase, botToken, "getFile", { file_id: tgFileId });
-    const downloadUrl = String(fileInfo.file_path || "").startsWith("http")
-      ? fileInfo.file_path
-      : `${apiBase}/file/bot${botToken}/${fileInfo.file_path}`;
+    const { downloadUrl } = await resolveTelegramBotDownloadUrl({ tgFileId, db });
 
     const upstream = await fetch(downloadUrl);
     if (!upstream.ok) {
@@ -2611,18 +2810,13 @@ async function handleStreamPublicVideo({
       }
 
       try {
-        const cachedPath = await ensureTelegramVideoCached({
+        await streamTelegramBotVideoFast({
           videoId: cleanVideoId,
           tgFileId: videoData.tgFileId,
-          db,
-        });
-        await serveLocalFileWithRange({
-          filePath: cachedPath,
-          contentType: "video/mp4",
           method,
           rangeHeader,
-          cacheControl: "private, no-cache",
           res,
+          db,
         });
         return;
       } catch (botCacheErr) {

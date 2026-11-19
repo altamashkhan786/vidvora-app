@@ -6,6 +6,7 @@ import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
+import android.provider.Settings
 import android.util.Base64
 import android.util.Log
 import com.example.BuildConfig
@@ -31,6 +32,7 @@ import com.example.data.model.TelegramConfig
 import com.example.data.model.TokenValidationResult
 import com.example.data.model.VideoToken
 import com.example.data.model.WithdrawalStatus
+import com.example.data.model.isEmulatorDeviceLabel
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.DocumentReference
@@ -4021,14 +4023,83 @@ class FirestoreVideoRepository(
     }
   )
 
+  private fun isEmulatorDevice(): Boolean {
+    val fingerprint = Build.FINGERPRINT?.lowercase(java.util.Locale.US).orEmpty()
+    val model = Build.MODEL?.lowercase(java.util.Locale.US).orEmpty()
+    val manufacturer = Build.MANUFACTURER?.lowercase(java.util.Locale.US).orEmpty()
+    val brand = Build.BRAND?.lowercase(java.util.Locale.US).orEmpty()
+    val device = Build.DEVICE?.lowercase(java.util.Locale.US).orEmpty()
+    val product = Build.PRODUCT?.lowercase(java.util.Locale.US).orEmpty()
+    val hardware = Build.HARDWARE?.lowercase(java.util.Locale.US).orEmpty()
+
+    return fingerprint.startsWith("generic") ||
+      fingerprint.startsWith("unknown") ||
+      fingerprint.contains("emulator") ||
+      fingerprint.contains("sdk_gphone") ||
+      model.contains("google_sdk") ||
+      model.contains("sdk_gphone") ||
+      model.contains("emulator") ||
+      model.contains("android sdk built for") ||
+      manufacturer.contains("genymotion") ||
+      hardware.contains("goldfish") ||
+      hardware.contains("ranchu") ||
+      hardware.contains("cutf_cvm") ||
+      product.contains("sdk_gphone") ||
+      product.contains("sdk_google") ||
+      product.contains("google_sdk") ||
+      product.contains("emulator") ||
+      product.contains("simulator") ||
+      product.contains("vbox86p") ||
+      (brand.startsWith("generic") && device.startsWith("generic")) ||
+      isEmulatorDeviceLabel("$manufacturer $model")
+  }
+
+  private fun resolveStableDeviceInstallId(context: Context): String {
+    val prefs = context.applicationContext.getSharedPreferences(INSTALL_PREFS_NAME, Context.MODE_PRIVATE)
+    val androidId = try {
+      Settings.Secure.getString(context.applicationContext.contentResolver, Settings.Secure.ANDROID_ID)
+        ?.trim()
+        ?.lowercase(java.util.Locale.US)
+        .orEmpty()
+    } catch (_: Exception) {
+      ""
+    }
+    // ANDROID_ID is scoped per app signing key & user (zero permissions, Play-policy safe)
+    // and stays identical across app reinstalls / clear data on the same physical phone.
+    val hasValidAndroidId =
+      androidId.length >= 8 &&
+        androidId != "9774d56d682e549c" &&
+        !androidId.all { it == '0' }
+
+    if (hasValidAndroidId) {
+      val stableId = "dev_" + hashSecretExact("vidvora_device_v2:$androidId").take(24)
+      val savedId = prefs.getString(KEY_INSTALL_ID, null)?.trim().orEmpty()
+      if (savedId != stableId) {
+        prefs.edit()
+          .putString(KEY_INSTALL_ID, stableId)
+          .putBoolean(KEY_SERVER_SYNCED, false)
+          .apply()
+      }
+      return stableId
+    }
+
+    var fallbackId = prefs.getString(KEY_INSTALL_ID, null)?.trim().orEmpty()
+    if (fallbackId.isBlank() || !fallbackId.matches(Regex("^[a-zA-Z0-9_\\-]{6,64}$"))) {
+      fallbackId = "inst_" + UUID.randomUUID().toString().replace("-", "").take(16)
+      prefs.edit().putString(KEY_INSTALL_ID, fallbackId).putBoolean(KEY_SERVER_SYNCED, false).apply()
+    }
+    return fallbackId
+  }
+
   suspend fun registerOrHeartbeatAppInstall(context: Context = appContext ?: error("Context required")) {
     try {
-      val prefs = context.applicationContext.getSharedPreferences(INSTALL_PREFS_NAME, Context.MODE_PRIVATE)
-      var installId = prefs.getString(KEY_INSTALL_ID, null)?.trim().orEmpty()
-      if (installId.isBlank() || !installId.matches(Regex("^[a-zA-Z0-9_\\-]{6,64}$"))) {
-        installId = "inst_" + UUID.randomUUID().toString().replace("-", "").take(16)
-        prefs.edit().putString(KEY_INSTALL_ID, installId).putBoolean(KEY_SERVER_SYNCED, false).apply()
+      // Never register virtual emulators, AI Studio previews, or Play pre-launch test bots as installs
+      if (isEmulatorDevice()) {
+        return
       }
+
+      val prefs = context.applicationContext.getSharedPreferences(INSTALL_PREFS_NAME, Context.MODE_PRIVATE)
+      val installId = resolveStableDeviceInstallId(context)
 
       val isServerSynced = prefs.getBoolean(KEY_SERVER_SYNCED, false)
       val lastHeartbeatMs = prefs.getLong(KEY_LAST_HEARTBEAT_MS, 0L)
@@ -4054,9 +4125,20 @@ class FirestoreVideoRepository(
       val safeDeviceLabel = rawLabel.replaceFirstChar {
         if (it.isLowerCase()) it.titlecase(java.util.Locale.getDefault()) else it.toString()
       }.take(100)
+      if (isEmulatorDeviceLabel(safeDeviceLabel)) {
+        return
+      }
       val safeAndroidVersion = "Android ${Build.VERSION.RELEASE ?: "Unknown"}".take(40)
 
       if (backendDb.isPostgresActive()) {
+        // When syncing for the first time after an app reinstall/clear-data on the same phone,
+        // check if this deterministic device record already exists so we preserve firstInstalledAt
+        // and update the single device record instead of duplicating.
+        val existingOnServer = if (!isServerSynced) {
+          backendDb.getDoc("appInstalls", installId) != null
+        } else {
+          true
+        }
         val pgPayload = mutableMapOf<String, Any?>(
           "installId" to installId,
           "lastSeenAt" to BackendDbClient.serverTimestampMarker(),
@@ -4065,7 +4147,7 @@ class FirestoreVideoRepository(
           "androidVersion" to safeAndroidVersion,
           "isMarkedUninstalled" to false
         )
-        if (!isServerSynced) {
+        if (!existingOnServer) {
           pgPayload["firstInstalledAt"] = BackendDbClient.serverTimestampMarker()
           pgPayload["sessionCount"] = 1L
         } else {
@@ -4083,7 +4165,17 @@ class FirestoreVideoRepository(
       }
 
       val docRef = db.collection("appInstalls").document(installId)
-      if (!isServerSynced) {
+      val existsInFirestore = if (!isServerSynced) {
+        try {
+          docRef.get().await().exists()
+        } catch (_: Exception) {
+          false
+        }
+      } else {
+        true
+      }
+
+      if (!existsInFirestore) {
         val initialPayload = hashMapOf<String, Any>(
           "installId" to installId,
           "firstInstalledAt" to FieldValue.serverTimestamp(),
@@ -4130,6 +4222,7 @@ class FirestoreVideoRepository(
           }
         }
         prefs.edit()
+          .putBoolean(KEY_SERVER_SYNCED, true)
           .putLong(KEY_LAST_HEARTBEAT_MS, nowMs)
           .putString(KEY_LAST_VERSION, currentVersion)
           .apply()
@@ -4169,6 +4262,35 @@ class FirestoreVideoRepository(
       Result.success(Unit)
     } catch (e: Exception) {
       Log.e(TAG, "Error deleting install record: ${e.message}", e)
+      Result.failure(e)
+    }
+  }
+
+  suspend fun deleteAppInstallRecordsBatch(installIds: List<String>): Result<Int> {
+    return try {
+      val cleanIds = installIds.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+      if (cleanIds.isEmpty()) return Result.success(0)
+      var deletedCount = 0
+      if (backendDb.isPostgresActive()) {
+        for (id in cleanIds) {
+          if (backendDb.writeDoc("appInstalls", id, "delete")) {
+            deletedCount += 1
+          }
+        }
+        if (deletedCount > 0) {
+          notifyBackendChanged("appInstalls")
+        }
+        return Result.success(deletedCount)
+      }
+      for (id in cleanIds) {
+        runCatching {
+          db.collection("appInstalls").document(id).delete().await()
+          deletedCount += 1
+        }
+      }
+      Result.success(deletedCount)
+    } catch (e: Exception) {
+      Log.e(TAG, "Error batch deleting install records: ${e.message}", e)
       Result.failure(e)
     }
   }

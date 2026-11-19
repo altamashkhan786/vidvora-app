@@ -195,7 +195,9 @@ fun LazyListScope.adminAppInstallsTabContent(
   onSelectWindowDays: (Int) -> Unit,
   onSelectStatusFilter: (String) -> Unit,
   onToggleMarkedUninstalled: (String, Boolean) -> Unit,
-  onDeleteInstallRecord: (String) -> Unit
+  onDeleteInstallRecord: (String) -> Unit,
+  emulatorRecordsCount: Int = 0,
+  onCleanupEmulatorRecords: () -> Unit = {}
 ) {
   item {
     Row(
@@ -365,11 +367,36 @@ fun LazyListScope.adminAppInstallsTabContent(
           )
           Spacer(modifier = Modifier.width(8.dp))
           Text(
-            text = "Android does not broadcast an uninstall event. Devices inactive for over $inactivityWindowDays days (or manually marked) are counted as Uninstalled. If a user reinstalls, a fresh download is counted.",
+            text = "Each physical Android device is counted once (reinstalling on the same phone updates the same record). Emulators and automated test bots are automatically excluded. Devices inactive for over $inactivityWindowDays days (or manually marked) are shown as Uninstalled.",
             color = MasalaTextSecondary,
             fontSize = 11.sp,
             lineHeight = 15.sp
           )
+        }
+
+        if (emulatorRecordsCount > 0) {
+          Spacer(modifier = Modifier.height(10.dp))
+          OutlinedButton(
+            onClick = onCleanupEmulatorRecords,
+            border = BorderStroke(1.dp, MasalaError.copy(alpha = 0.5f)),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = MasalaError),
+            shape = RoundedCornerShape(10.dp),
+            modifier = Modifier
+              .fillMaxWidth()
+              .testTag("cleanup_emulator_records_button")
+          ) {
+            Icon(
+              imageVector = Icons.Default.DeleteOutline,
+              contentDescription = "Clean emulator records",
+              modifier = Modifier.size(16.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+              text = "Clean $emulatorRecordsCount Hidden Emulator Test Record${if (emulatorRecordsCount == 1) "" else "s"}",
+              fontSize = 12.sp,
+              fontWeight = FontWeight.Bold
+            )
+          }
         }
       }
     }
