@@ -270,10 +270,12 @@ function createPgFirestoreDb({ connectionString = "", poolOverride = null } = {}
     return initPromise;
   }
 
-  function makeDocSnapshot(docId, rawData) {
+  function makeDocSnapshot(collectionName, docId, rawData) {
+    const ref = makeDocRef(collectionName, docId);
     if (!rawData) {
       return {
         id: docId,
+        ref,
         exists: false,
         data: () => undefined,
       };
@@ -281,6 +283,7 @@ function createPgFirestoreDb({ connectionString = "", poolOverride = null } = {}
     const hydrated = hydrateValue(rawData);
     return {
       id: docId,
+      ref,
       exists: true,
       data: () => ({ ...hydrated }),
     };
@@ -300,9 +303,9 @@ function createPgFirestoreDb({ connectionString = "", poolOverride = null } = {}
           [collectionName, cleanId]
         );
         if (!res.rows || res.rows.length === 0) {
-          return makeDocSnapshot(cleanId, null);
+          return makeDocSnapshot(collectionName, cleanId, null);
         }
-        return makeDocSnapshot(cleanId, res.rows[0].data);
+        return makeDocSnapshot(collectionName, cleanId, res.rows[0].data);
       },
       async set(payload, options = {}) {
         await ensureInitialized();
@@ -426,7 +429,7 @@ function createPgFirestoreDb({ connectionString = "", poolOverride = null } = {}
           rows = rows.slice(0, limitCount);
         }
 
-        const docs = rows.map((r) => makeDocSnapshot(r.id, r.raw));
+        const docs = rows.map((r) => makeDocSnapshot(collectionName, r.id, r.raw));
         return {
           empty: docs.length === 0,
           size: docs.length,

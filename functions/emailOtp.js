@@ -589,6 +589,77 @@ async function handleVerifySignupOtp({
   };
 }
 
+async function handleDirectSignup({
+  body = {},
+  db,
+  nowMs = Date.now(),
+}) {
+  const cleanName = String(body.name || "").trim();
+  const cleanEmail = normalizeEmail(body.email);
+  const cleanPass = String(body.password || "").trim();
+  const cleanConfirm = String(body.confirmPassword ?? body.confirm_password ?? "").trim();
+
+  const fieldErr = validateSignupFields({
+    name: cleanName,
+    email: cleanEmail,
+    password: cleanPass,
+  });
+  if (fieldErr) {
+    return { statusCode: 400, payload: { ok: false, error: fieldErr } };
+  }
+
+  if (!cleanConfirm || cleanConfirm !== cleanPass) {
+    return {
+      statusCode: 400,
+      payload: {
+        ok: false,
+        error: "Dono Password match nahi kar rahe hain. Kripya same password dalein.",
+      },
+    };
+  }
+
+  const existing = await findMemberByEmail(db, cleanEmail);
+  if (existing) {
+    return {
+      statusCode: 409,
+      payload: {
+        ok: false,
+        error: "Yeh Gmail pehle se registered hai. Kripya Login tab se sign in karein.",
+      },
+    };
+  }
+
+  const memberId = "mem_" + crypto.randomUUID().replace(/-/g, "").slice(0, 10);
+  const newMemberData = {
+    memberId,
+    name: cleanName,
+    emailOrPhone: cleanEmail,
+    passkey: cleanPass,
+    role: "member",
+    allowedOptions: [...DEFAULT_CREATOR_ALLOWED_OPTIONS],
+    isActive: true,
+    createdAt: new Date(nowMs),
+    totalEarning: 0,
+    creditedViews: 0,
+    viewRatePer1000: 190,
+  };
+
+  const membersCol = db.collection("members");
+  const memberDocRef = typeof membersCol.doc === "function"
+    ? membersCol.doc(memberId)
+    : membersCol.document(memberId);
+  await memberDocRef.set(newMemberData);
+
+  return {
+    statusCode: 200,
+    payload: {
+      ok: true,
+      message: "Account create ho gaya! Creator Panel khul raha hai.",
+      member: serializeMemberForClient(newMemberData, memberId),
+    },
+  };
+}
+
 async function handleVerifyResetOtp({
   body = {},
   db,
@@ -678,6 +749,7 @@ module.exports = {
   sendOtpEmail,
   findMemberByEmail,
   handleSendOtp,
+  handleDirectSignup,
   handleVerifySignupOtp,
   handleVerifyResetOtp,
 };

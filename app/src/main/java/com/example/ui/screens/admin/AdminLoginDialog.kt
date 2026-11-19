@@ -92,6 +92,9 @@ fun AdminLoginDialog(
   onDismiss: () -> Unit,
   onAuthenticatePasskey: suspend (email: String, passkey: String) -> Boolean,
   onSignInWithGoogle: suspend () -> Result<Unit> = { Result.failure(UnsupportedOperationException()) },
+  onDirectSignup: suspend (name: String, email: String, password: String, confirmPassword: String) -> Result<FirestoreMember> = { _, _, _, _ ->
+    Result.failure(IllegalStateException("Signup unavailable"))
+  },
   onSendSignupOtp: suspend (name: String, email: String, password: String) -> Result<String> = { _, _, _ ->
     Result.failure(IllegalStateException("Signup unavailable"))
   },
@@ -121,13 +124,13 @@ fun AdminLoginDialog(
   var resetOtpCode by remember { mutableStateOf("") }
   var resetNewPassword by remember { mutableStateOf("") }
 
-  // Sign up tab state
+  // Sign up tab state (Instant Signup — Create Password + Confirm Password, no OTP needed)
   var signupName by remember { mutableStateOf("") }
   var signupEmail by remember { mutableStateOf("") }
   var signupPassword by remember { mutableStateOf("") }
+  var signupConfirmPassword by remember { mutableStateOf("") }
   var isSignupPassVisible by remember { mutableStateOf(false) }
-  var signupOtpSent by remember { mutableStateOf(false) }
-  var signupOtpCode by remember { mutableStateOf("") }
+  var isSignupConfirmPassVisible by remember { mutableStateOf(false) }
 
   // Shared status
   var isBusy by remember { mutableStateOf(false) }
@@ -197,16 +200,25 @@ fun AdminLoginDialog(
     }
   }
 
-  fun attemptSendSignupOtp() {
+  fun attemptDirectSignup() {
     focusManager.clearFocus()
     keyboardController?.hide()
     val cleanName = signupName.trim()
     val cleanEmail = signupEmail.trim()
     val cleanPass = signupPassword.trim()
+    val cleanConfirm = signupConfirmPassword.trim()
 
     val validationErr = FirestoreVideoRepository.validateMemberInput(cleanName, cleanEmail, cleanPass)
     if (validationErr != null) {
       errorMessage = validationErr
+      return
+    }
+    if (cleanConfirm.isBlank()) {
+      errorMessage = "Kripya Confirm Password me dobara wahi password dalein."
+      return
+    }
+    if (cleanPass != cleanConfirm) {
+      errorMessage = "Dono Password match nahi kar rahe hain. Kripya same password dalein."
       return
     }
 
@@ -214,38 +226,13 @@ fun AdminLoginDialog(
       isBusy = true
       errorMessage = null
       statusMessage = null
-      val res = onSendSignupOtp(cleanName, cleanEmail, cleanPass)
-      isBusy = false
-      res.onSuccess { msg ->
-        signupOtpSent = true
-        signupOtpCode = ""
-        resendCooldownSeconds = 60
-        statusMessage = msg
-      }.onFailure { err ->
-        errorMessage = err.message ?: "OTP send karne me problem aayi."
-      }
-    }
-  }
-
-  fun attemptVerifySignupOtp() {
-    focusManager.clearFocus()
-    keyboardController?.hide()
-    val cleanOtp = signupOtpCode.trim()
-    if (!cleanOtp.matches(Regex("^\\d{6}$"))) {
-      errorMessage = "Kripya Gmail par aaya 6-digit OTP enter karein."
-      return
-    }
-
-    coroutineScope.launch {
-      isBusy = true
-      errorMessage = null
-      val res = onVerifySignupOtp(signupName.trim(), signupEmail.trim(), signupPassword.trim(), cleanOtp)
+      val res = onDirectSignup(cleanName, cleanEmail, cleanPass, cleanConfirm)
       isBusy = false
       res.onSuccess {
         onAuthenticatedNavigate()
         safeDismiss()
       }.onFailure { err ->
-        errorMessage = err.message ?: "OTP verify nahi ho paya."
+        errorMessage = err.message ?: "Account create karne me problem aayi."
       }
     }
   }
@@ -336,11 +323,7 @@ fun AdminLoginDialog(
           contentAlignment = Alignment.Center
         ) {
           Icon(
-            imageVector = when {
-              activeTab == AuthPortalTab.SIGNUP && signupOtpSent -> Icons.Default.MarkEmailRead
-              activeTab == AuthPortalTab.SIGNUP -> Icons.Default.PersonAdd
-              else -> Icons.AutoMirrored.Filled.Login
-            },
+            imageVector = if (activeTab == AuthPortalTab.SIGNUP) Icons.Default.PersonAdd else Icons.AutoMirrored.Filled.Login,
             contentDescription = null,
             tint = if (activeTab == AuthPortalTab.SIGNUP) MasalaGold else MasalaRedPrimary,
             modifier = Modifier.size(28.dp)
@@ -351,7 +334,6 @@ fun AdminLoginDialog(
 
         Text(
           text = when {
-            activeTab == AuthPortalTab.SIGNUP && signupOtpSent -> "Verify Gmail OTP"
             activeTab == AuthPortalTab.SIGNUP -> "Creator Sign Up"
             isForgotPasswordMode -> "Reset Password via OTP"
             else -> "Login to VidVora Portal"
@@ -364,10 +346,8 @@ fun AdminLoginDialog(
 
         Text(
           text = when {
-            activeTab == AuthPortalTab.SIGNUP && signupOtpSent ->
-              "Apne Gmail par aaya 6-digit OTP enter karein"
             activeTab == AuthPortalTab.SIGNUP ->
-              "Apna Creator account khud banayein aur seedha panel open karein"
+              "Bina OTP ke turant Creator account banayein aur seedha panel open karein"
             isForgotPasswordMode ->
               "Gmail par OTP mangwayein aur naya Password set karein"
             else ->
@@ -650,186 +630,155 @@ fun AdminLoginDialog(
             }
           }
         } else {
-          // SIGNUP TAB
-          if (!signupOtpSent) {
-            OutlinedTextField(
-              value = signupName,
-              onValueChange = {
-                signupName = it
-                errorMessage = null
-              },
-              label = { Text("Full Name") },
-              leadingIcon = {
-                Icon(Icons.Default.Person, contentDescription = null, tint = MasalaGold)
-              },
-              keyboardOptions = KeyboardOptions(
-                capitalization = KeyboardCapitalization.Words,
-                imeAction = ImeAction.Next
-              ),
-              colors = authFieldColors(),
-              singleLine = true,
-              enabled = !isBusy,
-              modifier = Modifier
-                .fillMaxWidth()
-                .testTag("signup_name_input")
-            )
+          // SIGNUP TAB (Direct instant signup with Create Password + Confirm Password)
+          OutlinedTextField(
+            value = signupName,
+            onValueChange = {
+              signupName = it
+              errorMessage = null
+            },
+            label = { Text("Full Name") },
+            leadingIcon = {
+              Icon(Icons.Default.Person, contentDescription = null, tint = MasalaGold)
+            },
+            keyboardOptions = KeyboardOptions(
+              capitalization = KeyboardCapitalization.Words,
+              imeAction = ImeAction.Next
+            ),
+            colors = authFieldColors(),
+            singleLine = true,
+            enabled = !isBusy,
+            modifier = Modifier
+              .fillMaxWidth()
+              .testTag("signup_name_input")
+          )
 
-            Spacer(modifier = Modifier.height(10.dp))
+          Spacer(modifier = Modifier.height(10.dp))
 
-            OutlinedTextField(
-              value = signupEmail,
-              onValueChange = {
-                signupEmail = it
-                errorMessage = null
-              },
-              label = { Text("Gmail Address") },
-              leadingIcon = {
-                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, tint = MasalaGold)
-              },
-              keyboardOptions = KeyboardOptions(
-                keyboardType = KeyboardType.Email,
-                imeAction = ImeAction.Next
-              ),
-              colors = authFieldColors(),
-              singleLine = true,
-              enabled = !isBusy,
-              modifier = Modifier
-                .fillMaxWidth()
-                .testTag("signup_email_input")
-            )
+          OutlinedTextField(
+            value = signupEmail,
+            onValueChange = {
+              signupEmail = it
+              errorMessage = null
+            },
+            label = { Text("Gmail / Email Address") },
+            leadingIcon = {
+              Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, tint = MasalaGold)
+            },
+            keyboardOptions = KeyboardOptions(
+              keyboardType = KeyboardType.Email,
+              imeAction = ImeAction.Next
+            ),
+            colors = authFieldColors(),
+            singleLine = true,
+            enabled = !isBusy,
+            modifier = Modifier
+              .fillMaxWidth()
+              .testTag("signup_email_input")
+          )
 
-            Spacer(modifier = Modifier.height(10.dp))
+          Spacer(modifier = Modifier.height(10.dp))
 
-            OutlinedTextField(
-              value = signupPassword,
-              onValueChange = {
-                signupPassword = it
-                errorMessage = null
-              },
-              label = { Text("Create Password (min 4 chars)") },
-              leadingIcon = {
-                Icon(Icons.Default.Key, contentDescription = null, tint = MasalaGold)
-              },
-              trailingIcon = {
-                IconButton(onClick = { isSignupPassVisible = !isSignupPassVisible }) {
-                  Icon(
-                    imageVector = if (isSignupPassVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                    contentDescription = if (isSignupPassVisible) "Hide password" else "Show password",
-                    tint = MasalaTextMuted
-                  )
-                }
-              },
-              visualTransformation = if (isSignupPassVisible) VisualTransformation.None else PasswordVisualTransformation(),
-              keyboardOptions = KeyboardOptions(
-                keyboardType = KeyboardType.Password,
-                imeAction = ImeAction.Done
-              ),
-              keyboardActions = KeyboardActions(onDone = { attemptSendSignupOtp() }),
-              colors = authFieldColors(),
-              singleLine = true,
-              enabled = !isBusy,
-              modifier = Modifier
-                .fillMaxWidth()
-                .testTag("signup_password_input")
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-              text = "Aapke Gmail par 6-digit OTP aayega. Verify hote hi account banega aur direct Creator Panel khul jayega.",
-              color = MasalaTextMuted,
-              fontSize = 11.sp,
-              lineHeight = 15.sp,
-              modifier = Modifier.align(Alignment.Start)
-            )
-          } else {
-            // STEP 2: OTP VERIFICATION
-            Column(
-              modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(12.dp))
-                .background(MasalaSurfaceVariant)
-                .border(1.dp, MasalaGold.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
-                .padding(12.dp)
-            ) {
-              Text(
-                text = "OTP SENT TO GMAIL",
-                color = MasalaGold,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.ExtraBold
-              )
-              Spacer(modifier = Modifier.height(2.dp))
-              Text(
-                text = signupEmail.trim().lowercase(),
-                color = MasalaTextPrimary,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Bold
-              )
-              Text(
-                text = "Inbox ya Spam folder check karein (10 min valid).",
-                color = MasalaTextMuted,
-                fontSize = 10.5.sp
-              )
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            OutlinedTextField(
-              value = signupOtpCode,
-              onValueChange = { raw ->
-                signupOtpCode = raw.filter { it.isDigit() }.take(6)
-                errorMessage = null
-              },
-              label = { Text("Enter 6-Digit OTP") },
-              leadingIcon = {
-                Icon(Icons.Default.Pin, contentDescription = null, tint = MasalaGold)
-              },
-              keyboardOptions = KeyboardOptions(
-                keyboardType = KeyboardType.Number,
-                imeAction = ImeAction.Done
-              ),
-              keyboardActions = KeyboardActions(onDone = { attemptVerifySignupOtp() }),
-              colors = authFieldColors(),
-              singleLine = true,
-              enabled = !isBusy,
-              modifier = Modifier
-                .fillMaxWidth()
-                .testTag("signup_otp_input")
-            )
-
-            Row(
-              modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 4.dp),
-              horizontalArrangement = Arrangement.SpaceBetween,
-              verticalAlignment = Alignment.CenterVertically
-            ) {
-              TextButton(
-                onClick = { attemptSendSignupOtp() },
-                enabled = !isBusy && resendCooldownSeconds == 0,
-                modifier = Modifier.testTag("signup_resend_otp_button")
-              ) {
-                Text(
-                  text = if (resendCooldownSeconds > 0) "Resend OTP (${resendCooldownSeconds}s)" else "Resend OTP",
-                  color = if (resendCooldownSeconds == 0) MasalaGold else MasalaTextMuted,
-                  fontSize = 12.sp,
-                  fontWeight = FontWeight.Bold
+          OutlinedTextField(
+            value = signupPassword,
+            onValueChange = {
+              signupPassword = it
+              errorMessage = null
+            },
+            label = { Text("Create Password (min 4 chars)") },
+            leadingIcon = {
+              Icon(Icons.Default.Key, contentDescription = null, tint = MasalaGold)
+            },
+            trailingIcon = {
+              IconButton(onClick = { isSignupPassVisible = !isSignupPassVisible }) {
+                Icon(
+                  imageVector = if (isSignupPassVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                  contentDescription = if (isSignupPassVisible) "Hide password" else "Show password",
+                  tint = MasalaTextMuted
                 )
               }
+            },
+            visualTransformation = if (isSignupPassVisible) VisualTransformation.None else PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(
+              keyboardType = KeyboardType.Password,
+              imeAction = ImeAction.Next
+            ),
+            colors = authFieldColors(),
+            singleLine = true,
+            enabled = !isBusy,
+            modifier = Modifier
+              .fillMaxWidth()
+              .testTag("signup_password_input")
+          )
 
-              TextButton(
-                onClick = {
-                  signupOtpSent = false
-                  signupOtpCode = ""
-                  errorMessage = null
-                  statusMessage = null
-                },
-                enabled = !isBusy
-              ) {
-                Text("Change Gmail", color = MasalaTextSecondary, fontSize = 12.sp)
+          Spacer(modifier = Modifier.height(10.dp))
+
+          val hasConfirmInput = signupConfirmPassword.isNotEmpty()
+          val passwordsMatch = hasConfirmInput && signupPassword.trim() == signupConfirmPassword.trim()
+
+          OutlinedTextField(
+            value = signupConfirmPassword,
+            onValueChange = {
+              signupConfirmPassword = it
+              errorMessage = null
+            },
+            label = { Text("Confirm Password") },
+            leadingIcon = {
+              Icon(
+                Icons.Default.Key,
+                contentDescription = null,
+                tint = when {
+                  passwordsMatch -> MasalaSuccess
+                  hasConfirmInput -> MasalaError
+                  else -> MasalaGold
+                }
+              )
+            },
+            trailingIcon = {
+              IconButton(onClick = { isSignupConfirmPassVisible = !isSignupConfirmPassVisible }) {
+                Icon(
+                  imageVector = if (isSignupConfirmPassVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                  contentDescription = if (isSignupConfirmPassVisible) "Hide confirm password" else "Show confirm password",
+                  tint = MasalaTextMuted
+                )
               }
-            }
+            },
+            visualTransformation = if (isSignupConfirmPassVisible) VisualTransformation.None else PasswordVisualTransformation(),
+            isError = hasConfirmInput && !passwordsMatch,
+            keyboardOptions = KeyboardOptions(
+              keyboardType = KeyboardType.Password,
+              imeAction = ImeAction.Done
+            ),
+            keyboardActions = KeyboardActions(onDone = { attemptDirectSignup() }),
+            colors = authFieldColors(),
+            singleLine = true,
+            enabled = !isBusy,
+            modifier = Modifier
+              .fillMaxWidth()
+              .testTag("signup_confirm_password_input")
+          )
+
+          if (hasConfirmInput) {
+            Text(
+              text = if (passwordsMatch) "Password match ho gaya ✓" else "Dono password match nahi kar rahe hain",
+              color = if (passwordsMatch) MasalaSuccess else MasalaError,
+              fontSize = 11.sp,
+              fontWeight = FontWeight.SemiBold,
+              modifier = Modifier
+                .align(Alignment.Start)
+                .padding(top = 4.dp)
+            )
           }
+
+          Spacer(modifier = Modifier.height(8.dp))
+
+          Text(
+            text = "Confirm Password daalte hi turant account ban jayega aur direct Creator Panel khul jayega.",
+            color = MasalaTextMuted,
+            fontSize = 11.sp,
+            lineHeight = 15.sp,
+            modifier = Modifier.align(Alignment.Start)
+          )
         }
 
         if (statusMessage != null) {
@@ -882,13 +831,11 @@ fun AdminLoginDialog(
             activeTab == AuthPortalTab.LOGIN && !isForgotPasswordMode -> "Sign In"
             activeTab == AuthPortalTab.LOGIN && isForgotPasswordMode && !resetOtpSent -> "Send OTP"
             activeTab == AuthPortalTab.LOGIN && isForgotPasswordMode && resetOtpSent -> "Reset & Login"
-            activeTab == AuthPortalTab.SIGNUP && !signupOtpSent -> "Send OTP"
-            else -> "Verify & Join"
+            else -> "Create Account"
           }
 
           val primaryButtonTag = when {
-            activeTab == AuthPortalTab.SIGNUP && !signupOtpSent -> "signup_send_otp_button"
-            activeTab == AuthPortalTab.SIGNUP && signupOtpSent -> "signup_verify_otp_button"
+            activeTab == AuthPortalTab.SIGNUP -> "signup_create_account_button"
             else -> "admin_login_submit"
           }
 
@@ -898,8 +845,7 @@ fun AdminLoginDialog(
                 activeTab == AuthPortalTab.LOGIN && !isForgotPasswordMode -> attemptLogin()
                 activeTab == AuthPortalTab.LOGIN && isForgotPasswordMode && !resetOtpSent -> attemptSendResetOtp()
                 activeTab == AuthPortalTab.LOGIN && isForgotPasswordMode && resetOtpSent -> attemptVerifyResetOtp()
-                activeTab == AuthPortalTab.SIGNUP && !signupOtpSent -> attemptSendSignupOtp()
-                else -> attemptVerifySignupOtp()
+                else -> attemptDirectSignup()
               }
             },
             enabled = !isBusy,

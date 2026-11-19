@@ -1162,6 +1162,9 @@ fun HomeScreen(
           }
         }
       },
+      onDirectSignup = { name, email, password, confirmPassword ->
+        viewModel.directSignupAndLogin(name, email, password, confirmPassword)
+      },
       onSendSignupOtp = { name, email, password ->
         viewModel.sendSignupOtp(name, email, password)
       },

@@ -487,6 +487,11 @@ fun AdminPanelScreen(
             showLoginDialogOnRestricted = false
           }
         },
+        onDirectSignup = { name, email, password, confirmPassword ->
+          viewModel.directSignupAndLogin(name, email, password, confirmPassword).onSuccess {
+            showLoginDialogOnRestricted = false
+          }
+        },
         onSendSignupOtp = { name, email, password ->
           viewModel.sendSignupOtp(name, email, password)
         },

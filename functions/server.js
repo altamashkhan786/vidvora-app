@@ -24,6 +24,7 @@ const {
 const {
   isEmailTransportConfigured,
   handleSendOtp,
+  handleDirectSignup,
   handleVerifySignupOtp,
   handleVerifyResetOtp,
 } = require("./emailOtp");
@@ -1018,6 +1019,8 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (
+    pathname === "/auth/direct-signup" ||
+    pathname === "/auth/signup" ||
     pathname === "/auth/send-signup-otp" ||
     pathname === "/auth/send-otp" ||
     pathname === "/auth/verify-signup-otp" ||
@@ -1037,7 +1040,12 @@ const server = http.createServer(async (req, res) => {
     try {
       const body = await readJsonBody(req);
       let result;
-      if (pathname === "/auth/send-signup-otp" || pathname === "/auth/send-otp") {
+      if (pathname === "/auth/direct-signup" || pathname === "/auth/signup") {
+        result = await handleDirectSignup({
+          body,
+          db,
+        });
+      } else if (pathname === "/auth/send-signup-otp" || pathname === "/auth/send-otp") {
         result = await handleSendOtp({
           body,
           db,

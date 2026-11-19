@@ -415,6 +415,19 @@ class AdminViewModel(
     return adminAuthRepository.authenticateMemberOrAdmin(email, passkey, firestoreVideoRepository)
   }
 
+  suspend fun directSignupAndLogin(
+    name: String,
+    email: String,
+    password: String,
+    confirmPassword: String
+  ): Result<FirestoreMember> {
+    val result = firestoreVideoRepository.directSignupMember(name, email, password, confirmPassword)
+    result.getOrNull()?.let { member ->
+      adminAuthRepository.signInMemberDirectly(member)
+    }
+    return result
+  }
+
   suspend fun sendSignupOtp(name: String, email: String, password: String): Result<String> {
     return firestoreVideoRepository.sendSignupOtp(name, email, password)
   }

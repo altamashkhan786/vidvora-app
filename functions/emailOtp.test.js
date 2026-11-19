@@ -9,6 +9,7 @@ const {
   maskEmail,
   isEmailTransportConfigured,
   handleSendOtp,
+  handleDirectSignup,
   handleVerifySignupOtp,
   handleVerifyResetOtp,
 } = require("./emailOtp");
@@ -227,4 +228,52 @@ test("OTP expiry and password reset via Gmail OTP update existing creator passke
   });
   assert.equal(verifyReset.statusCode, 200);
   assert.equal(db._members.get("mem_existing").passkey, "newpass999");
+});
+
+test("direct creator signup works without OTP and enforces confirmPassword matching & unique email", async () => {
+  const db = createMemoryDb();
+
+  // Mismatched confirm password rejected
+  const mismatch = await handleDirectSignup({
+    body: {
+      name: "Yusuf Khan",
+      email: "yusuf@gmail.com",
+      password: "pass1234",
+      confirmPassword: "pass9999",
+    },
+    db,
+    nowMs: 5_000_000,
+  });
+  assert.equal(mismatch.statusCode, 400);
+  assert.equal(db._members.size, 0);
+
+  // Matching passwords create creator immediately without OTP
+  const okRes = await handleDirectSignup({
+    body: {
+      name: "Yusuf Khan",
+      email: "Yusuf@Gmail.com",
+      password: "pass1234",
+      confirmPassword: "pass1234",
+    },
+    db,
+    nowMs: 5_000_000,
+  });
+  assert.equal(okRes.statusCode, 200);
+  assert.equal(okRes.payload.ok, true);
+  assert.equal(okRes.payload.member.emailOrPhone, "yusuf@gmail.com");
+  assert.equal(okRes.payload.member.name, "Yusuf Khan");
+  assert.equal(db._members.size, 1);
+
+  // Duplicate email rejected
+  const dup = await handleDirectSignup({
+    body: {
+      name: "Yusuf 2",
+      email: "yusuf@gmail.com",
+      password: "pass5678",
+      confirmPassword: "pass5678",
+    },
+    db,
+    nowMs: 5_010_000,
+  });
+  assert.equal(dup.statusCode, 409);
 });

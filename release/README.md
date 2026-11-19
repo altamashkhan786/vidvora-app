@@ -2,9 +2,10 @@
 
 - **App Name:** VidVora
 - **Package ID:** `com.aistudio.vidvora.vstr`
-- **Version:** `1.0` (`versionCode = 1`)
-- **APK File:** `release/VidVora.apk` (~34 MB)
-- **SHA-256:** `108d324967e6d8e6636afb5f1042cb7f3b5b4d74585fd9cddfe4d8526f81897a`
+- **Version:** `1.2` (`versionCode = 3`)
+- **APK File:** `release/VidVora.apk` (~33.3 MB, includes `Login / Sign Up` header, instant Confirm-Password Creator Signup without OTP, & Unlimited Neon PostgreSQL backend)
+- **SHA-256:** `0953dd801d32d98cae1e241d9ffde17874c39178d0b8ce825dc037597e50457f`
+- **Privacy Policy PDF:** `release/VidVora_Privacy_Policy.pdf` (Live URL: `https://vidvora-share-bot.onrender.com/privacy-policy`)
 - **Documentation PDF:** `release/VidVora_Documentation.pdf` (also in `docs/VidVora_Documentation.pdf`)
 
 ## Backup Download Options (If Web UI Hides Large Binary Files)

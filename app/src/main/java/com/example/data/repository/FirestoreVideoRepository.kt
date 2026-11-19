@@ -2943,6 +2943,117 @@ class FirestoreVideoRepository(
     )
   }
 
+  suspend fun directSignupMember(
+    name: String,
+    email: String,
+    password: String,
+    confirmPassword: String
+  ): Result<FirestoreMember> {
+    val cleanName = name.trim()
+    val cleanEmail = email.trim().lowercase()
+    val cleanPass = password.trim()
+    val cleanConfirm = confirmPassword.trim()
+
+    val validationErr = validateMemberInput(cleanName, cleanEmail, cleanPass)
+    if (validationErr != null) {
+      return Result.failure(IllegalArgumentException(validationErr))
+    }
+    if (cleanEmail == FirebaseAuthAdminRepository.ADMIN_EMAIL.lowercase()) {
+      return Result.failure(
+        IllegalArgumentException("Yeh email Superadmin ke liye reserved hai. Login tab se sign in karein.")
+      )
+    }
+    if (cleanPass == FirebaseAuthAdminRepository.ADMIN_MASTER_KEY) {
+      return Result.failure(IllegalArgumentException("Kripya koi dusra Password chunein."))
+    }
+    if (cleanConfirm != cleanPass) {
+      return Result.failure(
+        IllegalArgumentException("Dono Password match nahi kar rahe hain. Kripya same password dalein.")
+      )
+    }
+
+    // 1. Primary path: Render backend POST /auth/direct-signup
+    try {
+      val payload = org.json.JSONObject()
+        .put("name", cleanName)
+        .put("email", cleanEmail)
+        .put("password", cleanPass)
+        .put("confirmPassword", cleanConfirm)
+      val (code, json) = postAuthJson("/auth/direct-signup", payload)
+      if (code in 200..299 && json.optBoolean("ok", false)) {
+        val memberObj = json.optJSONObject("member")
+          ?: return Result.failure(IllegalStateException("Account ban gaya! Kripya Login tab se sign in karein."))
+        val parsed = parseMemberJson(memberObj, cleanPass)
+        notifyBackendChanged("members")
+        val fresh = if (parsed.memberId.isNotBlank()) getMemberById(parsed.memberId) else null
+        return Result.success(fresh ?: parsed)
+      }
+      // If endpoint exists and returned a business validation error (400/403/409), return it directly
+      if (code != 404 && code in 400..499) {
+        val msg = json.optString("error").ifBlank { "Account create nahi ho paya (HTTP $code)." }
+        return Result.failure(IllegalStateException(msg))
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "directSignupMember /auth/direct-signup fallback: ${e.message}")
+    }
+
+    // 2. Seamless Neon PostgreSQL REST fallback (works even before Render redeploy of /auth/direct-signup)
+    return try {
+      if (backendDb.isPostgresActive()) {
+        val existingDocs = backendDb.getCollection("members")
+        if (existingDocs != null) {
+          val duplicate = existingDocs.any { obj ->
+            BackendDbClient.optStringClean(obj.data, "emailOrPhone", "").equals(cleanEmail, ignoreCase = true)
+          }
+          if (duplicate) {
+            return Result.failure(
+              IllegalStateException("Yeh Gmail pehle se registered hai. Kripya Login tab se sign in karein.")
+            )
+          }
+          val memberId = "mem_" + java.util.UUID.randomUUID().toString().replace("-", "").take(10)
+          val defaultOptions = MemberOption.defaultKeysForRole(MemberRole.CREATOR)
+          val nowMs = System.currentTimeMillis()
+          val docData: Map<String, Any?> = mapOf(
+            "memberId" to memberId,
+            "name" to cleanName,
+            "emailOrPhone" to cleanEmail,
+            "passkey" to cleanPass,
+            "role" to MemberRole.CREATOR,
+            "allowedOptions" to defaultOptions,
+            "isActive" to true,
+            "createdAt" to mapOf("__vidvora_ts_ms__" to nowMs),
+            "totalEarning" to 0.0,
+            "creditedViews" to 0L,
+            "viewRatePer1000" to DEFAULT_VIEW_RATE_PER_1000
+          )
+
+          val saved = backendDb.writeDoc("members", memberId, "set", docData)
+          if (saved) {
+            notifyBackendChanged("members")
+            return Result.success(
+              FirestoreMember(
+                memberId = memberId,
+                name = cleanName,
+                emailOrPhone = cleanEmail,
+                passkey = cleanPass,
+                role = MemberRole.CREATOR,
+                isActive = true,
+                totalEarning = 0.0,
+                creditedViews = 0L,
+                viewRatePer1000 = DEFAULT_VIEW_RATE_PER_1000,
+                allowedOptions = defaultOptions
+              )
+            )
+          }
+        }
+      }
+      Result.failure(IllegalStateException("Server se connect nahi ho paya. Kripya thodi der baad try karein."))
+    } catch (e: Exception) {
+      Log.w(TAG, "directSignupMember fallback failed: ${e.message}", e)
+      Result.failure(IllegalStateException("Account create karne me problem aayi. Dobara try karein."))
+    }
+  }
+
   suspend fun sendSignupOtp(name: String, email: String, password: String): Result<String> {
     val validationErr = validateMemberInput(name, email, password)
     if (validationErr != null) {
