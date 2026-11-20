@@ -1894,6 +1894,7 @@ async function handleTelegramUpdate({
     let description = "Uploaded via VidVora Telegram Bot";
     let finalStoragePath = "";
     let finalThumbPath = null;
+    let sourceThumbFallbackUri = null;
     let forwardedPreviewVideoFileId = null;
     let forwardedPreviewPhotoFileId = null;
     let fallbackTelegramThumbFileId = null;
@@ -1902,6 +1903,13 @@ async function handleTelegramUpdate({
     let tgMessageIdForDoc = null;
     let tgFileSizeForDoc = 0;
     let tgMimeTypeForDoc = null;
+    let tgPreviewClipFileIdForDoc = null;
+    let tgThumbFileIdForDoc = null;
+    let sourceVideoIdForDoc = null;
+    const cleanPublicBase =
+      functionBaseUrl && /^https?:\/\//i.test(functionBaseUrl) && !functionBaseUrl.includes("localhost")
+        ? functionBaseUrl.replace(/\/+$/, "")
+        : "";
     const bucket = storage && typeof storage.bucket === "function" ? storage.bucket() : null;
 
     if (vidvoraConvertTarget) {
@@ -1918,32 +1926,68 @@ async function handleTelegramUpdate({
       title = vidvoraConvertTarget.customTitle || source.video.title || "Creator Video";
       description = source.video.description || "Converted via VidVora Link Converter Bot";
       finalStoragePath = source.video.storagePath;
-      finalThumbPath = source.video.thumbnailPath || null;
       tgFileIdForDoc = source.video.tgFileId ? String(source.video.tgFileId) : null;
       tgChatIdForDoc = source.video.tgChatId ? String(source.video.tgChatId) : null;
       tgMessageIdForDoc = source.video.tgMessageId ? Number(source.video.tgMessageId) : null;
       tgFileSizeForDoc = Number(source.video.tgFileSize || 0) || 0;
       tgMimeTypeForDoc = source.video.tgMimeType ? String(source.video.tgMimeType) : null;
+      tgPreviewClipFileIdForDoc = source.video.tgPreviewClipFileId
+        ? String(source.video.tgPreviewClipFileId)
+        : null;
+      tgThumbFileIdForDoc = source.video.tgThumbFileId ? String(source.video.tgThumbFileId) : null;
+      sourceVideoIdForDoc = source.video.sourceVideoId
+        ? String(source.video.sourceVideoId)
+        : source.videoId || null;
 
-      // Instant 0-RAM preview reuse: if the user forwarded a VidVora preview clip or photo post,
-      // reuse its Telegram file_id directly instead of spawning ffmpeg or downloading anything.
+      // Zero base64 duplication in Neon: never copy 70-350KB data:image blobs onto converted creator docs!
+      // Instead store a lightweight ~75-byte /shareThumb?videoId=<sourceId> reference (0 KB duplicate storage).
+      const srcThumb = source.video.thumbnailPath ? String(source.video.thumbnailPath).trim() : "";
+      if (srcThumb.startsWith("data:image/")) {
+        sourceThumbFallbackUri = srcThumb;
+        finalThumbPath =
+          cleanPublicBase && sourceVideoIdForDoc
+            ? `${cleanPublicBase}/shareThumb?videoId=${encodeURIComponent(sourceVideoIdForDoc)}`
+            : null;
+      } else if (srcThumb) {
+        finalThumbPath = srcThumb;
+      } else if (cleanPublicBase && tgThumbFileIdForDoc) {
+        finalThumbPath = `${cleanPublicBase}/shareThumb?videoId=${encodeURIComponent(sourceVideoIdForDoc || videoId)}`;
+      }
+
+      // Instant 0-RAM preview reuse: if the user forwarded a VidVora 5-sec preview clip or photo post,
+      // reuse its Telegram file_id directly. Even if they pasted ONLY a text link, reuse the saved
+      // 5-second preview clip file_id from the original video so the 5-sec clip ALWAYS goes out!
       if (message.video && message.video.file_id) {
         forwardedPreviewVideoFileId = String(message.video.file_id);
+        tgPreviewClipFileIdForDoc = forwardedPreviewVideoFileId;
         const videoThumb = message.video.thumbnail || message.video.thumb;
         if (videoThumb && videoThumb.file_id) {
           fallbackTelegramThumbFileId = String(videoThumb.file_id);
+          if (!tgThumbFileIdForDoc) tgThumbFileIdForDoc = fallbackTelegramThumbFileId;
         }
       } else if (Array.isArray(message.photo) && message.photo.length > 0) {
         const largestPhoto = message.photo[message.photo.length - 1];
         if (largestPhoto && largestPhoto.file_id) {
           forwardedPreviewPhotoFileId = String(largestPhoto.file_id);
+          if (!tgThumbFileIdForDoc) tgThumbFileIdForDoc = forwardedPreviewPhotoFileId;
         }
+      }
+
+      if (!forwardedPreviewVideoFileId && tgPreviewClipFileIdForDoc) {
+        forwardedPreviewVideoFileId = tgPreviewClipFileIdForDoc;
+      }
+      if (!fallbackTelegramThumbFileId && tgThumbFileIdForDoc) {
+        fallbackTelegramThumbFileId = tgThumbFileIdForDoc;
+      }
+      if (!finalThumbPath && cleanPublicBase && tgThumbFileIdForDoc) {
+        finalThumbPath = `${cleanPublicBase}/shareThumb?videoId=${encodeURIComponent(sourceVideoIdForDoc || videoId)}`;
       }
     } else if (isVideoMsg) {
       const mediaObj = incomingMediaObj;
       const incomingThumbObj = mediaObj.thumbnail || mediaObj.thumb;
       if (incomingThumbObj && incomingThumbObj.file_id) {
         fallbackTelegramThumbFileId = String(incomingThumbObj.file_id);
+        tgThumbFileIdForDoc = fallbackTelegramThumbFileId;
       }
       const fallbackName = mediaObj.file_name || "Creator Video";
       const parsedMeta = parseTitleAndDescription(message.caption, fallbackName);
@@ -2110,8 +2154,13 @@ async function handleTelegramUpdate({
         console.warn("Firebase Storage unavailable (Spark/unprovisioned bucket), using Telegram stream fallback:", storageErr.message);
       }
 
-      if (!finalThumbPath && thumbExists) {
-        finalThumbPath = await encodeCrispThumbDataUri(thumbPath);
+      if (!finalThumbPath) {
+        if (cleanPublicBase && tgThumbFileIdForDoc) {
+          // Keep Neon lightweight (~75 bytes instead of 70-350KB base64): /shareThumb serves from free Telegram cloud
+          finalThumbPath = `${cleanPublicBase}/shareThumb?videoId=${encodeURIComponent(videoId)}`;
+        } else if (thumbExists) {
+          finalThumbPath = await encodeCrispThumbDataUri(thumbPath);
+        }
       }
       if (!storageUploadSucceeded && hasDownloadedLocalVideo && !mtprotoStreamOnly && heavyMediaPendingCount <= 2) {
         try {
@@ -2227,6 +2276,15 @@ async function handleTelegramUpdate({
     if (tgMimeTypeForDoc) {
       videoDocPayload.tgMimeType = tgMimeTypeForDoc;
     }
+    if (tgPreviewClipFileIdForDoc) {
+      videoDocPayload.tgPreviewClipFileId = tgPreviewClipFileIdForDoc;
+    }
+    if (tgThumbFileIdForDoc) {
+      videoDocPayload.tgThumbFileId = tgThumbFileIdForDoc;
+    }
+    if (sourceVideoIdForDoc) {
+      videoDocPayload.sourceVideoId = sourceVideoIdForDoc;
+    }
     await db.collection("videos").doc(videoId).set(videoDocPayload);
 
     await db.collection("accessLinks").doc(linkId).set({
@@ -2338,30 +2396,44 @@ async function handleTelegramUpdate({
       }
     };
 
+    const extractTelegramMediaIds = (sentMsg) => {
+      const sentClipFileId = sentMsg?.video?.file_id ? String(sentMsg.video.file_id) : null;
+      let sentThumbFileId = null;
+      if (Array.isArray(sentMsg?.photo) && sentMsg.photo.length > 0) {
+        const largest = sentMsg.photo[sentMsg.photo.length - 1];
+        if (largest && largest.file_id) sentThumbFileId = String(largest.file_id);
+      } else if (sentMsg?.video?.thumbnail?.file_id) {
+        sentThumbFileId = String(sentMsg.video.thumbnail.file_id);
+      } else if (sentMsg?.video?.thumb?.file_id) {
+        sentThumbFileId = String(sentMsg.video.thumb.file_id);
+      }
+      return { sentClipFileId, sentThumbFileId };
+    };
+
     const publishPostToTargetChat = async (targetChatId, replyToMsgId) => {
       if (forwardedPreviewVideoFileId) {
         try {
-          await sendTelegramVideoByFileId(apiBase, botToken, {
+          const sent = await sendTelegramVideoByFileId(apiBase, botToken, {
             chatId: targetChatId,
             fileId: forwardedPreviewVideoFileId,
             caption,
             watchUrl,
             replyToMessageId: replyToMsgId,
           });
-          return { posted: true, mode: "video_file_id" };
+          return { posted: true, mode: "video_file_id", ...extractTelegramMediaIds(sent) };
         } catch (vidErr) {
           console.warn("sendTelegramVideoByFileId fallback to photo:", vidErr?.message || vidErr);
         }
       } else if (fs.existsSync(clipPath) && fs.statSync(clipPath).size > 0) {
         try {
-          await sendTelegramVideoClip(apiBase, botToken, {
+          const sent = await sendTelegramVideoClip(apiBase, botToken, {
             chatId: targetChatId,
             clipPath,
             caption,
             watchUrl,
             replyToMessageId: replyToMsgId,
           });
-          return { posted: true, mode: "video_clip" };
+          return { posted: true, mode: "video_clip", ...extractTelegramMediaIds(sent) };
         } catch (clipErr) {
           console.warn("sendTelegramVideoClip fallback to photo:", clipErr?.message || clipErr);
         }
@@ -2371,18 +2443,19 @@ async function handleTelegramUpdate({
       const photoCandidates = [];
       if (forwardedPreviewPhotoFileId) photoCandidates.push(forwardedPreviewPhotoFileId);
       if (localThumbReady) photoCandidates.push(thumbPath);
+      if (sourceThumbFallbackUri) photoCandidates.push(sourceThumbFallbackUri);
       if (finalThumbPath) photoCandidates.push(finalThumbPath);
 
       for (const candidate of photoCandidates) {
         try {
-          await sendTelegramPhoto(apiBase, botToken, {
+          const sent = await sendTelegramPhoto(apiBase, botToken, {
             chatId: targetChatId,
             imagePathOrUri: candidate,
             caption,
             watchUrl,
             replyToMessageId: replyToMsgId,
           });
-          return { posted: true, mode: "photo" };
+          return { posted: true, mode: "photo", ...extractTelegramMediaIds(sent) };
         } catch (photoErr) {
           console.warn("sendTelegramPhoto candidate failed, trying next:", photoErr?.message || photoErr);
         }
@@ -2393,21 +2466,53 @@ async function handleTelegramUpdate({
         const downloadedThumb = await ensureDownloadedFallbackThumb();
         if (downloadedThumb) {
           try {
-            await sendTelegramPhoto(apiBase, botToken, {
+            const sent = await sendTelegramPhoto(apiBase, botToken, {
               chatId: targetChatId,
               imagePathOrUri: downloadedThumb,
               caption,
               watchUrl,
               replyToMessageId: replyToMsgId,
             });
-            return { posted: true, mode: "photo_tg_thumb" };
+            return { posted: true, mode: "photo_tg_thumb", ...extractTelegramMediaIds(sent) };
           } catch (dlPhotoErr) {
             console.warn("Downloaded Telegram thumbnail sendPhoto failed:", dlPhotoErr?.message || dlPhotoErr);
           }
         }
       }
 
-      return { posted: false, mode: "text_fallback" };
+      return { posted: false, mode: "text_fallback", sentClipFileId: null, sentThumbFileId: null };
+    };
+
+    const persistTelegramPreviewMetadata = async (postRes) => {
+      if (!postRes || !postRes.posted) return;
+      const patch = {};
+      if (postRes.sentClipFileId && postRes.sentClipFileId !== videoDocPayload.tgPreviewClipFileId) {
+        patch.tgPreviewClipFileId = postRes.sentClipFileId;
+      }
+      if (postRes.sentThumbFileId && postRes.sentThumbFileId !== videoDocPayload.tgThumbFileId) {
+        patch.tgThumbFileId = postRes.sentThumbFileId;
+        // If Neon previously fell back to a heavy base64 data URI, replace it with the lightweight /shareThumb URL now
+        if (
+          cleanPublicBase &&
+          (!videoDocPayload.thumbnailPath || String(videoDocPayload.thumbnailPath).startsWith("data:image/"))
+        ) {
+          patch.thumbnailPath = `${cleanPublicBase}/shareThumb?videoId=${encodeURIComponent(videoId)}`;
+        }
+      }
+      if (Object.keys(patch).length === 0) return;
+      Object.assign(videoDocPayload, patch);
+      videoDocCache.set(videoId, { data: videoDocPayload, cachedAt: Date.now() });
+      cacheResolvedSourceVideo(db, rawToken, {
+        found: true,
+        isActive: true,
+        videoId,
+        video: videoDocPayload,
+      });
+      try {
+        await db.collection("videos").doc(videoId).set(patch, { merge: true });
+      } catch (metaErr) {
+        console.warn("Non-fatal preview metadata persist warning:", metaErr?.message || metaErr);
+      }
     };
 
     const autoPostChannelId = String(session.autoPostChannelId || "").trim();
@@ -2421,6 +2526,7 @@ async function handleTelegramUpdate({
       try {
         const chRes = await publishPostToTargetChat(autoPostChannelId, null);
         if (chRes.posted) {
+          await persistTelegramPreviewMetadata(chRes);
           channelPosted = true;
         } else {
           await telegramApiJson(apiBase, botToken, "sendMessage", {
@@ -2459,6 +2565,7 @@ async function handleTelegramUpdate({
       // Channel post failed (e.g. bot removed as Admin) — still deliver link to user DM with warning
       const dmRes = await publishPostToTargetChat(chatId, message.message_id);
       if (dmRes.posted) {
+        await persistTelegramPreviewMetadata(dmRes);
         await telegramApiJson(apiBase, botToken, "editMessageText", {
           chat_id: chatId,
           message_id: statusMsg.message_id,
@@ -2474,6 +2581,7 @@ async function handleTelegramUpdate({
 
     const dmRes = await publishPostToTargetChat(chatId, message.message_id);
     if (dmRes.posted) {
+      await persistTelegramPreviewMetadata(dmRes);
       await telegramApiJson(apiBase, botToken, "deleteMessage", {
         chat_id: chatId,
         message_id: statusMsg.message_id,

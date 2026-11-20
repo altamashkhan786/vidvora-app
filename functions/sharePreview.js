@@ -399,6 +399,8 @@ async function resolveShareTarget(db, rawCode) {
       description: String(vData.description || "").trim(),
       storagePath: vData.storagePath ? String(vData.storagePath).trim() : "",
       thumbnailPath: vData.thumbnailPath ? String(vData.thumbnailPath).trim() : "",
+      tgThumbFileId: vData.tgThumbFileId ? String(vData.tgThumbFileId).trim() : "",
+      sourceVideoId: vData.sourceVideoId ? String(vData.sourceVideoId).trim() : "",
       uploaderName: String(vData.uploaderName || "VidVora Creator").trim(),
     };
     if (cacheMap) {
@@ -445,6 +447,65 @@ async function sendFallbackBanner(res, fallbackImagePath = DEFAULT_FALLBACK_BANN
   });
 }
 
+const TG_THUMB_CACHE_MAX = 200;
+const TG_THUMB_CACHE_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
+const tgThumbBufferCache = new Map(); // fileId -> { buffer, contentType, cachedAt }
+
+async function fetchTelegramThumbBuffer({ tgThumbFileId, resolveBotConfig }) {
+  const cleanId = String(tgThumbFileId || "").trim();
+  if (!cleanId) return null;
+
+  const cached = tgThumbBufferCache.get(cleanId);
+  if (cached && Date.now() - cached.cachedAt < TG_THUMB_CACHE_TTL_MS) {
+    return { buffer: cached.buffer, contentType: cached.contentType };
+  }
+
+  let botToken = String(process.env.TELEGRAM_BOT_TOKEN || "").trim();
+  let apiBase = String(process.env.TELEGRAM_BOT_API_BASE || "https://api.telegram.org").trim().replace(/\/+$/, "");
+  if (typeof resolveBotConfig === "function") {
+    try {
+      const cfg = await resolveBotConfig();
+      if (cfg?.botToken) botToken = String(cfg.botToken).trim();
+      if (cfg?.apiBase) apiBase = String(cfg.apiBase).trim().replace(/\/+$/, "");
+    } catch (_) {
+      // Keep env fallback
+    }
+  }
+  if (!botToken) return null;
+
+  try {
+    const infoRes = await fetch(
+      `${apiBase}/bot${botToken}/getFile?file_id=${encodeURIComponent(cleanId)}`,
+      { signal: AbortSignal.timeout(5000) }
+    );
+    if (!infoRes.ok) return null;
+    const infoJson = await infoRes.json().catch(() => null);
+    const filePath = infoJson?.ok && infoJson?.result?.file_path ? String(infoJson.result.file_path) : "";
+    if (!filePath) return null;
+
+    const fileUrl = /^https?:\/\//i.test(filePath)
+      ? filePath
+      : `${apiBase}/file/bot${botToken}/${filePath}`;
+    const imgRes = await fetch(fileUrl, { signal: AbortSignal.timeout(6000) });
+    if (!imgRes.ok) return null;
+    const contentType = String(imgRes.headers.get("content-type") || "image/jpeg").toLowerCase().startsWith("image/")
+      ? imgRes.headers.get("content-type")
+      : "image/jpeg";
+    const buffer = Buffer.from(await imgRes.arrayBuffer());
+    if (buffer.length === 0) return null;
+
+    if (tgThumbBufferCache.size >= TG_THUMB_CACHE_MAX) {
+      const oldestKey = tgThumbBufferCache.keys().next().value;
+      if (oldestKey !== undefined) tgThumbBufferCache.delete(oldestKey);
+    }
+    tgThumbBufferCache.set(cleanId, { buffer, contentType, cachedAt: Date.now() });
+    return { buffer, contentType };
+  } catch (err) {
+    console.warn("fetchTelegramThumbBuffer warning:", err?.message || err);
+    return null;
+  }
+}
+
 async function handleShareThumbnailRequest({
   videoId,
   link,
@@ -452,6 +513,7 @@ async function handleShareThumbnailRequest({
   res,
   db,
   storage,
+  resolveBotConfig = null,
   fallbackImagePath = DEFAULT_FALLBACK_BANNER_PATH,
 }) {
   let target = null;
@@ -459,23 +521,31 @@ async function handleShareThumbnailRequest({
   const cleanVideoId = String(videoId || "").trim();
   const cleanLink = String(link || "").trim();
 
-  if (cleanVideoId && db && typeof db.collection === "function") {
+  const loadVideoTargetById = async (idToLoad) => {
+    if (!idToLoad || !db || typeof db.collection !== "function") return null;
     try {
       const videosCol = db.collection("videos");
-      const vidRef = typeof videosCol.doc === "function" ? videosCol.doc(cleanVideoId) : videosCol.document(cleanVideoId);
+      const vidRef = typeof videosCol.doc === "function" ? videosCol.doc(idToLoad) : videosCol.document(idToLoad);
       const vidDoc = await vidRef.get();
       if (vidDoc && vidDoc.exists) {
         const vData = vidDoc.data() || {};
-        target = {
+        return {
           found: true,
           isActive: vData.isActive === true,
-          videoId: vidDoc.id || vData.videoId || cleanVideoId,
+          videoId: vidDoc.id || vData.videoId || idToLoad,
           thumbnailPath: vData.thumbnailPath ? String(vData.thumbnailPath).trim() : "",
+          tgThumbFileId: vData.tgThumbFileId ? String(vData.tgThumbFileId).trim() : "",
+          sourceVideoId: vData.sourceVideoId ? String(vData.sourceVideoId).trim() : "",
         };
       }
     } catch (_) {
-      // Fall through to resolveShareTarget
+      // Non-fatal
     }
+    return null;
+  };
+
+  if (cleanVideoId) {
+    target = await loadVideoTargetById(cleanVideoId);
   }
 
   if (!target && (cleanLink || cleanVideoId)) {
@@ -483,9 +553,43 @@ async function handleShareThumbnailRequest({
   }
 
   if (target && target.found && target.isActive) {
+    // If this is a converted creator video referencing its original sourceVideoId (and has no inline base64 or tgThumbFileId),
+    // follow 1 hop to the source video so 50 converted copies share 1 thumbnail without duplicating bytes in Neon.
+    if (
+      !target.tgThumbFileId &&
+      !String(target.thumbnailPath || "").startsWith("data:image/") &&
+      target.sourceVideoId &&
+      target.sourceVideoId !== target.videoId
+    ) {
+      const sourceTarget = await loadVideoTargetById(target.sourceVideoId);
+      if (sourceTarget && sourceTarget.found) {
+        target = {
+          ...target,
+          thumbnailPath: sourceTarget.thumbnailPath || target.thumbnailPath,
+          tgThumbFileId: sourceTarget.tgThumbFileId || target.tgThumbFileId,
+        };
+      }
+    }
+
     const rawThumb = String(target.thumbnailPath || "").trim();
 
-    // 1. Inline base64 data URI -> decode and normalize to crisp HD (>=1200px) JPEG/PNG bytes
+    // 1. Free Telegram Cloud thumbnail via tgThumbFileId (with 2-hour RAM LRU cache — 0 Neon storage!)
+    if (target.tgThumbFileId) {
+      const tgImg = await fetchTelegramThumbBuffer({
+        tgThumbFileId: target.tgThumbFileId,
+        resolveBotConfig,
+      });
+      if (tgImg && tgImg.buffer && tgImg.buffer.length > 0) {
+        sendImageResponse(res, {
+          buffer: tgImg.buffer,
+          contentType: tgImg.contentType,
+          method,
+        });
+        return;
+      }
+    }
+
+    // 2. Inline base64 data URI -> decode and serve crisp JPEG/PNG bytes (supports all legacy videos)
     if (rawThumb.startsWith("data:image/")) {
       const decoded = decodeDataImageUri(rawThumb);
       if (decoded) {
@@ -499,7 +603,7 @@ async function handleShareThumbnailRequest({
       }
     }
 
-    // 2. Firebase Storage file (`videos/{videoId}/thumbnail.jpg` or explicit storage path)
+    // 3. Firebase Storage file (`videos/{videoId}/thumbnail.jpg` or explicit storage path)
     if (storage && typeof storage.bucket === "function") {
       try {
         const candidatePaths = [];
@@ -528,7 +632,7 @@ async function handleShareThumbnailRequest({
       }
     }
 
-    // 3. External HTTPS thumbnail URL (excluding self-loops to /shareThumb)
+    // 4. External HTTPS thumbnail URL (excluding self-loops to /shareThumb)
     if ((rawThumb.startsWith("https://") || rawThumb.startsWith("http://")) && !rawThumb.includes("/shareThumb")) {
       try {
         const controller = new AbortController();

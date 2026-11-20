@@ -1149,7 +1149,10 @@ test("handleTelegramUpdate publishes 150MB video immediately via MTProto mode & 
     assert.equal(savedDoc.tgFileSize, largeFileSize);
     assert.equal(savedDoc.tgChatId, "888999");
     assert.equal(savedDoc.tgMessageId, 300);
-    assert.ok(String(savedDoc.thumbnailPath || "").startsWith("data:image/jpeg;base64,"));
+    assert.ok(
+      String(savedDoc.thumbnailPath || "").includes("/shareThumb?videoId=") ||
+        String(savedDoc.thumbnailPath || "").startsWith("data:image/jpeg;base64,")
+    );
     assert.ok(sentTelegram.some((c) => c.method === "sendPhoto"));
   } finally {
     global.fetch = origFetch;
@@ -2564,6 +2567,237 @@ test("handleTelegramUpdate uploads local JPEG thumbnail via multipart FormData a
     global.fetch = origFetch;
   }
 });
+
+test("link convert reuses 5-second clip file_id even on text-only link, avoids base64 duplication, and /shareThumb serves from Telegram cloud", async () => {
+  const { handleTelegramUpdate } = require("./telegramBot");
+  const { handleShareThumbnailRequest } = require("./sharePreview");
+  const videosStore = new Map();
+  const linksStore = new Map();
+  const sessionsStore = new Map();
+  const membersStore = new Map();
+  const appConfigStore = new Map([["telegramBot", { botToken: "123456:TEST_TOKEN_CLIP" }]]);
+
+  const srcCode = "GM-CLIP5S01";
+  const srcVideoId = "vid_main_clip_1";
+  const legacyCode = "GM-LEGB6401";
+  const legacyVideoId = "vid_legacy_b64_1";
+
+  videosStore.set(srcVideoId, {
+    videoId: srcVideoId,
+    title: "Main Channel Hit",
+    description: "Original",
+    storagePath: "https://vidvora-share-bot.onrender.com/streamPublicVideo?videoId=vid_main_clip_1&kind=video&sig=abc",
+    thumbnailPath: "https://vidvora-share-bot.onrender.com/shareThumb?videoId=vid_main_clip_1",
+    tgPreviewClipFileId: "BAAC_5SEC_PREVIEW_CLIP_ID",
+    tgThumbFileId: "AgAC_MAIN_TG_THUMB_ID",
+    isActive: true,
+    uploadedBy: "admin",
+  });
+  linksStore.set("lnk_clip_1", {
+    linkId: "lnk_clip_1",
+    videoId: srcVideoId,
+    tokenHash: hashToken(srcCode),
+    isActive: true,
+  });
+
+  videosStore.set(legacyVideoId, {
+    videoId: legacyVideoId,
+    title: "Legacy Base64 Video",
+    description: "Old",
+    storagePath: "https://vidvora-share-bot.onrender.com/streamPublicVideo?videoId=vid_legacy_b64_1&kind=video&sig=xyz",
+    thumbnailPath: "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AVN//2Q==",
+    isActive: true,
+    uploadedBy: "admin",
+  });
+  linksStore.set("lnk_leg_1", {
+    linkId: "lnk_leg_1",
+    videoId: legacyVideoId,
+    tokenHash: hashToken(legacyCode),
+    isActive: true,
+  });
+
+  membersStore.set("mem_conv_1", {
+    memberId: "mem_conv_1",
+    name: "Meraj",
+    role: "CREATOR",
+    isActive: true,
+  });
+  sessionsStore.set("900555", {
+    telegramUserId: "900555",
+    memberId: "mem_conv_1",
+    memberName: "Meraj",
+    role: "CREATOR",
+    uploadCount: 0,
+  });
+
+  const makeDoc = (store, id) => ({
+    async get() {
+      const val = store.get(id);
+      return { exists: Boolean(val), id, data: () => (val ? { ...val } : undefined) };
+    },
+    async set(data, opts) {
+      const prev = opts?.merge ? store.get(id) || {} : {};
+      store.set(id, { ...prev, ...data });
+    },
+    async delete() {
+      store.delete(id);
+    },
+  });
+
+  const mockDb = {
+    collection(name) {
+      const map =
+        name === "videos"
+          ? videosStore
+          : name === "accessLinks"
+          ? linksStore
+          : name === "members"
+          ? membersStore
+          : name === "telegramBotSessions"
+          ? sessionsStore
+          : name === "appConfig"
+          ? appConfigStore
+          : new Map();
+      const makeQuery = (filters = []) => ({
+        where: (field, op, value) => makeQuery([...filters, { field, op, value }]),
+        limit: () => makeQuery(filters),
+        async get() {
+          const docs = [];
+          for (const [id, data] of map.entries()) {
+            if (filters.every((f) => f.op === "==" && data[f.field] === f.value)) {
+              docs.push({ exists: true, id, data: () => ({ ...data }) });
+            }
+          }
+          return { empty: docs.length === 0, docs };
+        },
+      });
+      return {
+        doc: (id) => makeDoc(map, id),
+        document: (id) => makeDoc(map, id),
+        where: (field, op, value) => makeQuery([{ field, op, value }]),
+      };
+    },
+  };
+
+  const sentCalls = [];
+  const fakeJpegBytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0xff, 0xd9]);
+  const origFetch = global.fetch;
+  global.fetch = async (url, init = {}) => {
+    const sUrl = String(url);
+    if (sUrl.includes("/getFile")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, result: { file_path: "photos/main_thumb.jpg" } }),
+      };
+    }
+    if (sUrl.includes("/file/bot")) {
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: (k) => (k.toLowerCase() === "content-type" ? "image/jpeg" : null) },
+        arrayBuffer: async () => fakeJpegBytes.buffer.slice(fakeJpegBytes.byteOffset, fakeJpegBytes.byteOffset + fakeJpegBytes.byteLength),
+      };
+    }
+    if (sUrl.includes("/sendVideo")) {
+      const body = typeof init.body === "string" ? JSON.parse(init.body) : {};
+      sentCalls.push({ method: "sendVideo", video: body.video });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          result: { message_id: 950, video: { file_id: body.video || "BAAC_5SEC_PREVIEW_CLIP_ID" } },
+        }),
+      };
+    }
+    if (sUrl.includes("/sendPhoto")) {
+      sentCalls.push({ method: "sendPhoto" });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          result: { message_id: 951, photo: [{ file_id: "AgAC_POSTED_PHOTO_ID" }] },
+        }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true, result: { message_id: 949 } }) };
+  };
+
+  const prevBotToken = process.env.TELEGRAM_BOT_TOKEN;
+  process.env.TELEGRAM_BOT_TOKEN = "123456:TEST_TOKEN_CLIP";
+  try {
+    // 1. Creator converts via TEXT-ONLY link -> must still send 5-sec clip via sendVideo!
+    const res1 = await handleTelegramUpdate({
+      update: {
+        message: {
+          message_id: 21,
+          chat: { id: 900555 },
+          from: { id: 900555 },
+          text: `https://vidvora-share-bot.onrender.com/share?link=${srcCode}`,
+        },
+      },
+      db: mockDb,
+      storage: null,
+      functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+      playbackSecret: "sec",
+    });
+    assert.equal(res1.ok, true);
+    assert.ok(sentCalls.some((c) => c.method === "sendVideo" && c.video === "BAAC_5SEC_PREVIEW_CLIP_ID"));
+    const convDoc1 = videosStore.get(res1.videoId);
+    assert.equal(convDoc1.tgPreviewClipFileId, "BAAC_5SEC_PREVIEW_CLIP_ID");
+    assert.equal(convDoc1.tgThumbFileId, "AgAC_MAIN_TG_THUMB_ID");
+    assert.ok(!String(convDoc1.thumbnailPath || "").startsWith("data:image/"));
+
+    // 2. Creator converts a LEGACY base64 video -> must NOT duplicate base64 into converted doc!
+    const res2 = await handleTelegramUpdate({
+      update: {
+        message: {
+          message_id: 22,
+          chat: { id: 900555 },
+          from: { id: 900555 },
+          text: `https://vidvora-share-bot.onrender.com/share?link=${legacyCode}`,
+        },
+      },
+      db: mockDb,
+      storage: null,
+      functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+      playbackSecret: "sec",
+    });
+    assert.equal(res2.ok, true);
+    const convDoc2 = videosStore.get(res2.videoId);
+    assert.ok(!String(convDoc2.thumbnailPath || "").startsWith("data:image/"));
+    assert.ok(String(convDoc2.thumbnailPath || "").includes("/shareThumb?videoId="));
+
+    // 3. /shareThumb serves JPEG directly from Telegram cloud using tgThumbFileId!
+    let servedStatus = 0;
+    let servedBody = Buffer.alloc(0);
+    const fakeRes = {
+      writeHead(code) {
+        servedStatus = code;
+      },
+      end(buf) {
+        servedBody = Buffer.isBuffer(buf) ? buf : Buffer.from(buf || "");
+      },
+    };
+    await handleShareThumbnailRequest({
+      videoId: res1.videoId,
+      method: "GET",
+      res: fakeRes,
+      db: mockDb,
+      storage: null,
+      resolveBotConfig: async () => ({ botToken: "123456:TEST_TOKEN_CLIP", apiBase: "https://api.telegram.org" }),
+    });
+    assert.equal(servedStatus, 200);
+    assert.deepEqual(servedBody, fakeJpegBytes);
+  } finally {
+    global.fetch = origFetch;
+    if (prevBotToken === undefined) delete process.env.TELEGRAM_BOT_TOKEN;
+    else process.env.TELEGRAM_BOT_TOKEN = prevBotToken;
+  }
+});
+
 
 
 

@@ -990,12 +990,13 @@ const server = http.createServer(async (req, res) => {
   ) {
     try {
       await handleShareThumbnailRequest({
-        videoId: urlObj.searchParams.get("videoId"),
+        videoId: urlObj.searchParams.get("videoId") || urlObj.searchParams.get("v"),
         link: urlObj.searchParams.get("link"),
         method: req.method,
         res,
         db,
         storage,
+        resolveBotConfig: () => resolveBotRuntimeConfig(db),
       });
     } catch (err) {
       console.error("Standalone shareThumb error:", err);
