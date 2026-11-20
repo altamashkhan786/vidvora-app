@@ -131,29 +131,80 @@ function setCorsHeaders(res, methods = "GET, POST, OPTIONS") {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-VidVora-Key");
 }
 
+const MAX_GZIP_JSON_BYTES = 512 * 1024; // Avoid CPU/RAM spikes compressing multi-MB base64 thumbnails
+
 function sendJson(res, statusCode, payload, req = null) {
-  const jsonBuf = Buffer.from(JSON.stringify(payload), "utf8");
+  const jsonBuf = Buffer.isBuffer(payload)
+    ? payload
+    : Buffer.from(JSON.stringify(payload), "utf8");
   const acceptEncoding = String(req?.headers?.["accept-encoding"] || "").toLowerCase();
-  if (jsonBuf.length > 1024 && acceptEncoding.includes("gzip")) {
-    try {
-      const gzBuf = zlib.gzipSync(jsonBuf, { level: 5 });
+  if (
+    jsonBuf.length > 1024 &&
+    jsonBuf.length <= MAX_GZIP_JSON_BYTES &&
+    acceptEncoding.includes("gzip")
+  ) {
+    zlib.gzip(jsonBuf, { level: 1 }, (gzErr, gzBuf) => {
+      if (res.writableEnded || res.destroyed) return;
+      if (!gzErr && gzBuf && gzBuf.length < jsonBuf.length) {
+        res.writeHead(statusCode, {
+          "Content-Type": "application/json; charset=utf-8",
+          "Content-Encoding": "gzip",
+          Vary: "Accept-Encoding",
+          "Content-Length": gzBuf.length,
+        });
+        res.end(gzBuf);
+        return;
+      }
       res.writeHead(statusCode, {
         "Content-Type": "application/json; charset=utf-8",
-        "Content-Encoding": "gzip",
-        Vary: "Accept-Encoding",
-        "Content-Length": gzBuf.length,
+        "Content-Length": jsonBuf.length,
       });
-      res.end(gzBuf);
-      return;
-    } catch (_) {
-      // Fall back to plain JSON
-    }
+      res.end(jsonBuf);
+    });
+    return;
   }
   res.writeHead(statusCode, {
     "Content-Type": "application/json; charset=utf-8",
     "Content-Length": jsonBuf.length,
   });
   res.end(jsonBuf);
+}
+
+// Pre-serialized HTTP response buffer cache for GET /api/collection/:name
+// Prevents repeated 20-40MB JSON.stringify + object cloning on Render's 0.1 vCPU / 512MB RAM.
+const apiCollectionResponseCache = new Map(); // cacheKey -> { buf, bytes, structureVer, fullVer, builtAt }
+const apiCollectionInflight = new Map(); // cacheKey -> Promise<Buffer>
+let apiCollectionCacheTotalBytes = 0;
+const MAX_API_COLLECTION_CACHE_ENTRIES = 12;
+const MAX_API_COLLECTION_CACHE_BYTES = 48 * 1024 * 1024;
+const VIEW_COUNTER_SOFT_TTL_MS = 15_000;
+
+function setApiCollectionBufferCache(cacheKey, buf, ver) {
+  const prev = apiCollectionResponseCache.get(cacheKey);
+  if (prev) {
+    apiCollectionCacheTotalBytes -= prev.bytes;
+    apiCollectionResponseCache.delete(cacheKey);
+  }
+  const bytes = buf.length;
+  if (bytes > MAX_API_COLLECTION_CACHE_BYTES) return;
+  while (
+    apiCollectionResponseCache.size >= MAX_API_COLLECTION_CACHE_ENTRIES ||
+    apiCollectionCacheTotalBytes + bytes > MAX_API_COLLECTION_CACHE_BYTES
+  ) {
+    const oldestKey = apiCollectionResponseCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    const oldest = apiCollectionResponseCache.get(oldestKey);
+    apiCollectionResponseCache.delete(oldestKey);
+    if (oldest) apiCollectionCacheTotalBytes -= oldest.bytes;
+  }
+  apiCollectionResponseCache.set(cacheKey, {
+    buf,
+    bytes,
+    structureVer: ver.structure,
+    fullVer: ver.full,
+    builtAt: Date.now(),
+  });
+  apiCollectionCacheTotalBytes += bytes;
 }
 
 function currentUtcHourBucketKey(nowMs = Date.now()) {
@@ -426,7 +477,15 @@ const server = http.createServer(async (req, res) => {
     urlObj.searchParams.has("video") ||
     urlObj.searchParams.has("token");
 
-  if (req.method === "GET" && (pathname === "/health" || (pathname === "/" && !hasWatchParam))) {
+  if (
+    (req.method === "GET" || req.method === "HEAD") &&
+    (pathname === "/health" || (pathname === "/" && !hasWatchParam))
+  ) {
+    if (req.method === "HEAD") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end();
+      return;
+    }
     const healthPayload = {
       ok: true,
       service: "VidVora Telegram Bot, Finance Bot & Share Preview Server",
@@ -704,32 +763,79 @@ const server = http.createServer(async (req, res) => {
           return;
         }
 
-        let queryRef = colRef;
-        const isActiveParam = urlObj.searchParams.get("isActive");
-        if (isActiveParam === "true" || isActiveParam === "false") {
-          queryRef = queryRef.where("isActive", "==", isActiveParam === "true");
-        }
-        const field1 = urlObj.searchParams.get("field");
-        const value1 = urlObj.searchParams.get("value");
-        if (field1 && value1 !== null) {
-          queryRef = queryRef.where(field1, "==", value1);
-        }
-        const field2 = urlObj.searchParams.get("field2");
-        const value2 = urlObj.searchParams.get("value2");
-        if (field2 && value2 !== null) {
-          queryRef = queryRef.where(field2, "==", value2);
-        }
-        const limitParam = parseInt(urlObj.searchParams.get("limit") || "0", 10);
-        if (Number.isFinite(limitParam) && limitParam > 0) {
-          queryRef = queryRef.limit(Math.min(limitParam, 2000));
+        const effectiveColKey = subpath.trim().replace(/^\/+|\/+$/g, "") || colName;
+        const responseCacheKey = `${effectiveColKey}?${urlObj.searchParams.toString()}`;
+        const canUseResponseCache = db.isPostgresAdapter && typeof db.getCollectionVersion === "function";
+        const currentVer = canUseResponseCache
+          ? db.getCollectionVersion(effectiveColKey)
+          : { structure: -1, full: -1 };
+
+        if (canUseResponseCache) {
+          const cachedResp = apiCollectionResponseCache.get(responseCacheKey);
+          if (
+            cachedResp &&
+            cachedResp.structureVer === currentVer.structure &&
+            (cachedResp.fullVer === currentVer.full ||
+              Date.now() - cachedResp.builtAt < VIEW_COUNTER_SOFT_TTL_MS)
+          ) {
+            sendJson(res, 200, cachedResp.buf, req);
+            return;
+          }
+          if (apiCollectionInflight.has(responseCacheKey)) {
+            const sharedBuf = await apiCollectionInflight.get(responseCacheKey);
+            sendJson(res, 200, sharedBuf, req);
+            return;
+          }
         }
 
-        const snap = await queryRef.get();
-        const docs = snap.docs.map((doc) => ({
-          id: doc.id,
-          data: serializeForRestApi(doc.data() || {}),
-        }));
-        sendJson(res, 200, { ok: true, backend: activeDbBackend, docs }, req);
+        const buildCollectionBuffer = async () => {
+          let queryRef = colRef;
+          const isActiveParam = urlObj.searchParams.get("isActive");
+          if (isActiveParam === "true" || isActiveParam === "false") {
+            queryRef = queryRef.where("isActive", "==", isActiveParam === "true");
+          }
+          const field1 = urlObj.searchParams.get("field");
+          const value1 = urlObj.searchParams.get("value");
+          if (field1 && value1 !== null) {
+            queryRef = queryRef.where(field1, "==", value1);
+          }
+          const field2 = urlObj.searchParams.get("field2");
+          const value2 = urlObj.searchParams.get("value2");
+          if (field2 && value2 !== null) {
+            queryRef = queryRef.where(field2, "==", value2);
+          }
+          const limitParam = parseInt(urlObj.searchParams.get("limit") || "0", 10);
+          if (Number.isFinite(limitParam) && limitParam > 0) {
+            queryRef = queryRef.limit(Math.min(limitParam, 2000));
+          }
+
+          const snap = await queryRef.get();
+          const docs = snap.docs.map((doc) => ({
+            id: doc.id,
+            data: serializeForRestApi(doc.data() || {}),
+          }));
+          const buf = Buffer.from(
+            JSON.stringify({ ok: true, backend: activeDbBackend, docs }),
+            "utf8"
+          );
+          if (canUseResponseCache) {
+            const latestVer = db.getCollectionVersion(effectiveColKey);
+            setApiCollectionBufferCache(responseCacheKey, buf, latestVer);
+          }
+          return buf;
+        };
+
+        let responseBuf;
+        if (canUseResponseCache) {
+          const p = buildCollectionBuffer().finally(() => {
+            apiCollectionInflight.delete(responseCacheKey);
+          });
+          apiCollectionInflight.set(responseCacheKey, p);
+          responseBuf = await p;
+        } else {
+          responseBuf = await buildCollectionBuffer();
+        }
+        sendJson(res, 200, responseBuf, req);
       } catch (err) {
         console.error("API GET collection error:", err);
         sendJson(res, 500, { ok: false, error: err?.message || "Collection query failed" });

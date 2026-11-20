@@ -273,6 +273,7 @@ function createPgFirestoreDb({
   // Write-through in-memory caches to avoid repeatedly transferring large JSONB tables
   // (e.g. videos with thumbnails) from Neon over public network transfer.
   const collectionCache = new Map(); // collection -> { docs: Map<docId, rawObj>, verifiedAt, lastMaxUpdatedMs, lastRowCount, metaSynced }
+  const collectionVersions = new Map(); // collection -> { structure: number, full: number }
   const inflightCollectionFetches = new Map(); // collection -> Promise<entry | null>
   const docCache = new Map(); // `${collection}::${docId}` -> { exists, raw, expiresAt }
   const inflightDocFetches = new Map(); // `${collection}::${docId}` -> Promise<entry>
@@ -334,7 +335,23 @@ function createPgFirestoreDb({
     }
   }
 
-  function updateCachesAfterWrite(collectionName, docId, nextData, returnedUpdatedMs = null) {
+  function bumpCollectionVersion(collectionName, isMinorCounterOnly = false) {
+    const prev = collectionVersions.get(collectionName) || { structure: 0, full: 0 };
+    const next = {
+      structure: isMinorCounterOnly ? prev.structure : prev.structure + 1,
+      full: prev.full + 1,
+    };
+    collectionVersions.set(collectionName, next);
+  }
+
+  function updateCachesAfterWrite(
+    collectionName,
+    docId,
+    nextData,
+    returnedUpdatedMs = null,
+    isMinorCounterOnly = false
+  ) {
+    bumpCollectionVersion(collectionName, isMinorCounterOnly);
     if (!enableCache) return;
     setDocCacheEntry(collectionName, docId, true, nextData);
     const colEntry = collectionCache.get(collectionName);
@@ -350,6 +367,7 @@ function createPgFirestoreDb({
   }
 
   function updateCachesAfterDelete(collectionName, docId) {
+    bumpCollectionVersion(collectionName, false);
     if (!enableCache) return;
     setDocCacheEntry(collectionName, docId, false, null);
     const colEntry = collectionCache.get(collectionName);
@@ -422,6 +440,9 @@ function createPgFirestoreDb({
               for (const r of deltaRes.rows || []) {
                 existing.docs.set(r.doc_id, r.data || {});
               }
+              if ((deltaRes.rows || []).length > 0) {
+                bumpCollectionVersion(collectionName, false);
+              }
               if (existing.docs.size <= MAX_FULL_CACHE_DOCS && existing.docs.size === dbCount) {
                 existing.lastRowCount = dbCount;
                 existing.lastMaxUpdatedMs = Math.max(existing.lastMaxUpdatedMs, dbMaxTs);
@@ -457,6 +478,7 @@ function createPgFirestoreDb({
           metaSynced: false,
         };
         collectionCache.set(collectionName, entry);
+        bumpCollectionVersion(collectionName, false);
         return entry;
       } finally {
         inflightCollectionFetches.delete(collectionName);
@@ -685,8 +707,9 @@ function createPgFirestoreDb({
                 const cached = getDocCacheEntry(collectionName, cleanId);
                 if (cached && cached.exists && cached.raw) {
                   const patched = applyMergePatch(cached.raw, updates);
-                  updateCachesAfterWrite(collectionName, cleanId, patched, returnedMs);
+                  updateCachesAfterWrite(collectionName, cleanId, patched, returnedMs, true);
                 } else {
+                  bumpCollectionVersion(collectionName, true);
                   const colEntry = collectionCache.get(collectionName);
                   if (colEntry && Number.isFinite(returnedMs) && returnedMs > 0) {
                     colEntry.lastMaxUpdatedMs = Math.max(colEntry.lastMaxUpdatedMs || 0, returnedMs);
@@ -881,10 +904,17 @@ function createPgFirestoreDb({
         queryCacheSize: queryCache.size,
       };
     },
+    getCollectionVersion(collectionName) {
+      const v = collectionVersions.get(String(collectionName || "").trim());
+      return v ? { structure: v.structure, full: v.full } : { structure: 0, full: 0 };
+    },
     clearCache() {
       collectionCache.clear();
       docCache.clear();
       queryCache.clear();
+      for (const col of collectionVersions.keys()) {
+        bumpCollectionVersion(col, false);
+      }
     },
     async healthCheck() {
       await ensureInitialized();
