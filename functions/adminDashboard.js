@@ -1,4 +1,5 @@
 const crypto = require("crypto");
+const { buildGeoAnalyticsSummary } = require("./geoTracker");
 
 const ADMIN_COOKIE_NAME = "vidvora_admin_token";
 const DEFAULT_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -277,6 +278,7 @@ function buildAdminDashboardStats({
   videos = [],
   members = [],
   withdrawals = [],
+  geoStats = null,
   days = 14,
   nowMs = Date.now(),
 }) {
@@ -594,6 +596,7 @@ function buildAdminDashboardStats({
       appVersions: buildBreakdownList(appVersionCounts, totalDownloads, 8),
       androidVersions: buildBreakdownList(androidVersionCounts, totalDownloads, 8),
     },
+    geo: buildGeoAnalyticsSummary(geoStats || {}, nowMs),
     creators: creatorsList,
     topVideos,
     totalDevicesCount: realDevices.length,
@@ -1122,6 +1125,35 @@ function renderAdminDashboardHtml() {
       </div>
     </section>
 
+    <!-- Country & City Views Section -->
+    <section class="charts-grid" style="margin-bottom:20px;">
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <div class="panel-title">Views by Country</div>
+            <div id="geoCountriesSub" class="panel-sub">Kaunse country se sabse zyada views aa rahe hain</div>
+          </div>
+          <div class="seg-group" id="geoPeriodCards">
+            <button class="seg-btn active" data-period="all">All Time</button>
+            <button class="seg-btn" data-period="7d">7 Days</button>
+            <button class="seg-btn" data-period="today">Today</button>
+          </div>
+        </div>
+        <div id="geoCountriesList" class="bar-list"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <div class="panel-title">Views by City</div>
+            <div id="geoCitiesSub" class="panel-sub">Top cities jahan se log video dekh rahe hain</div>
+          </div>
+          <div id="geoSummaryPill" class="badge-cyan">0 Locations</div>
+        </div>
+        <div id="geoCitiesList" class="bar-list"></div>
+      </div>
+    </section>
+
     <!-- Breakdown Cards -->
     <section class="breakdown-grid">
       <div class="panel">
@@ -1146,6 +1178,7 @@ function renderAdminDashboardHtml() {
       <div class="tabs-bar">
         <div class="tab-pills" id="reportTabs">
           <button class="tab-pill active" data-tab="installs">App Install Report</button>
+          <button class="tab-pill" data-tab="geo">Country &amp; City Views</button>
           <button class="tab-pill" data-tab="creators">Creators &amp; Views</button>
           <button class="tab-pill" data-tab="videos">Top Videos</button>
         </div>
@@ -1185,6 +1218,27 @@ function renderAdminDashboardHtml() {
         </div>
         <div id="devicesLoadMoreWrap" class="load-more-row" style="display:none;">
           <button id="devicesLoadMoreBtn" class="ctrl-btn">Show More Devices</button>
+        </div>
+      </div>
+
+      <!-- Tab 1b: Country & City Views -->
+      <div id="tab-geo" style="display:none;">
+        <div class="table-toolbar">
+          <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
+            <div class="seg-group" id="geoSubViewGroup">
+              <button class="seg-btn active" data-view="cities">Top Cities</button>
+              <button class="seg-btn" data-view="countries">Top Countries</button>
+              <button class="seg-btn" data-view="recent">Live Recent Views</button>
+            </div>
+            <input id="geoSearchInput" class="search-input" type="search" placeholder="Search city, state, country, video..." />
+          </div>
+          <button id="exportGeoCsvBtn" class="ctrl-btn">Download Geo CSV (Excel)</button>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead id="geoTableHead"></thead>
+            <tbody id="geoTableBody"></tbody>
+          </table>
         </div>
       </div>
 
@@ -1252,6 +1306,8 @@ function renderAdminDashboardHtml() {
     installChartMode: "daily",
     viewsChartMode: "hourly",
     activeTab: "installs",
+    geoPeriod: "all",
+    geoSubView: "cities",
     deviceStatus: "ALL",
     deviceLimit: 80,
     autoRefresh: true,
@@ -1396,6 +1452,8 @@ function renderAdminDashboardHtml() {
 
     drawInstallsChart();
     drawViewsChart();
+    renderGeoCards();
+    renderGeoTable();
     renderDevicesTable();
     renderCreatorsTable();
     renderVideosTable();
@@ -1415,6 +1473,156 @@ function renderAdminDashboardHtml() {
         '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%;background:' + color + ';"></div></div>' +
         '</div>';
     }).join("");
+  }
+
+  function getGeoMetricField() {
+    if (state.geoPeriod === "today") return { countKey: "viewsToday", pctKey: "percentToday", label: "Today (IST)" };
+    if (state.geoPeriod === "7d") return { countKey: "views7d", pctKey: "percent7d", label: "Last 7 Days" };
+    return { countKey: "viewsAll", pctKey: "percentAll", label: "All Time" };
+  }
+
+  function renderGeoCards() {
+    const geo = (state.data && state.data.geo) || { countries: [], cities: [], totalTrackedViews: 0 };
+    const metric = getGeoMetricField();
+
+    const countriesSorted = (geo.countries || [])
+      .filter((c) => (c[metric.countKey] || 0) > 0)
+      .sort((a, b) => (b[metric.countKey] || 0) - (a[metric.countKey] || 0));
+    const citiesSorted = (geo.cities || [])
+      .filter((c) => (c[metric.countKey] || 0) > 0)
+      .sort((a, b) => (b[metric.countKey] || 0) - (a[metric.countKey] || 0));
+
+    const totalForPeriod = state.geoPeriod === "today"
+      ? (geo.totalTodayViews || 0)
+      : state.geoPeriod === "7d"
+        ? (geo.total7dViews || 0)
+        : (geo.totalTrackedViews || 0);
+
+    $("geoCountriesSub").textContent =
+      metric.label + " — " + fmtNum(totalForPeriod) + " geo-tracked views across " + fmtNum(countriesSorted.length) + " countries";
+    $("geoCitiesSub").textContent =
+      metric.label + " — Top cities jahan se viewers video dekh rahe hain";
+    $("geoSummaryPill").textContent =
+      fmtNum(geo.uniqueCountriesCount || 0) + " Countries • " + fmtNum(geo.uniqueCitiesCount || 0) + " Cities";
+
+    if (!countriesSorted.length) {
+      $("geoCountriesList").innerHTML =
+        '<div class="empty-state" style="padding:20px 0;">Geo tracking abhi active hua hai — jaise hi naye video views aayenge, Country yahan live dikhne lagenge!</div>';
+    } else {
+      renderBreakdown(
+        "geoCountriesList",
+        countriesSorted.slice(0, 8).map((c) => ({
+          label: (c.flag ? c.flag + " " : "") + c.country,
+          count: c[metric.countKey] || 0,
+          percent: c[metric.pctKey] || 0,
+        })),
+        "#22d3ee"
+      );
+    }
+
+    if (!citiesSorted.length) {
+      $("geoCitiesList").innerHTML =
+        '<div class="empty-state" style="padding:20px 0;">Jaise hi users videos play karenge, City aur State yahan live update ho jayenge!</div>';
+    } else {
+      renderBreakdown(
+        "geoCitiesList",
+        citiesSorted.slice(0, 8).map((c) => ({
+          label: (c.flag ? c.flag + " " : "") + c.cityDisplay + " (" + c.country + ")",
+          count: c[metric.countKey] || 0,
+          percent: c[metric.pctKey] || 0,
+        })),
+        "#f59e0b"
+      );
+    }
+  }
+
+  function renderGeoTable() {
+    const geo = (state.data && state.data.geo) || { countries: [], cities: [], recentLocations: [] };
+    const q = ($("geoSearchInput").value || "").trim().toLowerCase();
+    const head = $("geoTableHead");
+    const body = $("geoTableBody");
+
+    if (state.geoSubView === "countries") {
+      head.innerHTML =
+        '<tr><th>#</th><th>Country</th><th>Code</th><th class="num">Today (IST)</th><th class="num">Last 7 Days</th><th class="num">All-Time Views</th><th class="num">Share %</th></tr>';
+      const rows = (geo.countries || []).filter((c) => {
+        if (!q) return true;
+        return c.country.toLowerCase().includes(q) || (c.countryCode || "").toLowerCase().includes(q);
+      });
+      if (!rows.length) {
+        body.innerHTML = '<tr><td colspan="7" class="empty-state">No country view data yet — naye views aate hi yahan live show honge.</td></tr>';
+        return;
+      }
+      body.innerHTML = rows.map((c, i) =>
+        '<tr>' +
+        '<td class="mono">' + (i + 1) + '</td>' +
+        '<td><strong>' + esc((c.flag ? c.flag + " " : "") + c.country) + '</strong></td>' +
+        '<td class="mono">' + esc(c.countryCode || "-") + '</td>' +
+        '<td class="num" style="color:#fcd34d;font-weight:700;">' + fmtNum(c.viewsToday) + '</td>' +
+        '<td class="num">' + fmtNum(c.views7d) + '</td>' +
+        '<td class="num" style="color:#67e8f9;font-weight:700;">' + fmtNum(c.viewsAll) + '</td>' +
+        '<td class="num">' + c.percentAll + '%</td>' +
+        '</tr>'
+      ).join("");
+      return;
+    }
+
+    if (state.geoSubView === "recent") {
+      head.innerHTML =
+        '<tr><th>#</th><th>City &amp; State</th><th>Country</th><th>Video Watched</th><th>Time (IST)</th></tr>';
+      const rows = (geo.recentLocations || []).filter((r) => {
+        if (!q) return true;
+        return (
+          (r.city || "").toLowerCase().includes(q) ||
+          (r.region || "").toLowerCase().includes(q) ||
+          (r.country || "").toLowerCase().includes(q) ||
+          (r.videoTitle || "").toLowerCase().includes(q)
+        );
+      });
+      if (!rows.length) {
+        body.innerHTML = '<tr><td colspan="5" class="empty-state">No recent viewer locations yet — jaise hi koi video play karega, live location yahan dikhega.</td></tr>';
+        return;
+      }
+      body.innerHTML = rows.map((r, i) =>
+        '<tr>' +
+        '<td class="mono">' + (i + 1) + '</td>' +
+        '<td><strong>' + esc(r.city) + '</strong>' + (r.region ? '<div class="mono">' + esc(r.region) + '</div>' : '') + '</td>' +
+        '<td>' + esc((r.flag ? r.flag + " " : "") + r.country) + '</td>' +
+        '<td>' + esc(r.videoTitle) + '</td>' +
+        '<td>' + esc(fmtDateIst(r.atMs)) + '</td>' +
+        '</tr>'
+      ).join("");
+      return;
+    }
+
+    // Default: cities
+    head.innerHTML =
+      '<tr><th>#</th><th>City</th><th>State / Region</th><th>Country</th><th class="num">Today (IST)</th><th class="num">Last 7 Days</th><th class="num">All-Time Views</th><th class="num">Share %</th></tr>';
+    const rows = (geo.cities || []).filter((c) => {
+      if (!q) return true;
+      return (
+        (c.city || "").toLowerCase().includes(q) ||
+        (c.region || "").toLowerCase().includes(q) ||
+        (c.country || "").toLowerCase().includes(q) ||
+        (c.countryCode || "").toLowerCase().includes(q)
+      );
+    });
+    if (!rows.length) {
+      body.innerHTML = '<tr><td colspan="8" class="empty-state">No city view data yet — naye views aate hi yahan live show honge.</td></tr>';
+      return;
+    }
+    body.innerHTML = rows.map((c, i) =>
+      '<tr>' +
+      '<td class="mono">' + (i + 1) + '</td>' +
+      '<td><strong>' + esc(c.city) + '</strong></td>' +
+      '<td>' + esc(c.region || "-") + '</td>' +
+      '<td>' + esc((c.flag ? c.flag + " " : "") + c.country) + '</td>' +
+      '<td class="num" style="color:#fcd34d;font-weight:700;">' + fmtNum(c.viewsToday) + '</td>' +
+      '<td class="num">' + fmtNum(c.views7d) + '</td>' +
+      '<td class="num" style="color:#67e8f9;font-weight:700;">' + fmtNum(c.viewsAll) + '</td>' +
+      '<td class="num">' + c.percentAll + '%</td>' +
+      '</tr>'
+    ).join("");
   }
 
   // ==================== INTERACTIVE CANVAS CHART ENGINE ====================
@@ -1947,9 +2155,62 @@ function renderAdminDashboardHtml() {
     if (!btn) return;
     state.activeTab = btn.dataset.tab;
     $("reportTabs").querySelectorAll(".tab-pill").forEach((b) => b.classList.toggle("active", b === btn));
-    ["installs", "creators", "videos"].forEach((t) => {
+    ["installs", "geo", "creators", "videos"].forEach((t) => {
       $("tab-" + t).style.display = t === state.activeTab ? "block" : "none";
     });
+  });
+
+  $("geoPeriodCards").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-period]");
+    if (!btn) return;
+    state.geoPeriod = btn.dataset.period;
+    $("geoPeriodCards").querySelectorAll(".seg-btn").forEach((b) => b.classList.toggle("active", b === btn));
+    renderGeoCards();
+  });
+
+  $("geoSubViewGroup").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-view]");
+    if (!btn) return;
+    state.geoSubView = btn.dataset.view;
+    $("geoSubViewGroup").querySelectorAll(".seg-btn").forEach((b) => b.classList.toggle("active", b === btn));
+    renderGeoTable();
+  });
+
+  $("geoSearchInput").addEventListener("input", renderGeoTable);
+
+  $("exportGeoCsvBtn").addEventListener("click", () => {
+    const geo = (state.data && state.data.geo) || { countries: [], cities: [] };
+    if (state.geoSubView === "countries") {
+      const rows = (geo.countries || []).map((c) => [
+        c.country,
+        c.countryCode,
+        c.viewsToday,
+        c.views7d,
+        c.viewsAll,
+        c.percentAll + "%",
+      ]);
+      downloadCsv(
+        "vidvora-country-views-" + new Date().toISOString().slice(0, 10) + ".csv",
+        ["Country", "Code", "Today (IST)", "Last 7 Days", "All-Time Views", "Share %"],
+        rows
+      );
+    } else {
+      const rows = (geo.cities || []).map((c) => [
+        c.city,
+        c.region,
+        c.country,
+        c.countryCode,
+        c.viewsToday,
+        c.views7d,
+        c.viewsAll,
+        c.percentAll + "%",
+      ]);
+      downloadCsv(
+        "vidvora-city-views-" + new Date().toISOString().slice(0, 10) + ".csv",
+        ["City", "State/Region", "Country", "Code", "Today (IST)", "Last 7 Days", "All-Time Views", "Share %"],
+        rows
+      );
+    }
   });
 
   $("deviceStatusFilter").addEventListener("click", (e) => {

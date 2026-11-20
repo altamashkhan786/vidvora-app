@@ -52,6 +52,10 @@ const {
   buildAdminDashboardStats,
   renderAdminDashboardHtml,
 } = require("./adminDashboard");
+const {
+  createViewGeoTracker,
+  extractClientIp,
+} = require("./geoTracker");
 
 const DATABASE_ID =
   process.env.FIRESTORE_DATABASE_ID ||
@@ -111,6 +115,7 @@ const pgDb = DATABASE_URL ? createPgFirestoreDb({ connectionString: DATABASE_URL
 const db = pgDb || firestoreDb;
 const activeDbBackend = pgDb ? "postgresql" : "firestore";
 const storage = getStorage();
+const viewGeoTracker = createViewGeoTracker();
 
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
@@ -270,7 +275,16 @@ function shouldCountView(uploadedBy, currentMemberId) {
   return true;
 }
 
-async function creditVideoViewAndCreator({ targetDb, videoId, uploadedBy, currentMemberId }) {
+async function creditVideoViewAndCreator({
+  targetDb,
+  videoId,
+  uploadedBy,
+  currentMemberId,
+  req = null,
+  clientIp = "",
+  headers = null,
+  videoTitle = "",
+}) {
   if (!shouldCountView(uploadedBy, currentMemberId)) return false;
   const cleanVideoId = String(videoId || "").trim();
   if (!cleanVideoId) return false;
@@ -304,6 +318,19 @@ async function creditVideoViewAndCreator({ targetDb, videoId, uploadedBy, curren
       console.warn("Creator hourly view tracking skipped:", err?.message || err);
     }
   }
+
+  if (req || clientIp || headers) {
+    void viewGeoTracker
+      .recordViewGeo({
+        db: targetDb,
+        req,
+        clientIp,
+        headers,
+        videoId: cleanVideoId,
+        videoTitle,
+      })
+      .catch(() => {});
+  }
   return true;
 }
 
@@ -311,7 +338,7 @@ const LEGACY_STREAM_VIEW_TTL_MS = 5 * 60 * 1000;
 const MAX_LEGACY_STREAM_VIEW_CACHE = 2000;
 const legacyStreamViewCache = new Map();
 
-function recordLegacyDirectStreamView({ targetDb, shareCode, clientIp }) {
+function recordLegacyDirectStreamView({ targetDb, shareCode, clientIp, headers = null }) {
   const cleanCode = String(shareCode || "").trim().toUpperCase();
   if (!cleanCode || !targetDb) return;
   const dedupeKey = `${String(clientIp || "unknown").trim()}|${cleanCode}`;
@@ -353,6 +380,9 @@ function recordLegacyDirectStreamView({ targetDb, shareCode, clientIp }) {
         videoId: String(vData.videoId || vSnap.id),
         uploadedBy: String(vData.uploadedBy || "admin"),
         currentMemberId: null,
+        clientIp,
+        headers,
+        videoTitle: String(vData.title || ""),
       });
     } catch (err) {
       console.warn("Legacy direct stream view credit skipped:", err?.message || err);
@@ -611,11 +641,12 @@ const server = http.createServer(async (req, res) => {
       }
       try {
         const daysParam = parseInt(urlObj.searchParams.get("days") || "14", 10);
-        const [installsSnap, videosSnap, membersSnap, withdrawalsSnap] = await Promise.all([
+        const [installsSnap, videosSnap, membersSnap, withdrawalsSnap, geoStats] = await Promise.all([
           db.collection("appInstalls").get(),
           db.collection("videos").get(),
           db.collection("members").get(),
           db.collection("withdrawalRequests").get(),
+          viewGeoTracker.getMergedGeoDoc(db),
         ]);
 
         const installs = installsSnap.docs.map((d) => ({ _id: d.id, ...(d.data() || {}) }));
@@ -628,6 +659,7 @@ const server = http.createServer(async (req, res) => {
           videos,
           members,
           withdrawals,
+          geoStats,
           days: daysParam,
         });
         res.setHeader("Cache-Control", "no-store");
@@ -768,6 +800,8 @@ const server = http.createServer(async (req, res) => {
           videoId,
           uploadedBy,
           currentMemberId,
+          req,
+          videoTitle: String(vData.title || ""),
         }).catch((creditErr) => {
           console.warn("Background creditVideoViewAndCreator error:", creditErr?.message || creditErr);
         });
@@ -787,6 +821,8 @@ const server = http.createServer(async (req, res) => {
           videoId: body.videoId,
           uploadedBy: body.uploadedBy,
           currentMemberId: body.currentMemberId,
+          req,
+          videoTitle: String(body.videoTitle || ""),
         });
         sendJson(res, 200, { ok: true, backend: activeDbBackend, credited });
       } catch (err) {
@@ -1210,6 +1246,7 @@ const server = http.createServer(async (req, res) => {
       const legacyShareCode = String(urlObj.searchParams.get("vv") || "").trim();
       if (req.method === "GET" && legacyShareCode && db && db.isPostgresAdapter === true) {
         const clientIp =
+          extractClientIp(req) ||
           String(req.headers["x-forwarded-for"] || "")
             .split(",")[0]
             .trim() ||
@@ -1219,6 +1256,7 @@ const server = http.createServer(async (req, res) => {
           targetDb: db,
           shareCode: legacyShareCode,
           clientIp,
+          headers: req.headers,
         });
       }
       await handleStreamPublicVideo({
@@ -1498,3 +1536,11 @@ server.listen(PORT, () => {
     .replace(/\/+$/, "");
   startWordPressAutoPosterScheduler({ db, publicBaseUrl: bootPublicBase });
 });
+
+process.on("SIGTERM", () => {
+  viewGeoTracker
+    .flushPending(db)
+    .catch(() => {})
+    .finally(() => process.exit(0));
+});
+

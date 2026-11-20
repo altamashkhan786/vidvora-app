@@ -188,9 +188,139 @@ test("renderAdminDashboardHtml returns complete dashboard HTML with valid inline
   assert.ok(html.includes("/api/admin-dashboard/stats"));
   assert.ok(html.includes("installsCanvas"));
   assert.ok(html.includes("viewsCanvas"));
+  assert.ok(html.includes("geoCountriesList"));
+  assert.ok(html.includes("geoCitiesList"));
   assert.ok(html.includes("Download Install CSV"));
+  assert.ok(html.includes("Download Geo CSV"));
 
   const scriptMatch = html.match(/<script>([\s\S]*?)<\/script>/);
   assert.ok(scriptMatch && scriptMatch[1], "Expected inline <script> block");
   assert.doesNotThrow(() => new Function(scriptMatch[1]));
 });
+
+test("geoTracker resolves Country & City via IP cache, edge headers, and flushes compact stats to DB", async () => {
+  const {
+    extractClientIp,
+    createViewGeoTracker,
+    buildGeoAnalyticsSummary,
+    GEO_DOC_COLLECTION,
+    GEO_DOC_ID,
+  } = require("./geoTracker");
+
+  assert.equal(
+    extractClientIp({ headers: { "x-forwarded-for": "10.0.0.1, 49.36.120.45, 172.16.0.1" } }),
+    "49.36.120.45"
+  );
+  assert.equal(extractClientIp({ headers: { "x-forwarded-for": "127.0.0.1" } }), "");
+
+  let fetchCalls = 0;
+  const fakeFetch = async (url) => {
+    fetchCalls += 1;
+    if (url.includes("49.36.120.45")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          country: "India",
+          country_code: "IN",
+          region: "Maharashtra",
+          city: "Mumbai",
+        }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        country: "United Arab Emirates",
+        country_code: "AE",
+        region: "Dubai",
+        city: "Dubai",
+      }),
+    };
+  };
+
+  const docStore = new Map();
+  const fakeDb = {
+    collection: (col) => ({
+      doc: (id) => ({
+        get: async () => {
+          const val = docStore.get(`${col}/${id}`);
+          return { exists: Boolean(val), data: () => val };
+        },
+        set: async (data) => {
+          docStore.set(`${col}/${id}`, data);
+        },
+      }),
+    }),
+  };
+
+  const tracker = createViewGeoTracker({ flushIntervalMs: 60_000, flushThreshold: 100, fetchFn: fakeFetch });
+  const nowMs = Date.UTC(2026, 10, 20, 12, 0, 0);
+
+  // Two views from same Indian IP -> only 1 external GeoIP call thanks to RAM cache
+  await tracker.recordViewGeo({
+    db: fakeDb,
+    req: { headers: { "x-forwarded-for": "49.36.120.45" } },
+    videoId: "v1",
+    videoTitle: "Mumbai Clip",
+    nowMs,
+  });
+  await tracker.recordViewGeo({
+    db: fakeDb,
+    req: { headers: { "x-forwarded-for": "49.36.120.45" } },
+    videoId: "v2",
+    videoTitle: "Mumbai Clip 2",
+    nowMs: nowMs + 1000,
+  });
+  // One view with Cloudflare city+country headers -> 0 external calls
+  await tracker.recordViewGeo({
+    db: fakeDb,
+    req: {
+      headers: {
+        "cf-connecting-ip": "103.25.10.2",
+        "cf-ipcountry": "IN",
+        "cf-ipcity": "Lucknow",
+        "cf-region": "Uttar Pradesh",
+      },
+    },
+    videoId: "v3",
+    videoTitle: "Lucknow Clip",
+    nowMs: nowMs + 2000,
+  });
+  // One view from UAE IP
+  await tracker.recordViewGeo({
+    db: fakeDb,
+    req: { headers: { "x-forwarded-for": "5.32.45.10" } },
+    videoId: "v4",
+    videoTitle: "Dubai Clip",
+    nowMs: nowMs + 3000,
+  });
+
+  assert.equal(fetchCalls, 2);
+
+  // Even before flush, live merged doc has all 4 views
+  const liveBeforeFlush = await tracker.getMergedGeoDoc(fakeDb, nowMs + 4000);
+  const summaryLive = buildGeoAnalyticsSummary(liveBeforeFlush, nowMs + 4000);
+  assert.equal(summaryLive.totalTrackedViews, 4);
+  assert.equal(summaryLive.uniqueCountriesCount, 2);
+  assert.equal(summaryLive.uniqueCitiesCount, 3);
+  assert.equal(summaryLive.countries[0].country, "India");
+  assert.equal(summaryLive.countries[0].viewsAll, 3);
+  assert.equal(summaryLive.cities[0].city, "Mumbai");
+  assert.equal(summaryLive.cities[0].viewsAll, 2);
+  assert.equal(summaryLive.recentLocations.length, 4);
+  assert.equal(summaryLive.recentLocations[0].city, "Dubai");
+
+  // Flush to DB and verify persisted cleanly
+  const flushed = await tracker.flushPending(fakeDb, nowMs + 5000);
+  assert.equal(flushed, true);
+  assert.ok(docStore.has(`${GEO_DOC_COLLECTION}/${GEO_DOC_ID}`));
+
+  const afterFlush = await tracker.getMergedGeoDoc(fakeDb, nowMs + 6000);
+  const stats = buildAdminDashboardStats({ geoStats: afterFlush, nowMs: nowMs + 6000 });
+  assert.equal(stats.geo.totalTrackedViews, 4);
+  assert.equal(stats.geo.countries[0].flag, "🇮🇳");
+  assert.equal(stats.geo.cities[0].region, "Maharashtra");
+});
+
