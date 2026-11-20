@@ -168,15 +168,22 @@ function makeCountryKey(countryCode, country) {
   return `${cc}|${name}`;
 }
 
-function makeCityKey(city, region, countryCode, country) {
+function formatCompactCityDisplay(city, region) {
   const cleanCity = sanitizeGeoText(city) || "Unknown City";
   const cleanRegion = sanitizeGeoText(region);
+  if (!cleanRegion) return cleanCity;
+  const lcCity = cleanCity.toLowerCase();
+  const lcRegion = cleanRegion.toLowerCase();
+  if (lcRegion === lcCity || lcRegion.includes(lcCity) || lcCity.includes(lcRegion)) {
+    return cleanCity;
+  }
+  return `${cleanCity}, ${cleanRegion}`;
+}
+
+function makeCityKey(city, region, countryCode, country) {
   const cc = normalizeCountryCode(countryCode) || "ZZ";
   const cleanCountry = sanitizeGeoText(country) || (cc !== "ZZ" ? countryCodeToName(cc) : "Unknown");
-  const cityDisplay =
-    cleanRegion && cleanRegion.toLowerCase() !== cleanCity.toLowerCase()
-      ? `${cleanCity}, ${cleanRegion}`
-      : cleanCity;
+  const cityDisplay = formatCompactCityDisplay(city, region);
   return `${cityDisplay}|${cc}|${cleanCountry}`;
 }
 
@@ -203,7 +210,7 @@ function parseCityKey(key) {
     return {
       city,
       region,
-      cityDisplay: cityRegion,
+      cityDisplay: formatCompactCityDisplay(city, region),
       countryCode: code,
       country,
       flag: countryCodeToFlag(code),

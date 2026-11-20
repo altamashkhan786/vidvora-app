@@ -174,9 +174,10 @@ test("buildAdminDashboardStats computes installs, 24h views, daily series, and s
   assert.ok(dayNov18);
   assert.equal(dayNov18.trackedViews, 120);
 
-  // Verify privacy & payload size: no passkey, no base64 thumbnailPath, no storagePath
+  // Verify privacy & payload size: no passkey, no creator email/gmail, no base64 thumbnailPath, no storagePath
   const serialized = JSON.stringify(stats);
   assert.equal(serialized.includes("SUPER_SECRET_CREATOR_PASSWORD"), false);
+  assert.equal(serialized.includes("rahul@example.com"), false);
   assert.equal(serialized.includes("data:image/jpeg;base64"), false);
   assert.equal(serialized.includes("secret.stream"), false);
 });

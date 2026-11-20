@@ -517,7 +517,6 @@ function buildAdminDashboardStats({
     creatorsList.push({
       memberId,
       name: String(raw.name || "Creator").trim() || "Creator",
-      emailOrPhone: String(raw.emailOrPhone || "").trim(),
       role: isAdmin ? "Admin" : "Creator",
       isActive,
       videosCount: byId.videosCount,
@@ -637,6 +636,9 @@ function renderAdminDashboardHtml() {
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: hidden;
     background-color: var(--bg);
     background-image:
       radial-gradient(ellipse 65% 45% at 10% -5%, rgba(34, 211, 238, 0.13), transparent 60%),
@@ -1132,6 +1134,35 @@ function renderAdminDashboardHtml() {
     flex-wrap: wrap;
     gap: 8px;
   }
+
+  /* Strict viewport fit across Laptop & Mobile Chrome */
+  .app-shell, .topbar, .topbar-inner, .container, .panel, .kpi-card, .chart-wrap, .bar-list, .bar-item, .table-scroll {
+    min-width: 0;
+    max-width: 100%;
+  }
+  @media (max-width: 768px) {
+    .topbar { position: static; }
+    .topbar-inner { padding: 12px 14px; gap: 10px; }
+    .topbar-logo-img { height: 24px; }
+    .topbar-controls { width: 100%; gap: 6px; }
+    .seg-btn { padding: 5px 9px; font-size: 11.5px; }
+    .ctrl-btn { padding: 6px 10px; font-size: 11.5px; }
+    .container { padding: 14px 12px 0; }
+    .kpi-grid { gap: 10px; margin-bottom: 14px; }
+    .kpi-card { padding: 13px 12px; border-radius: 14px; }
+    .kpi-label { font-size: 10px; }
+    .kpi-icon { width: 26px; height: 26px; border-radius: 8px; }
+    .kpi-value { font-size: 22px; }
+    .kpi-spark { width: 44px; height: 18px; }
+    .charts-grid, .breakdown-grid { gap: 12px; margin-bottom: 14px; }
+    .panel { padding: 14px 13px; border-radius: 14px; }
+    .panel-title { font-size: 14.5px; }
+    .chart-wrap { height: 235px; }
+    .search-input { min-width: 0; width: 100%; }
+    .table-toolbar > div { width: 100%; }
+    .tab-pill { padding: 7px 11px; font-size: 12px; }
+    .login-card { padding: 28px 20px; }
+  }
 </style>
 </head>
 <body>
@@ -1410,7 +1441,7 @@ function renderAdminDashboardHtml() {
       <!-- Tab 2: Creators -->
       <div id="tab-creators" style="display:none;">
         <div class="table-toolbar">
-          <input id="creatorSearchInput" class="search-input" type="search" placeholder="Search creator name or email..." />
+          <input id="creatorSearchInput" class="search-input" type="search" placeholder="Search creator name..." />
           <button id="exportCreatorsCsvBtn" class="ctrl-btn">Download Creators CSV (Excel)</button>
         </div>
         <div class="table-scroll">
@@ -1824,8 +1855,8 @@ function renderAdminDashboardHtml() {
   function setupCanvas(canvas) {
     const rect = canvas.parentElement.getBoundingClientRect();
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const w = Math.max(300, Math.floor(rect.width));
-    const h = Math.max(220, Math.floor(rect.height));
+    const w = Math.max(220, Math.floor(rect.width));
+    const h = Math.max(200, Math.floor(rect.height));
     if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
       canvas.width = w * dpr;
       canvas.height = h * dpr;
@@ -1863,7 +1894,7 @@ function renderAdminDashboardHtml() {
   }) {
     const canvas = $(canvasId);
     const { ctx, w, h } = setupCanvas(canvas);
-    const pad = { top: 18, right: 16, bottom: 34, left: 46 };
+    const pad = { top: 20, right: 18, bottom: 32, left: 42 };
     const plotW = w - pad.left - pad.right;
     const plotH = h - pad.top - pad.bottom;
 
@@ -1880,7 +1911,7 @@ function renderAdminDashboardHtml() {
       if (p.primary > rawMax) rawMax = p.primary;
       if (typeof p.secondary === "number" && p.secondary > rawMax) rawMax = p.secondary;
     }
-    const yMax = niceMax(rawMax);
+    const yMax = niceMax(rawMax * 1.12);
     const gridLines = 4;
 
     // Grid & Y labels
@@ -2040,16 +2071,24 @@ function renderAdminDashboardHtml() {
       }
     }
 
-    // X-axis labels
-    const maxLabels = Math.max(4, Math.floor(plotW / 58));
+    // X-axis labels (clamped so first/last never clip on mobile)
+    const maxLabels = Math.max(3, Math.floor(plotW / 64));
     const labelEvery = Math.max(1, Math.ceil(n / maxLabels));
     ctx.fillStyle = "#94a3b8";
-    ctx.font = "11px sans-serif";
-    ctx.textAlign = "center";
+    ctx.font = "10.5px sans-serif";
     ctx.textBaseline = "top";
     coords.forEach((c, i) => {
       if (i % labelEvery === 0 || i === n - 1) {
-        ctx.fillText(c.p.label, c.cx, pad.top + plotH + 10);
+        if (i === 0) {
+          ctx.textAlign = "left";
+          ctx.fillText(c.p.label, pad.left, pad.top + plotH + 10);
+        } else if (i === n - 1) {
+          ctx.textAlign = "right";
+          ctx.fillText(c.p.label, w - pad.right, pad.top + plotH + 10);
+        } else {
+          ctx.textAlign = "center";
+          ctx.fillText(c.p.label, c.cx, pad.top + plotH + 10);
+        }
       }
     });
 
@@ -2058,11 +2097,11 @@ function renderAdminDashboardHtml() {
 
   function bindChartHover(canvasId) {
     const canvas = $(canvasId);
-    canvas.addEventListener("mousemove", (ev) => {
+    const handlePointer = (clientX) => {
       const geom = state.chartGeom[canvasId];
       if (!geom) return;
       const rect = canvas.getBoundingClientRect();
-      const x = ev.clientX - rect.left;
+      const x = clientX - rect.left;
       const idx = Math.floor((x - geom.pad.left) / geom.stepX);
       const tt = $(geom.tooltipId);
       if (idx < 0 || idx >= geom.n) {
@@ -2075,11 +2114,15 @@ function renderAdminDashboardHtml() {
       tt.innerHTML = geom.formatTooltip(c.p);
       tt.style.display = "block";
       const ttW = tt.offsetWidth || 170;
-      let left = c.cx + 14;
-      if (left + ttW > rect.width - 8) left = Math.max(8, c.cx - ttW - 14);
+      let left = c.cx + 12;
+      if (left + ttW > rect.width - 6) left = Math.max(6, c.cx - ttW - 12);
       tt.style.left = left + "px";
-      tt.style.top = Math.max(8, Math.min(rect.height - 90, c.y1 - 24)) + "px";
-    });
+      tt.style.top = Math.max(6, Math.min(rect.height - 96, c.y1 - 24)) + "px";
+    };
+    canvas.addEventListener("mousemove", (ev) => handlePointer(ev.clientX));
+    canvas.addEventListener("touchstart", (ev) => {
+      if (ev.touches && ev.touches[0]) handlePointer(ev.touches[0].clientX);
+    }, { passive: true });
     canvas.addEventListener("mouseleave", () => {
       const geom = state.chartGeom[canvasId];
       if (!geom) return;
@@ -2234,7 +2277,7 @@ function renderAdminDashboardHtml() {
     const q = ($("creatorSearchInput").value || "").trim().toLowerCase();
     const filtered = all.filter((c) => {
       if (!q) return true;
-      return c.name.toLowerCase().includes(q) || c.emailOrPhone.toLowerCase().includes(q) || c.memberId.toLowerCase().includes(q);
+      return c.name.toLowerCase().includes(q) || c.role.toLowerCase().includes(q);
     });
     const body = $("creatorsTableBody");
     if (!filtered.length) {
@@ -2245,9 +2288,10 @@ function renderAdminDashboardHtml() {
       const statusBadge = c.isActive
         ? '<span class="badge-good">Active</span>'
         : '<span class="badge-rose">Disabled</span>';
+      const rankClass = i === 0 ? "rank-pill top1" : i === 1 ? "rank-pill top2" : i === 2 ? "rank-pill top3" : "rank-pill";
       return '<tr>' +
-        '<td class="mono">' + (i + 1) + '</td>' +
-        '<td><strong>' + esc(c.name) + '</strong><div class="mono">' + esc(c.emailOrPhone) + '</div></td>' +
+        '<td><span class="' + rankClass + '">' + (i + 1) + '</span></td>' +
+        '<td><strong>' + esc(c.name) + '</strong></td>' +
         '<td>' + esc(c.role) + '</td>' +
         '<td class="num">' + fmtNum(c.videosCount) + '</td>' +
         '<td class="num" style="color:#fcd34d;font-weight:700;">' + fmtNum(c.views24h) + '</td>' +
@@ -2489,9 +2533,7 @@ function renderAdminDashboardHtml() {
 
   $("exportCreatorsCsvBtn").addEventListener("click", () => {
     const rows = ((state.data && state.data.creators) || []).map((c) => [
-      c.memberId,
       c.name,
-      c.emailOrPhone,
       c.role,
       c.videosCount,
       c.views24h,
@@ -2502,7 +2544,7 @@ function renderAdminDashboardHtml() {
     ]);
     downloadCsv(
       "vidvora-creators-report-" + new Date().toISOString().slice(0, 10) + ".csv",
-      ["Member ID", "Name", "Email / Phone", "Role", "Videos", "24h Views", "Real Views", "Credited Views", "Earnings (INR)", "Status"],
+      ["Name", "Role", "Videos", "24h Views", "Real Views", "Credited Views", "Earnings (INR)", "Status"],
       rows
     );
   });
