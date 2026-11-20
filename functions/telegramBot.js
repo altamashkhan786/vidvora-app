@@ -649,7 +649,7 @@ async function createFiveSecondPreviewAndThumbnail({
   };
 }
 
-async function encodeCrispThumbDataUri(thumbPath, maxBytes = 350 * 1024) {
+async function encodeCrispThumbDataUri(thumbPath, maxBytes = 55 * 1024) {
   if (!thumbPath || !fs.existsSync(thumbPath)) return "";
   try {
     let thumbBuf = await fs.promises.readFile(thumbPath);
@@ -658,17 +658,25 @@ async function encodeCrispThumbDataUri(thumbPath, maxBytes = 350 * 1024) {
     }
     const ffmpegBin = getFfmpegBinary();
     const recompressedPath = `${thumbPath}.compact.jpg`;
-    for (const qVal of ["4", "6", "8"]) {
+    for (const qVal of ["5", "7", "9", "12"]) {
       await execFileAsync(
         ffmpegBin,
-        ["-y", "-threads", "1", "-i", thumbPath, "-vf", "scale='min(1280,iw)':-2:flags=bilinear", "-q:v", qVal, recompressedPath],
+        ["-y", "-threads", "1", "-i", thumbPath, "-vf", "scale='min(480,iw)':-2:flags=bilinear", "-q:v", qVal, recompressedPath],
         { timeout: 20_000, maxBuffer: 4 * 1024 * 1024 }
       );
       if (fs.existsSync(recompressedPath)) {
         const candidate = await fs.promises.readFile(recompressedPath);
         if (candidate.length > 0 && candidate.length <= maxBytes) {
+          await fs.promises.unlink(recompressedPath).catch(() => {});
           return `data:image/jpeg;base64,${candidate.toString("base64")}`;
         }
+      }
+    }
+    if (fs.existsSync(recompressedPath)) {
+      const fallbackBuf = await fs.promises.readFile(recompressedPath);
+      await fs.promises.unlink(recompressedPath).catch(() => {});
+      if (fallbackBuf.length > 0 && fallbackBuf.length <= 120 * 1024) {
+        return `data:image/jpeg;base64,${fallbackBuf.toString("base64")}`;
       }
     }
   } catch (err) {

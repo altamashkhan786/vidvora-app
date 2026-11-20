@@ -1,5 +1,6 @@
 const http = require("http");
 const crypto = require("crypto");
+const zlib = require("zlib");
 const admin = require("firebase-admin");
 const { getFirestore, FieldValue } = require("firebase-admin/firestore");
 const { getStorage } = require("firebase-admin/storage");
@@ -130,9 +131,29 @@ function setCorsHeaders(res, methods = "GET, POST, OPTIONS") {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-VidVora-Key");
 }
 
-function sendJson(res, statusCode, payload) {
-  res.writeHead(statusCode, { "Content-Type": "application/json; charset=utf-8" });
-  res.end(JSON.stringify(payload));
+function sendJson(res, statusCode, payload, req = null) {
+  const jsonBuf = Buffer.from(JSON.stringify(payload), "utf8");
+  const acceptEncoding = String(req?.headers?.["accept-encoding"] || "").toLowerCase();
+  if (jsonBuf.length > 1024 && acceptEncoding.includes("gzip")) {
+    try {
+      const gzBuf = zlib.gzipSync(jsonBuf, { level: 5 });
+      res.writeHead(statusCode, {
+        "Content-Type": "application/json; charset=utf-8",
+        "Content-Encoding": "gzip",
+        Vary: "Accept-Encoding",
+        "Content-Length": gzBuf.length,
+      });
+      res.end(gzBuf);
+      return;
+    } catch (_) {
+      // Fall back to plain JSON
+    }
+  }
+  res.writeHead(statusCode, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": jsonBuf.length,
+  });
+  res.end(jsonBuf);
 }
 
 function currentUtcHourBucketKey(nowMs = Date.now()) {
@@ -473,7 +494,8 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         databaseBackend: activeDbBackend,
         postgresActive: Boolean(pgDb),
-      });
+        cacheStats: pgDb && typeof pgDb.getCacheStats === "function" ? pgDb.getCacheStats() : null,
+      }, req);
       return;
     }
 
@@ -707,7 +729,7 @@ const server = http.createServer(async (req, res) => {
           id: doc.id,
           data: serializeForRestApi(doc.data() || {}),
         }));
-        sendJson(res, 200, { ok: true, backend: activeDbBackend, docs });
+        sendJson(res, 200, { ok: true, backend: activeDbBackend, docs }, req);
       } catch (err) {
         console.error("API GET collection error:", err);
         sendJson(res, 500, { ok: false, error: err?.message || "Collection query failed" });
@@ -737,7 +759,7 @@ const server = http.createServer(async (req, res) => {
             exists: snap.exists,
             id: snap.id,
             data: snap.exists ? serializeForRestApi(snap.data() || {}) : null,
-          });
+          }, req);
           return;
         }
 

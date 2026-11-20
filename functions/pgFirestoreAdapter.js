@@ -205,7 +205,49 @@ const INDEXED_TEXT_FIELDS = new Set([
   "storagePath",
 ]);
 
-function createPgFirestoreDb({ connectionString = "", poolOverride = null } = {}) {
+const FULL_CACHE_COLLECTIONS = new Set([
+  "videos",
+  "members",
+  "withdrawalRequests",
+  "notifications",
+  "creatorEvents",
+  "appInstalls",
+  "appConfig",
+  "supportChats",
+]);
+
+const DEFAULT_REVERIFY_INTERVAL_MS = Math.max(
+  30_000,
+  parseInt(process.env.PG_CACHE_REVERIFY_MS || String(5 * 60 * 1000), 10) || 5 * 60 * 1000
+);
+const DEFAULT_DOC_CACHE_TTL_MS = Math.max(
+  30_000,
+  parseInt(process.env.PG_DOC_CACHE_TTL_MS || String(10 * 60 * 1000), 10) || 10 * 60 * 1000
+);
+const DEFAULT_QUERY_CACHE_TTL_MS = Math.max(
+  15_000,
+  parseInt(process.env.PG_QUERY_CACHE_TTL_MS || String(3 * 60 * 1000), 10) || 3 * 60 * 1000
+);
+const MAX_FULL_CACHE_DOCS = 4000;
+const MAX_DOC_CACHE_ENTRIES = 2500;
+const MAX_QUERY_CACHE_ENTRIES = 400;
+
+function isFullCacheCollection(collectionName) {
+  if (FULL_CACHE_COLLECTIONS.has(collectionName)) return true;
+  // Also cache supportChats/{chatId}/messages subcollections with short reverify
+  if (/^supportChats\/[^/]+\/messages$/.test(collectionName)) return true;
+  return false;
+}
+
+function createPgFirestoreDb({
+  connectionString = "",
+  poolOverride = null,
+  enableCache = true,
+  reverifyIntervalMs = DEFAULT_REVERIFY_INTERVAL_MS,
+  docCacheTtlMs = DEFAULT_DOC_CACHE_TTL_MS,
+  queryCacheTtlMs = DEFAULT_QUERY_CACHE_TTL_MS,
+} = {}) {
+  const isRealPostgres = !poolOverride;
   let pool = poolOverride || null;
   if (!pool) {
     const cleanUrl = String(connectionString || "").trim();
@@ -226,6 +268,203 @@ function createPgFirestoreDb({ connectionString = "", poolOverride = null } = {}
     pool.on("error", (err) => {
       console.error("PostgreSQL pool idle client error:", err?.message || err);
     });
+  }
+
+  // Write-through in-memory caches to avoid repeatedly transferring large JSONB tables
+  // (e.g. videos with thumbnails) from Neon over public network transfer.
+  const collectionCache = new Map(); // collection -> { docs: Map<docId, rawObj>, verifiedAt, lastMaxUpdatedMs, lastRowCount, metaSynced }
+  const inflightCollectionFetches = new Map(); // collection -> Promise<entry | null>
+  const docCache = new Map(); // `${collection}::${docId}` -> { exists, raw, expiresAt }
+  const inflightDocFetches = new Map(); // `${collection}::${docId}` -> Promise<entry>
+  const queryCache = new Map(); // cacheKey -> { collection, rows, expiresAt }
+  const stats = {
+    cacheHits: 0,
+    dbReads: 0,
+    dbWrites: 0,
+    deltaSyncs: 0,
+    fastIncrements: 0,
+  };
+
+  function getDocCacheKey(collectionName, docId) {
+    return `${collectionName}::${docId}`;
+  }
+
+  function setDocCacheEntry(collectionName, docId, exists, raw) {
+    if (!enableCache) return;
+    const key = getDocCacheKey(collectionName, docId);
+    if (docCache.has(key)) docCache.delete(key);
+    if (docCache.size >= MAX_DOC_CACHE_ENTRIES) {
+      const oldestKey = docCache.keys().next().value;
+      if (oldestKey !== undefined) docCache.delete(oldestKey);
+    }
+    docCache.set(key, {
+      exists: Boolean(exists),
+      raw: exists ? raw : null,
+      expiresAt: Date.now() + docCacheTtlMs,
+    });
+  }
+
+  function getDocCacheEntry(collectionName, docId) {
+    if (!enableCache) return null;
+    const colEntry = collectionCache.get(collectionName);
+    if (colEntry) {
+      const hasDoc = colEntry.docs.has(docId);
+      return {
+        exists: hasDoc,
+        raw: hasDoc ? colEntry.docs.get(docId) : null,
+        fromCollectionCache: true,
+      };
+    }
+    const key = getDocCacheKey(collectionName, docId);
+    const hit = docCache.get(key);
+    if (!hit) return null;
+    if (Date.now() > hit.expiresAt) {
+      docCache.delete(key);
+      return null;
+    }
+    return hit;
+  }
+
+  function invalidateQueryCacheForCollection(collectionName) {
+    if (!enableCache || queryCache.size === 0) return;
+    for (const [k, v] of queryCache.entries()) {
+      if (v.collection === collectionName) {
+        queryCache.delete(k);
+      }
+    }
+  }
+
+  function updateCachesAfterWrite(collectionName, docId, nextData, returnedUpdatedMs = null) {
+    if (!enableCache) return;
+    setDocCacheEntry(collectionName, docId, true, nextData);
+    const colEntry = collectionCache.get(collectionName);
+    if (colEntry) {
+      colEntry.docs.set(docId, nextData);
+      colEntry.lastRowCount = colEntry.docs.size;
+      colEntry.verifiedAt = Date.now();
+      if (Number.isFinite(returnedUpdatedMs) && returnedUpdatedMs > 0) {
+        colEntry.lastMaxUpdatedMs = Math.max(colEntry.lastMaxUpdatedMs || 0, returnedUpdatedMs);
+      }
+    }
+    invalidateQueryCacheForCollection(collectionName);
+  }
+
+  function updateCachesAfterDelete(collectionName, docId) {
+    if (!enableCache) return;
+    setDocCacheEntry(collectionName, docId, false, null);
+    const colEntry = collectionCache.get(collectionName);
+    if (colEntry) {
+      colEntry.docs.delete(docId);
+      colEntry.lastRowCount = colEntry.docs.size;
+      colEntry.verifiedAt = Date.now();
+    }
+    invalidateQueryCacheForCollection(collectionName);
+  }
+
+  async function ensureCollectionCached(collectionName) {
+    if (!enableCache || !isFullCacheCollection(collectionName)) return null;
+
+    const now = Date.now();
+    const existing = collectionCache.get(collectionName);
+    const effectiveReverifyMs = collectionName.startsWith("supportChats/")
+      ? Math.min(reverifyIntervalMs, 60_000)
+      : reverifyIntervalMs;
+
+    if (existing && now - existing.verifiedAt < effectiveReverifyMs) {
+      return existing;
+    }
+
+    if (inflightCollectionFetches.has(collectionName)) {
+      return inflightCollectionFetches.get(collectionName);
+    }
+
+    const fetchPromise = (async () => {
+      try {
+        await ensureInitialized();
+
+        // If already cached on real Postgres, do a tiny ~20-byte COUNT/MAX(updated_at) check
+        // instead of re-downloading megabytes of JSONB thumbnails.
+        if (existing && isRealPostgres) {
+          try {
+            const metaRes = await pool.query(
+              `SELECT COUNT(*)::int AS cnt, COALESCE(EXTRACT(EPOCH FROM MAX(updated_at)) * 1000, 0)::bigint AS max_ts
+               FROM vidvora_docs
+               WHERE collection = $1`,
+              [collectionName]
+            );
+            const row = metaRes.rows && metaRes.rows[0] ? metaRes.rows[0] : null;
+            const dbCount = row ? Number(row.cnt) || 0 : 0;
+            const dbMaxTs = row ? Number(row.max_ts) || 0 : 0;
+
+            if (!existing.metaSynced) {
+              const refMs = Math.max(existing.verifiedAt + 60_000, existing.lastMaxUpdatedMs || 0);
+              if (dbCount === existing.docs.size && dbMaxTs <= refMs) {
+                existing.lastRowCount = dbCount;
+                existing.lastMaxUpdatedMs = dbMaxTs;
+                existing.metaSynced = true;
+                existing.verifiedAt = Date.now();
+                stats.deltaSyncs += 1;
+                return existing;
+              }
+            } else if (dbCount === existing.lastRowCount && dbMaxTs <= existing.lastMaxUpdatedMs) {
+              existing.verifiedAt = Date.now();
+              stats.deltaSyncs += 1;
+              return existing;
+            } else if (dbCount >= existing.lastRowCount && existing.lastMaxUpdatedMs > 0) {
+              // Only pull rows modified since our last synced timestamp!
+              const deltaRes = await pool.query(
+                `SELECT doc_id, data FROM vidvora_docs
+                 WHERE collection = $1 AND updated_at > to_timestamp($2 / 1000.0)`,
+                [collectionName, existing.lastMaxUpdatedMs]
+              );
+              stats.dbReads += 1;
+              stats.deltaSyncs += 1;
+              for (const r of deltaRes.rows || []) {
+                existing.docs.set(r.doc_id, r.data || {});
+              }
+              if (existing.docs.size <= MAX_FULL_CACHE_DOCS && existing.docs.size === dbCount) {
+                existing.lastRowCount = dbCount;
+                existing.lastMaxUpdatedMs = Math.max(existing.lastMaxUpdatedMs, dbMaxTs);
+                existing.verifiedAt = Date.now();
+                return existing;
+              }
+            }
+          } catch (metaErr) {
+            console.warn("PG cache lightweight reverify fallback:", metaErr?.message || metaErr);
+          }
+        }
+
+        // Cold load or count mismatch (e.g. external delete): load full collection once.
+        stats.dbReads += 1;
+        const res = await pool.query(
+          `SELECT doc_id, data FROM vidvora_docs WHERE collection = $1`,
+          [collectionName]
+        );
+        const rows = res.rows || [];
+        if (rows.length > MAX_FULL_CACHE_DOCS) {
+          collectionCache.delete(collectionName);
+          return null;
+        }
+        const docsMap = new Map();
+        for (const r of rows) {
+          docsMap.set(r.doc_id, r.data || {});
+        }
+        const entry = {
+          docs: docsMap,
+          verifiedAt: Date.now(),
+          lastRowCount: docsMap.size,
+          lastMaxUpdatedMs: 0,
+          metaSynced: false,
+        };
+        collectionCache.set(collectionName, entry);
+        return entry;
+      } finally {
+        inflightCollectionFetches.delete(collectionName);
+      }
+    })();
+
+    inflightCollectionFetches.set(collectionName, fetchPromise);
+    return fetchPromise;
   }
 
   let initPromise = null;
@@ -289,6 +528,43 @@ function createPgFirestoreDb({ connectionString = "", poolOverride = null } = {}
     };
   }
 
+  function applyQueryTransforms(rows, clauses, orderBys, limitCount) {
+    let out = rows;
+    if (clauses.length > 0) {
+      out = out.filter((r) => clauses.every((c) => matchesWhereClause(r.raw, c)));
+    }
+    if (orderBys.length > 0) {
+      out = [...out].sort((a, b) => {
+        for (const ob of orderBys) {
+          const av = toComparable(getFieldValue(a.raw, ob.field));
+          const bv = toComparable(getFieldValue(b.raw, ob.field));
+          if (av === bv) continue;
+          if (av === undefined || av === null) return ob.direction === "desc" ? 1 : -1;
+          if (bv === undefined || bv === null) return ob.direction === "desc" ? -1 : 1;
+          const cmp = av < bv ? -1 : 1;
+          return ob.direction === "desc" ? -cmp : cmp;
+        }
+        return 0;
+      });
+    }
+    if (Number.isFinite(limitCount) && limitCount > 0) {
+      out = out.slice(0, limitCount);
+    }
+    return out;
+  }
+
+  function buildQuerySnapshot(collectionName, rows) {
+    const docs = rows.map((r) => makeDocSnapshot(collectionName, r.id, r.raw));
+    return {
+      empty: docs.length === 0,
+      size: docs.length,
+      docs,
+      forEach(fn) {
+        docs.forEach(fn);
+      },
+    };
+  }
+
   function makeDocRef(collectionName, docId) {
     const cleanId = String(docId || "").trim() || `doc_${crypto.randomBytes(8).toString("hex")}`;
     return {
@@ -298,58 +574,171 @@ function createPgFirestoreDb({ connectionString = "", poolOverride = null } = {}
       },
       async get() {
         await ensureInitialized();
-        const res = await pool.query(
-          `SELECT data FROM vidvora_docs WHERE collection = $1 AND doc_id = $2 LIMIT 1`,
-          [collectionName, cleanId]
-        );
-        if (!res.rows || res.rows.length === 0) {
-          return makeDocSnapshot(collectionName, cleanId, null);
+
+        const cached = getDocCacheEntry(collectionName, cleanId);
+        if (cached) {
+          stats.cacheHits += 1;
+          return makeDocSnapshot(collectionName, cleanId, cached.exists ? cached.raw : null);
         }
-        return makeDocSnapshot(collectionName, cleanId, res.rows[0].data);
+
+        const key = getDocCacheKey(collectionName, cleanId);
+        if (inflightDocFetches.has(key)) {
+          const shared = await inflightDocFetches.get(key);
+          return makeDocSnapshot(collectionName, cleanId, shared.exists ? shared.raw : null);
+        }
+
+        const fetchPromise = (async () => {
+          try {
+            stats.dbReads += 1;
+            const res = await pool.query(
+              `SELECT data FROM vidvora_docs WHERE collection = $1 AND doc_id = $2 LIMIT 1`,
+              [collectionName, cleanId]
+            );
+            const found = Boolean(res.rows && res.rows.length > 0);
+            const raw = found ? res.rows[0].data : null;
+            setDocCacheEntry(collectionName, cleanId, found, raw);
+            return { exists: found, raw };
+          } finally {
+            inflightDocFetches.delete(key);
+          }
+        })();
+
+        inflightDocFetches.set(key, fetchPromise);
+        const result = await fetchPromise;
+        return makeDocSnapshot(collectionName, cleanId, result.exists ? result.raw : null);
       },
       async set(payload, options = {}) {
         await ensureInitialized();
         let nextData;
         if (options && options.merge) {
-          const existing = await pool.query(
-            `SELECT data FROM vidvora_docs WHERE collection = $1 AND doc_id = $2 LIMIT 1`,
-            [collectionName, cleanId]
-          );
-          const base = existing.rows && existing.rows[0] ? existing.rows[0].data : {};
+          let base = null;
+          const cached = getDocCacheEntry(collectionName, cleanId);
+          if (cached) {
+            base = cached.exists ? cached.raw : {};
+            stats.cacheHits += 1;
+          } else {
+            stats.dbReads += 1;
+            const existing = await pool.query(
+              `SELECT data FROM vidvora_docs WHERE collection = $1 AND doc_id = $2 LIMIT 1`,
+              [collectionName, cleanId]
+            );
+            base = existing.rows && existing.rows[0] ? existing.rows[0].data : {};
+          }
           nextData = applyMergePatch(base, payload);
         } else {
           nextData = applyMergePatch({}, payload);
         }
-        await pool.query(
-          `INSERT INTO vidvora_docs (collection, doc_id, data, updated_at)
-           VALUES ($1, $2, $3::jsonb, NOW())
-           ON CONFLICT (collection, doc_id)
-           DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
-          [collectionName, cleanId, JSON.stringify(nextData)]
-        );
+        stats.dbWrites += 1;
+        const sql = isRealPostgres
+          ? `INSERT INTO vidvora_docs (collection, doc_id, data, updated_at)
+             VALUES ($1, $2, $3::jsonb, NOW())
+             ON CONFLICT (collection, doc_id)
+             DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+             RETURNING (EXTRACT(EPOCH FROM updated_at) * 1000)::bigint AS updated_ms`
+          : `INSERT INTO vidvora_docs (collection, doc_id, data, updated_at)
+             VALUES ($1, $2, $3::jsonb, NOW())
+             ON CONFLICT (collection, doc_id)
+             DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`;
+        const res = await pool.query(sql, [collectionName, cleanId, JSON.stringify(nextData)]);
+        const returnedMs =
+          isRealPostgres && res.rows && res.rows[0] ? Number(res.rows[0].updated_ms) || null : null;
+        updateCachesAfterWrite(collectionName, cleanId, nextData, returnedMs);
       },
       async update(updates) {
         await ensureInitialized();
-        const existing = await pool.query(
-          `SELECT data FROM vidvora_docs WHERE collection = $1 AND doc_id = $2 LIMIT 1`,
-          [collectionName, cleanId]
-        );
-        const base = existing.rows && existing.rows[0] ? existing.rows[0].data : {};
+
+        // Fast-path for simple atomic numeric increment (e.g. { totalViews: { __vidvora_inc__: 1 } })
+        // on real Postgres: avoids downloading OR re-uploading large base64 thumbnail JSONB!
+        const updateEntries = updates && typeof updates === "object" ? Object.entries(updates) : [];
+        if (
+          isRealPostgres &&
+          updateEntries.length === 1 &&
+          /^[a-zA-Z0-9_]+$/.test(updateEntries[0][0])
+        ) {
+          const [incKey, incRaw] = updateEntries[0];
+          const serializedInc = serializeValue(incRaw);
+          if (
+            serializedInc &&
+            typeof serializedInc === "object" &&
+            typeof serializedInc.__vidvora_inc__ === "number" &&
+            Number.isFinite(serializedInc.__vidvora_inc__)
+          ) {
+            const delta = serializedInc.__vidvora_inc__;
+            try {
+              stats.dbWrites += 1;
+              const fastRes = await pool.query(
+                `UPDATE vidvora_docs
+                 SET data = jsonb_set(
+                   data,
+                   ARRAY[$3::text],
+                   to_jsonb(COALESCE((data->>$3)::numeric, 0) + $4),
+                   true
+                 ),
+                 updated_at = NOW()
+                 WHERE collection = $1 AND doc_id = $2
+                 RETURNING (EXTRACT(EPOCH FROM updated_at) * 1000)::bigint AS updated_ms`,
+                [collectionName, cleanId, incKey, delta]
+              );
+              if (fastRes.rows && fastRes.rows.length > 0) {
+                stats.fastIncrements += 1;
+                const returnedMs = Number(fastRes.rows[0].updated_ms) || null;
+                const cached = getDocCacheEntry(collectionName, cleanId);
+                if (cached && cached.exists && cached.raw) {
+                  const patched = applyMergePatch(cached.raw, updates);
+                  updateCachesAfterWrite(collectionName, cleanId, patched, returnedMs);
+                } else {
+                  const colEntry = collectionCache.get(collectionName);
+                  if (colEntry && Number.isFinite(returnedMs) && returnedMs > 0) {
+                    colEntry.lastMaxUpdatedMs = Math.max(colEntry.lastMaxUpdatedMs || 0, returnedMs);
+                  }
+                  invalidateQueryCacheForCollection(collectionName);
+                }
+                return;
+              }
+            } catch (fastErr) {
+              console.warn("PG fast increment fallback:", fastErr?.message || fastErr);
+            }
+          }
+        }
+
+        let base = null;
+        const cached = getDocCacheEntry(collectionName, cleanId);
+        if (cached) {
+          base = cached.exists ? cached.raw : {};
+          stats.cacheHits += 1;
+        } else {
+          stats.dbReads += 1;
+          const existing = await pool.query(
+            `SELECT data FROM vidvora_docs WHERE collection = $1 AND doc_id = $2 LIMIT 1`,
+            [collectionName, cleanId]
+          );
+          base = existing.rows && existing.rows[0] ? existing.rows[0].data : {};
+        }
         const nextData = applyMergePatch(base, updates);
-        await pool.query(
-          `INSERT INTO vidvora_docs (collection, doc_id, data, updated_at)
-           VALUES ($1, $2, $3::jsonb, NOW())
-           ON CONFLICT (collection, doc_id)
-           DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
-          [collectionName, cleanId, JSON.stringify(nextData)]
-        );
+        stats.dbWrites += 1;
+        const sql = isRealPostgres
+          ? `INSERT INTO vidvora_docs (collection, doc_id, data, updated_at)
+             VALUES ($1, $2, $3::jsonb, NOW())
+             ON CONFLICT (collection, doc_id)
+             DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+             RETURNING (EXTRACT(EPOCH FROM updated_at) * 1000)::bigint AS updated_ms`
+          : `INSERT INTO vidvora_docs (collection, doc_id, data, updated_at)
+             VALUES ($1, $2, $3::jsonb, NOW())
+             ON CONFLICT (collection, doc_id)
+             DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`;
+        const res = await pool.query(sql, [collectionName, cleanId, JSON.stringify(nextData)]);
+        const returnedMs =
+          isRealPostgres && res.rows && res.rows[0] ? Number(res.rows[0].updated_ms) || null : null;
+        updateCachesAfterWrite(collectionName, cleanId, nextData, returnedMs);
       },
       async delete() {
         await ensureInitialized();
+        stats.dbWrites += 1;
         await pool.query(
           `DELETE FROM vidvora_docs WHERE collection = $1 AND doc_id = $2`,
           [collectionName, cleanId]
         );
+        updateCachesAfterDelete(collectionName, cleanId);
       },
     };
   }
@@ -372,6 +761,34 @@ function createPgFirestoreDb({ connectionString = "", poolOverride = null } = {}
       },
       async get() {
         await ensureInitialized();
+
+        // 1. Try full write-through collection cache first (zero Neon egress on hits!)
+        if (enableCache && isFullCacheCollection(collectionName)) {
+          const cachedCol = await ensureCollectionCached(collectionName);
+          if (cachedCol) {
+            stats.cacheHits += 1;
+            const allRows = [];
+            for (const [id, raw] of cachedCol.docs.entries()) {
+              allRows.push({ id, raw });
+            }
+            const filtered = applyQueryTransforms(allRows, clauses, orderBys, limitCount);
+            return buildQuerySnapshot(collectionName, filtered);
+          }
+        }
+
+        // 2. For non-full-cached collections (e.g. accessLinks), check short queryCache
+        const qKey = enableCache
+          ? JSON.stringify([collectionName, clauses, orderBys, limitCount])
+          : "";
+        if (enableCache) {
+          const qHit = queryCache.get(qKey);
+          if (qHit && Date.now() <= qHit.expiresAt) {
+            stats.cacheHits += 1;
+            return buildQuerySnapshot(collectionName, qHit.rows);
+          }
+          if (qHit) queryCache.delete(qKey);
+        }
+
         const sqlParams = [collectionName];
         const sqlWhere = ["collection = $1"];
         const remainingClauses = [];
@@ -400,44 +817,37 @@ function createPgFirestoreDb({ connectionString = "", poolOverride = null } = {}
           sql += ` LIMIT $${sqlParams.length}`;
         }
 
+        stats.dbReads += 1;
         const res = await pool.query(sql, sqlParams);
         let rows = (res.rows || []).map((row) => ({
           id: row.doc_id,
           raw: row.data || {},
         }));
 
-        if (remainingClauses.length > 0) {
-          rows = rows.filter((r) => remainingClauses.every((c) => matchesWhereClause(r.raw, c)));
-        }
+        rows = applyQueryTransforms(
+          rows,
+          remainingClauses,
+          orderBys,
+          canApplySqlLimit ? null : limitCount
+        );
 
-        if (orderBys.length > 0) {
-          rows.sort((a, b) => {
-            for (const ob of orderBys) {
-              const av = toComparable(getFieldValue(a.raw, ob.field));
-              const bv = toComparable(getFieldValue(b.raw, ob.field));
-              if (av === bv) continue;
-              if (av === undefined || av === null) return ob.direction === "desc" ? 1 : -1;
-              if (bv === undefined || bv === null) return ob.direction === "desc" ? -1 : 1;
-              const cmp = av < bv ? -1 : 1;
-              return ob.direction === "desc" ? -cmp : cmp;
-            }
-            return 0;
+        if (enableCache) {
+          if (queryCache.size >= MAX_QUERY_CACHE_ENTRIES) {
+            const oldestKey = queryCache.keys().next().value;
+            if (oldestKey !== undefined) queryCache.delete(oldestKey);
+          }
+          queryCache.set(qKey, {
+            collection: collectionName,
+            rows,
+            expiresAt: Date.now() + queryCacheTtlMs,
           });
+          // Also warm individual docCache for returned rows (e.g. accessLinks lookups)
+          for (const r of rows) {
+            setDocCacheEntry(collectionName, r.id, true, r.raw);
+          }
         }
 
-        if (!canApplySqlLimit && Number.isFinite(limitCount) && limitCount > 0) {
-          rows = rows.slice(0, limitCount);
-        }
-
-        const docs = rows.map((r) => makeDocSnapshot(collectionName, r.id, r.raw));
-        return {
-          empty: docs.length === 0,
-          size: docs.length,
-          docs,
-          forEach(fn) {
-            docs.forEach(fn);
-          },
-        };
+        return buildQuerySnapshot(collectionName, rows);
       },
     };
   }
@@ -459,6 +869,23 @@ function createPgFirestoreDb({ connectionString = "", poolOverride = null } = {}
     isPostgresAdapter: true,
     pool,
     ensureInitialized,
+    getCacheStats() {
+      const cachedCollections = {};
+      for (const [col, entry] of collectionCache.entries()) {
+        cachedCollections[col] = entry.docs.size;
+      }
+      return {
+        ...stats,
+        cachedCollections,
+        docCacheSize: docCache.size,
+        queryCacheSize: queryCache.size,
+      };
+    },
+    clearCache() {
+      collectionCache.clear();
+      docCache.clear();
+      queryCache.clear();
+    },
     async healthCheck() {
       await ensureInitialized();
       await pool.query("SELECT 1");

@@ -119,3 +119,69 @@ test("pgFirestoreAdapter supports doc set/merge/update/delete, timestamps, incre
   const merged = applyMergePatch({ a: 1, nested: { x: 2 } }, { nested: { y: 3 } });
   assert.deepEqual(merged, { a: 1, nested: { x: 2, y: 3 } });
 });
+
+test("pgFirestoreAdapter serves repeated collection & doc polls from RAM cache and keeps write-through fresh", async () => {
+  const fakePool = createFakePgPool();
+  let selectCount = 0;
+  const wrappedPool = {
+    async query(sql, params) {
+      if (/^SELECT /i.test(String(sql || "").trim()) && !/^SELECT 1/i.test(String(sql || "").trim())) {
+        selectCount += 1;
+      }
+      return fakePool.query(sql, params);
+    },
+  };
+
+  // Seed directly into underlying table before adapter reads
+  await fakePool.query(
+    `INSERT INTO vidvora_docs (collection, doc_id, data, updated_at) VALUES ($1, $2, $3::jsonb, NOW())`,
+    ["videos", "v1", JSON.stringify({ videoId: "v1", title: "Video 1", isActive: true, totalViews: 10 })]
+  );
+  await fakePool.query(
+    `INSERT INTO vidvora_docs (collection, doc_id, data, updated_at) VALUES ($1, $2, $3::jsonb, NOW())`,
+    ["videos", "v2", JSON.stringify({ videoId: "v2", title: "Video 2", isActive: false, totalViews: 3 })]
+  );
+
+  const db = createPgFirestoreDb({ poolOverride: wrappedPool });
+
+  // 10 concurrent polls on videos should fire only 1 SQL SELECT (single-flight deduplication)
+  const concurrentResults = await Promise.all(
+    Array.from({ length: 10 }, () => db.collection("videos").where("isActive", "==", true).get())
+  );
+  assert.equal(selectCount, 1);
+  for (const snap of concurrentResults) {
+    assert.equal(snap.docs.length, 1);
+    assert.equal(snap.docs[0].id, "v1");
+  }
+
+  // Subsequent unfiltered poll, filtered poll, and single-doc read all hit RAM cache (0 extra SQL SELECTs!)
+  const allSnap = await db.collection("videos").get();
+  assert.equal(allSnap.docs.length, 2);
+  const singleSnap = await db.collection("videos").doc("v1").get();
+  assert.equal(singleSnap.data().totalViews, 10);
+  assert.equal(selectCount, 1);
+
+  // Write-through update skips SELECT and immediately reflects in RAM cache
+  await db.collection("videos").doc("v1").update({ totalViews: { __vidvora_inc__: 5 } });
+  assert.equal(selectCount, 1);
+  const afterUpdate = await db.collection("videos").doc("v1").get();
+  assert.equal(afterUpdate.data().totalViews, 15);
+  assert.equal(selectCount, 1);
+
+  // Write-through set & delete reflect immediately in collection queries without extra SQL SELECTs
+  await db.collection("videos").doc("v3").set({ videoId: "v3", title: "Video 3", isActive: true, totalViews: 0 });
+  const activeAfterAdd = await db.collection("videos").where("isActive", "==", true).get();
+  assert.equal(activeAfterAdd.docs.length, 2);
+  assert.equal(selectCount, 1);
+
+  await db.collection("videos").doc("v1").delete();
+  const activeAfterDel = await db.collection("videos").where("isActive", "==", true).get();
+  assert.equal(activeAfterDel.docs.length, 1);
+  assert.equal(activeAfterDel.docs[0].id, "v3");
+  assert.equal(selectCount, 1);
+
+  const cacheStats = db.getCacheStats();
+  assert.ok(cacheStats.cacheHits >= 10);
+  assert.equal(cacheStats.dbReads, 1);
+});
+

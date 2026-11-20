@@ -823,53 +823,35 @@ fun CreatorLifetimeViewsHeroCard(
       Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
       ) {
-        Row(
-          verticalAlignment = Alignment.CenterVertically,
-          horizontalArrangement = Arrangement.spacedBy(10.dp)
+        Box(
+          modifier = Modifier
+            .size(40.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(MasalaRedAccent.copy(alpha = 0.18f))
+            .border(1.dp, MasalaRedAccent.copy(alpha = 0.45f), RoundedCornerShape(12.dp)),
+          contentAlignment = Alignment.Center
         ) {
-          Box(
-            modifier = Modifier
-              .size(40.dp)
-              .clip(RoundedCornerShape(12.dp))
-              .background(MasalaRedAccent.copy(alpha = 0.18f))
-              .border(1.dp, MasalaRedAccent.copy(alpha = 0.45f), RoundedCornerShape(12.dp)),
-            contentAlignment = Alignment.Center
-          ) {
-            Icon(
-              imageVector = Icons.Default.Visibility,
-              contentDescription = "My Lifetime Views",
-              tint = MasalaRedAccent,
-              modifier = Modifier.size(21.dp)
-            )
-          }
-          Column {
-            Text(
-              text = "MY LIFETIME VIEWS",
-              color = MasalaTextSecondary,
-              fontSize = 10.5.sp,
-              fontWeight = FontWeight.ExtraBold,
-              letterSpacing = 0.8.sp
-            )
-            Text(
-              text = "Total Credited Creator Views",
-              color = MasalaTextMuted,
-              fontSize = 11.sp
-            )
-          }
+          Icon(
+            imageVector = Icons.Default.Visibility,
+            contentDescription = "My Lifetime Views",
+            tint = MasalaRedAccent,
+            modifier = Modifier.size(21.dp)
+          )
         }
-        Surface(
-          shape = RoundedCornerShape(12.dp),
-          color = MasalaRedAccent.copy(alpha = 0.15f),
-          border = BorderStroke(1.dp, MasalaRedAccent.copy(alpha = 0.4f))
-        ) {
+        Column {
           Text(
-            text = "${formatInr(analytics.viewRatePer1000)} / 1K",
-            color = MasalaRedAccent,
-            fontSize = 9.5.sp,
+            text = "MY LIFETIME VIEWS",
+            color = MasalaTextSecondary,
+            fontSize = 10.5.sp,
             fontWeight = FontWeight.ExtraBold,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+            letterSpacing = 0.8.sp
+          )
+          Text(
+            text = "Total Credited Creator Views",
+            color = MasalaTextMuted,
+            fontSize = 11.sp
           )
         }
       }

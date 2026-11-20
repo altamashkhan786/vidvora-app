@@ -3,17 +3,22 @@
 - **App Name:** VidVora
 - **Package ID:** `com.aistudio.vidvora.vstr`
 - **Version:** `1.7` (`versionCode = 8`)
-- **Latest Source Status:** All v1.7 features are compiled and verified (Fast Instant Video Start via Direct HTTP Range Streaming + Tuned ExoPlayer Buffers, 1-Device-1-Install Deduplication + Automatic Emulator Exclusion, Clean Telegram Bot Posts Without Generic OG Preview Banner, Permanent Login Persistence, and Instant Admin Support Notifications).
+- **APK File:** `release/VidVora-v1.7.apk` (~33.5 MB)
+- **Latest Source Status:** All v1.7 features are compiled and verified:
+  - Fast Instant Video Start via Direct HTTP Range Streaming + Tuned ExoPlayer Buffers
+  - 1-Device-1-Install Deduplication + Automatic Emulator Exclusion (with Admin cleanup button)
+  - Clean Telegram Bot Posts Without Generic OG Preview Banner + Guaranteed Video Thumbnails
+  - Telegram Bot Auto-Channel Posting (`/setchannel`, `/channel`, `/clearchannel`)
+  - Permanent Login Persistence & Instant Admin Support Notifications
 
-## How to Download the Latest VidVora v1.7 APK (IMPORTANT)
+## How to Install `VidVora-v1.7.apk`
 
-> **Note:** Do **NOT** download `VidVora.apk` directly from the AI Studio File Explorer — the browser file explorer caches large binary files (>30 MB) and serves an old `v1.0` copy.
+1. Download **`release/VidVora-v1.7.apk`** (or push to GitHub and download from **GitHub Releases**).
+2. If you already had an older build signed with a different key, uninstall the old VidVora app once and install `VidVora-v1.7.apk`.
 
-Always get the fresh **v1.7** APK using one of these official methods:
-
-1. **AI Studio Menu (Fastest & Recommended):** Tap the **Settings / Download / Build menu (⚙️)** at the top of AI Studio → select **Generate APK / AAB** (or **Download APK**). This compiles directly from the latest `v1.7` source code.
-2. **GitHub Releases (Automatic):** Push this project to GitHub (`main` / `master`) — `.github/workflows/publish-apk.yml` automatically builds the fresh `VidVora.apk` (`v1.7`) and uploads it to your GitHub Releases page.
-3. **Android Studio:** Export project ZIP → open in Android Studio → **Build → Build Bundle(s) / APK(s) → Build APK(s)**.
+> **Tip:** If your mobile browser or AI Studio File Explorer ever fails or truncates a large (>30 MB) file download (`"App not installed as package appears to be invalid"`), you can always download the exact same fresh **v1.7** APK via:
+> - **AI Studio Menu (⚙️) → Generate APK / AAB** (recommended), or
+> - **GitHub Releases** (automatically built by `.github/workflows/publish-apk.yml` after you push to GitHub).
 
 - **Privacy Policy PDF:** `release/VidVora_Privacy_Policy.pdf` (Live URL: `https://vidvora-share-bot.onrender.com/privacy-policy`)
 - **Documentation PDF:** `release/VidVora_Documentation.pdf` (also in `docs/VidVora_Documentation.pdf`)
