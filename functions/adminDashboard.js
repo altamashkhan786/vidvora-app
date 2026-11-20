@@ -611,6 +611,8 @@ function renderAdminDashboardHtml() {
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>VidVora Analytics — Installs &amp; Views Dashboard</title>
+<link rel="icon" type="image/png" href="/vidvora-icon.png" />
+<link rel="apple-touch-icon" href="/vidvora-icon.png" />
 <style>
   :root {
     --bg: #080d16;
@@ -662,23 +664,37 @@ function renderAdminDashboardHtml() {
   }
   .brand-row {
     display: flex;
-    align-items: center;
-    gap: 12px;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
     margin-bottom: 18px;
   }
-  .brand-logo {
-    width: 44px;
-    height: 44px;
-    border-radius: 12px;
-    background: linear-gradient(135deg, #22d3ee, #10b981);
-    display: grid;
-    place-items: center;
-    font-weight: 800;
-    font-size: 20px;
-    color: #06131c;
-    box-shadow: 0 6px 20px rgba(34, 211, 238, 0.32);
+  .login-logo-img {
+    height: 38px;
+    width: auto;
+    display: block;
+    object-fit: contain;
+    filter: drop-shadow(0 4px 14px rgba(34, 211, 238, 0.25));
   }
-  .login-card h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
+  .topbar-logo-img {
+    height: 30px;
+    width: auto;
+    display: block;
+    object-fit: contain;
+    filter: drop-shadow(0 2px 10px rgba(34, 211, 238, 0.22));
+  }
+  .analytics-tag {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--cyan);
+    background: rgba(34, 211, 238, 0.12);
+    border: 1px solid rgba(34, 211, 238, 0.3);
+    padding: 3px 9px;
+    border-radius: 999px;
+  }
+  .login-card h1 { font-size: 20px; font-weight: 700; letter-spacing: -0.02em; }
   .login-card p { color: var(--text-muted); font-size: 13.5px; line-height: 1.5; margin-bottom: 22px; }
   .field-label { display: block; font-size: 12.5px; color: var(--text-muted); margin-bottom: 8px; font-weight: 600; }
   .pass-box { position: relative; margin-bottom: 16px; }
@@ -1006,13 +1022,13 @@ function renderAdminDashboardHtml() {
 <div id="loginView" class="login-wrap">
   <div class="login-card">
     <div class="brand-row">
-      <div class="brand-logo">V</div>
-      <div>
-        <h1>VidVora Analytics</h1>
-        <div style="font-size:12px;color:var(--text-muted);">Desktop Chrome Admin Console</div>
+      <img src="/vidvora-logo.png" alt="VidVora" class="login-logo-img" />
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        <span class="analytics-tag">Analytics</span>
+        <span style="font-size:12px;color:var(--text-muted);">Desktop Chrome Admin Console</span>
       </div>
     </div>
-    <p>Superadmin Master Passkey dalein — live App Install Report, 24h Hourly Views Graph aur Creator Performance dekhne ke liye.</p>
+    <p>Superadmin Master Passkey dalein — live App Install Report, Country/City Views aur Views Graph dekhne ke liye.</p>
     <div id="loginError" class="error-banner"></div>
     <form id="loginForm">
       <label class="field-label" for="passkeyInput">Superadmin Master Passkey</label>
@@ -1029,13 +1045,13 @@ function renderAdminDashboardHtml() {
   <header class="topbar">
     <div class="topbar-inner">
       <div class="topbar-left">
-        <div class="brand-logo" style="width:36px;height:36px;font-size:17px;border-radius:10px;">V</div>
         <div>
-          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-            <span class="topbar-title">VidVora Analytics</span>
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+            <img src="/vidvora-logo.png" alt="VidVora" class="topbar-logo-img" />
+            <span class="analytics-tag">Analytics</span>
             <span class="live-pill"><span class="live-dot"></span>Live RAM Cache (0 Extra Neon Cost)</span>
           </div>
-          <div id="lastUpdatedText" class="updated-text">Loading live metrics...</div>
+          <div id="lastUpdatedText" class="updated-text" style="margin-top:4px;">Loading live metrics...</div>
         </div>
       </div>
       <div class="topbar-controls">

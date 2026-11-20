@@ -182,8 +182,15 @@ test("buildAdminDashboardStats computes installs, 24h views, daily series, and s
 });
 
 test("renderAdminDashboardHtml returns complete dashboard HTML with valid inline JS", () => {
+  const fs = require("fs");
+  const path = require("path");
+  assert.ok(fs.existsSync(path.join(__dirname, "vidvora-logo.png")));
+  assert.ok(fs.existsSync(path.join(__dirname, "vidvora-icon.png")));
+
   const html = renderAdminDashboardHtml();
   assert.ok(html.includes("<!DOCTYPE html>"));
+  assert.ok(html.includes("/vidvora-logo.png"));
+  assert.ok(html.includes("/vidvora-icon.png"));
   assert.ok(html.includes("/api/admin-dashboard/login"));
   assert.ok(html.includes("/api/admin-dashboard/stats"));
   assert.ok(html.includes("installsCanvas"));

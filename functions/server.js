@@ -1,4 +1,6 @@
 const http = require("http");
+const fs = require("fs");
+const path = require("path");
 const crypto = require("crypto");
 const zlib = require("zlib");
 const admin = require("firebase-admin");
@@ -1121,6 +1123,39 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(500, { "Content-Type": "text/plain" });
         res.end("Thumbnail error");
       }
+    }
+    return;
+  }
+
+  if (
+    (req.method === "GET" || req.method === "HEAD") &&
+    (pathname === "/vidvora-logo.png" ||
+      pathname === "/vidvora-icon.png" ||
+      pathname === "/favicon.ico")
+  ) {
+    const fileName = pathname === "/vidvora-logo.png" ? "vidvora-logo.png" : "vidvora-icon.png";
+    const assetPath = path.join(__dirname, fileName);
+    if (!server._brandAssetCache) server._brandAssetCache = new Map();
+    let buf = server._brandAssetCache.get(fileName);
+    if (!buf) {
+      try {
+        buf = fs.readFileSync(assetPath);
+        server._brandAssetCache.set(fileName, buf);
+      } catch (_) {
+        res.writeHead(404, { "Content-Type": "text/plain" });
+        res.end("Logo asset not found");
+        return;
+      }
+    }
+    res.writeHead(200, {
+      "Content-Type": "image/png",
+      "Cache-Control": "public, max-age=86400",
+      "Content-Length": buf.length,
+    });
+    if (req.method === "HEAD") {
+      res.end();
+    } else {
+      res.end(buf);
     }
     return;
   }
