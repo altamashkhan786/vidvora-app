@@ -88,11 +88,185 @@ function base64UrlDecodeToString(input) {
   return Buffer.from(normalized + pad, "base64").toString("utf8");
 }
 
-function createAdminDashboardToken(secret, ttlMs = DEFAULT_TOKEN_TTL_MS, nowMs = Date.now()) {
+const TEAM_ACCESS_DOC_ID = "dashboardTeamAccess";
+const MAX_TEAM_MEMBERS = 50;
+const READABLE_PASSKEY_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+function hashTeamPasskey(rawPasskey) {
+  const clean = String(rawPasskey || "").trim();
+  if (!clean) throw new Error("Passkey cannot be empty");
+  const salt = crypto.randomBytes(16).toString("hex");
+  const derived = crypto.scryptSync(clean, salt, 64).toString("hex");
+  return `scrypt$${salt}$${derived}`;
+}
+
+function verifyTeamPasskeyHash(rawPasskey, storedHash) {
+  const clean = String(rawPasskey || "").trim();
+  const rawHash = String(storedHash || "").trim();
+  if (!clean || !rawHash) return false;
+  const parts = rawHash.split("$");
+  if (parts.length !== 3 || parts[0] !== "scrypt") return false;
+  const [, salt, expectedHex] = parts;
+  if (!salt || !expectedHex) return false;
+  try {
+    const derived = crypto.scryptSync(clean, salt, 64);
+    const expected = Buffer.from(expectedHex, "hex");
+    if (derived.length !== expected.length) return false;
+    return crypto.timingSafeEqual(derived, expected);
+  } catch (_) {
+    return false;
+  }
+}
+
+function generateReadableTeamPasskey() {
+  const bytes = crypto.randomBytes(12);
+  let chars = "";
+  for (let i = 0; i < 12; i++) {
+    chars += READABLE_PASSKEY_ALPHABET[bytes[i] % READABLE_PASSKEY_ALPHABET.length];
+  }
+  return `VV-${chars.slice(0, 4)}-${chars.slice(4, 8)}-${chars.slice(8, 12)}`;
+}
+
+function sanitizeTeamMembersForResponse(members) {
+  if (!Array.isArray(members)) return [];
+  return members
+    .filter((m) => m && typeof m === "object" && m.id && m.isActive !== false)
+    .map((m) => ({
+      id: String(m.id),
+      label: String(m.label || "Team Member"),
+      createdAtMs: toSafeNumber(m.createdAtMs, 0),
+      lastLoginAtMs: toSafeNumber(m.lastLoginAtMs, 0),
+      isActive: true,
+    }))
+    .sort((a, b) => b.createdAtMs - a.createdAtMs);
+}
+
+async function loadTeamAccessMembers(db) {
+  if (!db) return [];
+  try {
+    const snap = await db.collection("appConfig").doc(TEAM_ACCESS_DOC_ID).get();
+    if (!snap || !snap.exists) return [];
+    const data = snap.data() || {};
+    return Array.isArray(data.members) ? data.members : [];
+  } catch (err) {
+    console.warn("Failed to load dashboardTeamAccess:", err?.message || err);
+    return [];
+  }
+}
+
+async function saveTeamAccessMembers(db, members, nowMs = Date.now()) {
+  await db.collection("appConfig").doc(TEAM_ACCESS_DOC_ID).set(
+    {
+      members,
+      updatedAtMs: nowMs,
+    },
+    { merge: true }
+  );
+}
+
+async function authenticateTeamPasskey(db, rawPasskey, nowMs = Date.now()) {
+  const clean = String(rawPasskey || "").trim();
+  if (!clean || !db) return null;
+  const members = await loadTeamAccessMembers(db);
+  for (let i = 0; i < members.length; i++) {
+    const entry = members[i];
+    if (!entry || entry.isActive === false || !entry.id || !entry.passkeyHash) continue;
+    if (verifyTeamPasskeyHash(clean, entry.passkeyHash)) {
+      const updated = members.map((m, idx) =>
+        idx === i ? { ...m, lastLoginAtMs: nowMs } : m
+      );
+      saveTeamAccessMembers(db, updated, nowMs).catch((err) => {
+        console.warn("Failed to update team lastLoginAtMs:", err?.message || err);
+      });
+      return {
+        id: String(entry.id),
+        label: String(entry.label || "Team Member"),
+        role: "team",
+      };
+    }
+  }
+  return null;
+}
+
+async function isTeamMemberActive(db, memberId) {
+  const cleanId = String(memberId || "").trim();
+  if (!cleanId || !db) return false;
+  const members = await loadTeamAccessMembers(db);
+  return members.some((m) => m && m.id === cleanId && m.isActive !== false);
+}
+
+async function createTeamAccessMember(db, { label, passkey }, nowMs = Date.now()) {
+  const cleanLabel = String(label || "").replace(/\s+/g, " ").trim().slice(0, 40);
+  if (cleanLabel.length < 2) {
+    throw new Error("Team member ka naam kam se kam 2 letters ka hona chahiye.");
+  }
+  let plainPasskey = String(passkey || "").trim();
+  if (plainPasskey) {
+    if (plainPasskey.length < 6 || plainPasskey.length > 64) {
+      throw new Error("Custom passkey 6 se 64 characters ke beech hona chahiye.");
+    }
+  } else {
+    plainPasskey = generateReadableTeamPasskey();
+  }
+
+  const existing = await loadTeamAccessMembers(db);
+  const activeMembers = existing.filter((m) => m && m.id && m.isActive !== false);
+  if (activeMembers.length >= MAX_TEAM_MEMBERS) {
+    throw new Error(`Maximum ${MAX_TEAM_MEMBERS} team logins allowed. Purane unused logins revoke karein.`);
+  }
+
+  const newEntry = {
+    id: `tm_${crypto.randomBytes(6).toString("hex")}`,
+    label: cleanLabel,
+    passkeyHash: hashTeamPasskey(plainPasskey),
+    createdAtMs: nowMs,
+    lastLoginAtMs: 0,
+    isActive: true,
+  };
+  const nextMembers = [newEntry, ...activeMembers];
+  await saveTeamAccessMembers(db, nextMembers, nowMs);
+
+  return {
+    member: {
+      id: newEntry.id,
+      label: newEntry.label,
+      createdAtMs: newEntry.createdAtMs,
+      lastLoginAtMs: 0,
+      isActive: true,
+    },
+    plainPasskey,
+    members: sanitizeTeamMembersForResponse(nextMembers),
+  };
+}
+
+async function revokeTeamAccessMember(db, memberId, nowMs = Date.now()) {
+  const cleanId = String(memberId || "").trim();
+  if (!cleanId) throw new Error("Missing team member id");
+  const existing = await loadTeamAccessMembers(db);
+  const nextMembers = existing.filter((m) => m && m.id && m.id !== cleanId && m.isActive !== false);
+  await saveTeamAccessMembers(db, nextMembers, nowMs);
+  return sanitizeTeamMembersForResponse(nextMembers);
+}
+
+function createAdminDashboardToken(secret, optionsOrTtl = DEFAULT_TOKEN_TTL_MS, nowMs = Date.now()) {
   const cleanSecret = String(secret || "").trim();
   if (!cleanSecret) throw new Error("Missing signing secret");
+  let role = "superadmin";
+  let sub = "superadmin";
+  let label = "Superadmin";
+  let ttlMs = DEFAULT_TOKEN_TTL_MS;
+  if (typeof optionsOrTtl === "number") {
+    ttlMs = optionsOrTtl;
+  } else if (optionsOrTtl && typeof optionsOrTtl === "object") {
+    role = optionsOrTtl.role === "team" ? "team" : "superadmin";
+    sub = String(optionsOrTtl.sub || (role === "superadmin" ? "superadmin" : "")).trim();
+    label = String(optionsOrTtl.label || (role === "superadmin" ? "Superadmin" : "Team Member")).trim().slice(0, 48);
+    if (typeof optionsOrTtl.ttlMs === "number") ttlMs = optionsOrTtl.ttlMs;
+  }
   const payload = {
-    role: "superadmin",
+    role,
+    sub,
+    label,
     iat: nowMs,
     exp: nowMs + Math.max(60_000, ttlMs),
   };
@@ -103,30 +277,41 @@ function createAdminDashboardToken(secret, ttlMs = DEFAULT_TOKEN_TTL_MS, nowMs =
   return `${encodedPayload}.${signature}`;
 }
 
-function verifyAdminDashboardToken(token, secret, nowMs = Date.now()) {
+function verifyAdminDashboardSession(token, secret, nowMs = Date.now()) {
   const cleanToken = String(token || "").trim();
   const cleanSecret = String(secret || "").trim();
-  if (!cleanToken || !cleanSecret) return false;
+  if (!cleanToken || !cleanSecret) return null;
   const parts = cleanToken.split(".");
-  if (parts.length !== 2) return false;
+  if (parts.length !== 2) return null;
   const [encodedPayload, providedSig] = parts;
-  if (!encodedPayload || !providedSig) return false;
+  if (!encodedPayload || !providedSig) return null;
 
   const expectedSig = base64UrlEncode(
     crypto.createHmac("sha256", cleanSecret).update(encodedPayload).digest()
   );
   const a = Buffer.from(providedSig, "utf8");
   const b = Buffer.from(expectedSig, "utf8");
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return false;
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
 
   try {
     const payload = JSON.parse(base64UrlDecodeToString(encodedPayload));
-    if (payload.role !== "superadmin") return false;
-    if (typeof payload.exp !== "number" || payload.exp <= nowMs) return false;
-    return true;
+    if (payload.role !== "superadmin" && payload.role !== "team") return null;
+    if (typeof payload.exp !== "number" || payload.exp <= nowMs) return null;
+    if (payload.role === "team" && !String(payload.sub || "").trim()) return null;
+    return {
+      role: payload.role,
+      sub: String(payload.sub || (payload.role === "superadmin" ? "superadmin" : "")),
+      label: String(payload.label || (payload.role === "superadmin" ? "Superadmin" : "Team Member")),
+      iat: toSafeNumber(payload.iat, 0),
+      exp: payload.exp,
+    };
   } catch (_) {
-    return false;
+    return null;
   }
+}
+
+function verifyAdminDashboardToken(token, secret, nowMs = Date.now()) {
+  return Boolean(verifyAdminDashboardSession(token, secret, nowMs));
 }
 
 function parseCookies(cookieHeader) {
@@ -1162,6 +1347,67 @@ function renderAdminDashboardHtml() {
     .table-toolbar > div { width: 100%; }
     .tab-pill { padding: 7px 11px; font-size: 12px; }
     .login-card { padding: 28px 20px; }
+    .team-form-grid { grid-template-columns: 1fr; }
+  }
+  .role-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+  }
+  .role-pill.super {
+    background: rgba(167, 139, 250, 0.14);
+    border: 1px solid rgba(167, 139, 250, 0.34);
+    color: #ddd6fe;
+  }
+  .role-pill.team {
+    background: rgba(245, 158, 11, 0.14);
+    border: 1px solid rgba(245, 158, 11, 0.34);
+    color: #fde68a;
+  }
+  .team-callout {
+    background: linear-gradient(135deg, rgba(34, 211, 238, 0.08), rgba(167, 139, 250, 0.08));
+    border: 1px solid rgba(56, 189, 248, 0.22);
+    border-radius: 14px;
+    padding: 14px 16px;
+    margin-bottom: 16px;
+    font-size: 13px;
+    color: #cbd5e1;
+    line-height: 1.55;
+  }
+  .team-form-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr auto;
+    gap: 10px;
+    align-items: end;
+    margin-bottom: 16px;
+  }
+  .team-secret-box {
+    display: none;
+    background: rgba(16, 185, 129, 0.08);
+    border: 1px solid rgba(16, 185, 129, 0.36);
+    border-radius: 14px;
+    padding: 14px 16px;
+    margin-bottom: 16px;
+  }
+  .team-secret-code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 16px;
+    font-weight: 800;
+    letter-spacing: 0.8px;
+    color: #6ee7b7;
+    background: rgba(6, 10, 20, 0.72);
+    border: 1px solid rgba(16, 185, 129, 0.32);
+    border-radius: 10px;
+    padding: 9px 12px;
+    display: inline-block;
+    margin: 8px 0;
+    word-break: break-all;
   }
 </style>
 </head>
@@ -1173,15 +1419,15 @@ function renderAdminDashboardHtml() {
       <img src="/vidvora-logo.png" alt="VidVora" class="login-logo-img" />
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:center;">
         <span class="analytics-tag">Analytics Pro</span>
-        <span style="font-size:12px;color:var(--text-muted);">Admin Intelligence Console</span>
+        <span style="font-size:12px;color:var(--text-muted);">Admin &amp; Team Console</span>
       </div>
     </div>
-    <p>Superadmin Master Passkey dalein — live App Installs, Country/City Views aur Performance Graphs dekhne ke liye.</p>
+    <p>Superadmin ya apna Team Viewer Passkey dalein — live App Installs, Country/City Views aur Performance Graphs dekhne ke liye.</p>
     <div id="loginError" class="error-banner"></div>
     <form id="loginForm">
-      <label class="field-label" for="passkeyInput">Superadmin Master Passkey</label>
+      <label class="field-label" for="passkeyInput">Admin / Team Passkey</label>
       <div class="pass-box">
-        <input id="passkeyInput" class="text-input" type="password" autocomplete="current-password" placeholder="Enter Superadmin Passkey..." required />
+        <input id="passkeyInput" class="text-input" type="password" autocomplete="current-password" placeholder="Enter Superadmin or Team Passkey..." required />
         <button type="button" id="togglePassBtn" class="eye-btn" title="Show/Hide">Show</button>
       </div>
       <button id="loginSubmitBtn" type="submit" class="btn-primary">Unlock Analytics Dashboard</button>
@@ -1194,10 +1440,11 @@ function renderAdminDashboardHtml() {
     <div class="topbar-inner">
       <div class="topbar-left">
         <div>
-          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
             <img src="/vidvora-logo.png" alt="VidVora" class="topbar-logo-img" />
             <span class="analytics-tag">Analytics</span>
             <span class="live-pill"><span class="live-dot"></span>Live</span>
+            <span id="viewerRoleBadge" class="role-pill super" style="display:none;"></span>
           </div>
           <div id="lastUpdatedText" class="updated-text" style="margin-top:4px;">Loading live metrics...</div>
         </div>
@@ -1377,6 +1624,7 @@ function renderAdminDashboardHtml() {
           <button class="tab-pill" data-tab="geo">Country &amp; City Views</button>
           <button class="tab-pill" data-tab="creators">Creators &amp; Views</button>
           <button class="tab-pill" data-tab="videos">Top Videos</button>
+          <button id="teamAccessTabBtn" class="tab-pill" data-tab="team" style="display:none;">Team Access</button>
         </div>
         <div id="emulatorHiddenBadge" class="badge-cyan" style="display:none;"></div>
       </div>
@@ -1486,6 +1734,55 @@ function renderAdminDashboardHtml() {
           </table>
         </div>
       </div>
+      <!-- Tab 4: Team Access (Superadmin Only) -->
+      <div id="tab-team" style="display:none;">
+        <div class="team-callout">
+          <strong style="color:#fff;">Team Viewer Passkeys (Superadmin Password Safe Rahega):</strong><br />
+          Apni team ke har member ke liye alag <strong>View-Only Passkey</strong> banao. Team members sirf is Chrome Analytics Dashboard par live stats dekh sakenge — unhe Superadmin password, Android Admin Panel, ya Team Access settings ka koi control nahi milega. Jab chaho 1 click me kisi ka bhi access <strong>Revoke</strong> kar sakte ho.
+        </div>
+
+        <form id="teamCreateForm" class="team-form-grid">
+          <div>
+            <label class="field-label" for="teamLabelInput">Team Member Name</label>
+            <input id="teamLabelInput" class="search-input" style="width:100%;min-width:0;" type="text" maxlength="40" placeholder="e.g. Aman - Marketing" required />
+          </div>
+          <div>
+            <label class="field-label" for="teamPasskeyInput">Custom Passkey (Optional — blank = Auto Strong)</label>
+            <input id="teamPasskeyInput" class="search-input" style="width:100%;min-width:0;" type="text" maxlength="64" placeholder="Auto-generate strong passkey..." />
+          </div>
+          <button id="teamCreateBtn" type="submit" class="ctrl-btn on" style="height:38px;padding:0 16px;">+ Create Team Login</button>
+        </form>
+
+        <div id="teamErrorBanner" class="error-banner"></div>
+
+        <div id="teamSecretBox" class="team-secret-box">
+          <div style="font-size:13px;font-weight:700;color:#6ee7b7;">New Team Viewer Passkey Ready! (Sirf ek baar dikhega — abhi copy kar lo)</div>
+          <div id="teamSecretMeta" style="font-size:12px;color:var(--text-muted);margin-top:3px;"></div>
+          <div id="teamSecretCode" class="team-secret-code"></div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;">
+            <button type="button" id="copyTeamPassBtn" class="ctrl-btn on">Copy Passkey</button>
+            <button type="button" id="copyTeamInviteBtn" class="ctrl-btn">Copy WhatsApp / Telegram Message</button>
+          </div>
+        </div>
+
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Team Member</th>
+                <th>Permission</th>
+                <th>Created (IST)</th>
+                <th>Last Login (IST)</th>
+                <th class="num">Action</th>
+              </tr>
+            </thead>
+            <tbody id="teamTableBody">
+              <tr><td colspan="6" class="empty-state">Loading team members...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
     </section>
 
     <div class="footer-note">
@@ -1509,6 +1806,9 @@ function renderAdminDashboardHtml() {
     autoRefresh: true,
     timerId: null,
     data: null,
+    viewer: { role: "team", label: "" },
+    teamMembers: [],
+    lastCreatedInvite: null,
     chartGeom: {},
   };
 
@@ -1587,11 +1887,69 @@ function renderAdminDashboardHtml() {
       if (!res.ok) throw new Error("Server returned " + res.status);
       const data = await res.json();
       state.data = data;
+      state.viewer = data.viewer || { role: "superadmin", label: "Superadmin" };
+      updateViewerRoleUi();
       showApp();
       renderAll();
     } catch (err) {
       $("lastUpdatedText").textContent = "Refresh failed: " + (err.message || err);
     }
+  }
+
+  function updateViewerRoleUi() {
+    const isSuper = state.viewer && state.viewer.role === "superadmin";
+    const badge = $("viewerRoleBadge");
+    if (badge) {
+      badge.style.display = "inline-flex";
+      badge.className = "role-pill " + (isSuper ? "super" : "team");
+      badge.textContent = isSuper ? "Superadmin" : ("Team Viewer: " + (state.viewer.label || "Member"));
+    }
+    const teamTabBtn = $("teamAccessTabBtn");
+    if (teamTabBtn) {
+      teamTabBtn.style.display = isSuper ? "inline-flex" : "none";
+    }
+    if (!isSuper && state.activeTab === "team") {
+      state.activeTab = "installs";
+      $("tab-team").style.display = "none";
+      $("tab-installs").style.display = "block";
+      $("reportTabs").querySelectorAll(".tab-pill").forEach((b) => b.classList.toggle("active", b.dataset.tab === "installs"));
+    }
+  }
+
+  async function loadTeamMembers() {
+    if (!state.viewer || state.viewer.role !== "superadmin") return;
+    try {
+      const res = await fetch("/api/admin-dashboard/team", {
+        credentials: "same-origin",
+        cache: "no-store",
+      });
+      if (!res.ok) return;
+      const json = await res.json();
+      if (json.ok && Array.isArray(json.members)) {
+        state.teamMembers = json.members;
+        renderTeamTable();
+      }
+    } catch (_) {}
+  }
+
+  function renderTeamTable() {
+    const body = $("teamTableBody");
+    if (!body) return;
+    const list = state.teamMembers || [];
+    if (!list.length) {
+      body.innerHTML = '<tr><td colspan="6" class="empty-state">Abhi koi team viewer passkey nahi bana hai. Upar form se apni team ke liye naya login banao!</td></tr>';
+      return;
+    }
+    body.innerHTML = list.map((m, i) => {
+      return '<tr>' +
+        '<td class="mono">' + (i + 1) + '</td>' +
+        '<td><strong>' + esc(m.label) + '</strong></td>' +
+        '<td><span class="badge-cyan">Analytics View-Only</span></td>' +
+        '<td>' + esc(fmtDateIst(m.createdAtMs)) + '</td>' +
+        '<td>' + (m.lastLoginAtMs > 0 ? esc(fmtDateIst(m.lastLoginAtMs)) : '<span style="color:var(--text-soft);">Never logged in</span>') + '</td>' +
+        '<td class="num"><button type="button" class="ctrl-btn danger" data-revoke-id="' + esc(m.id) + '" data-revoke-label="' + esc(m.label) + '">Revoke</button></td>' +
+        '</tr>';
+    }).join("");
   }
 
   function renderAll() {
@@ -2367,13 +2725,16 @@ function renderAdminDashboardHtml() {
     try {
       const res = await fetch("/api/admin-dashboard/login", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Requested-With": "VidVora-Dashboard",
+        },
         credentials: "same-origin",
         body: JSON.stringify({ passkey }),
       });
       const json = await res.json().catch(() => ({}));
       if (!res.ok || !json.ok) {
-        showLogin(json.error || "Invalid Superadmin Master Passkey.");
+        showLogin(json.error || "Invalid Superadmin or Team Passkey.");
         return;
       }
       $("passkeyInput").value = "";
@@ -2382,15 +2743,22 @@ function renderAdminDashboardHtml() {
       showLogin("Network error: " + (err.message || err));
     } finally {
       btn.disabled = false;
-      btn.textContent = "Open Dashboard";
+      btn.textContent = "Unlock Analytics Dashboard";
     }
   });
 
   $("logoutBtn").addEventListener("click", async () => {
     try {
-      await fetch("/api/admin-dashboard/logout", { method: "POST", credentials: "same-origin" });
+      await fetch("/api/admin-dashboard/logout", {
+        method: "POST",
+        headers: { "X-Requested-With": "VidVora-Dashboard" },
+        credentials: "same-origin",
+      });
     } catch (_) {}
     state.data = null;
+    state.teamMembers = [];
+    state.lastCreatedInvite = null;
+    if ($("teamSecretBox")) $("teamSecretBox").style.display = "none";
     showLogin();
   });
 
@@ -2433,9 +2801,112 @@ function renderAdminDashboardHtml() {
     if (!btn) return;
     state.activeTab = btn.dataset.tab;
     $("reportTabs").querySelectorAll(".tab-pill").forEach((b) => b.classList.toggle("active", b === btn));
-    ["installs", "geo", "creators", "videos"].forEach((t) => {
-      $("tab-" + t).style.display = t === state.activeTab ? "block" : "none";
+    ["installs", "geo", "creators", "videos", "team"].forEach((t) => {
+      const el = $("tab-" + t);
+      if (el) el.style.display = t === state.activeTab ? "block" : "none";
     });
+    if (state.activeTab === "team") {
+      loadTeamMembers();
+    }
+  });
+
+  $("teamCreateForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const errEl = $("teamErrorBanner");
+    errEl.style.display = "none";
+    const label = ($("teamLabelInput").value || "").trim();
+    const passkey = ($("teamPasskeyInput").value || "").trim();
+    const btn = $("teamCreateBtn");
+    btn.disabled = true;
+    btn.textContent = "Creating...";
+    try {
+      const res = await fetch("/api/admin-dashboard/team", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Requested-With": "VidVora-Dashboard",
+        },
+        credentials: "same-origin",
+        body: JSON.stringify({ label, passkey }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json.ok) {
+        errEl.textContent = json.error || "Could not create team login.";
+        errEl.style.display = "block";
+        return;
+      }
+      $("teamLabelInput").value = "";
+      $("teamPasskeyInput").value = "";
+      state.teamMembers = json.members || [];
+      renderTeamTable();
+      const dashUrl = window.location.origin + "/admin-dashboard";
+      state.lastCreatedInvite = {
+        label: json.member.label,
+        passkey: json.plainPasskey,
+        url: dashUrl,
+      };
+      $("teamSecretMeta").textContent = "Member: " + json.member.label + "  •  Link: " + dashUrl;
+      $("teamSecretCode").textContent = json.plainPasskey;
+      $("teamSecretBox").style.display = "block";
+    } catch (err) {
+      errEl.textContent = "Network error: " + (err.message || err);
+      errEl.style.display = "block";
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "+ Create Team Login";
+    }
+  });
+
+  $("copyTeamPassBtn").addEventListener("click", async () => {
+    if (!state.lastCreatedInvite) return;
+    try {
+      await navigator.clipboard.writeText(state.lastCreatedInvite.passkey);
+      $("copyTeamPassBtn").textContent = "Copied!";
+      setTimeout(() => { $("copyTeamPassBtn").textContent = "Copy Passkey"; }, 1800);
+    } catch (_) {}
+  });
+
+  $("copyTeamInviteBtn").addEventListener("click", async () => {
+    if (!state.lastCreatedInvite) return;
+    const inv = state.lastCreatedInvite;
+    const msg = "VidVora Analytics Dashboard Login (" + inv.label + ")\\nLink: " + inv.url + "\\nTeam Passkey: " + inv.passkey;
+    try {
+      await navigator.clipboard.writeText(msg);
+      $("copyTeamInviteBtn").textContent = "Message Copied!";
+      setTimeout(() => { $("copyTeamInviteBtn").textContent = "Copy WhatsApp / Telegram Message"; }, 1800);
+    } catch (_) {}
+  });
+
+  $("teamTableBody").addEventListener("click", async (e) => {
+    const btn = e.target.closest("button[data-revoke-id]");
+    if (!btn) return;
+    const memberId = btn.dataset.revokeId;
+    const memberLabel = btn.dataset.revokeLabel || "this member";
+    if (!window.confirm("Revoke analytics access for " + memberLabel + "? Unka login turant band ho jayega.")) return;
+    btn.disabled = true;
+    btn.textContent = "Revoking...";
+    try {
+      const res = await fetch("/api/admin-dashboard/team/revoke", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Requested-With": "VidVora-Dashboard",
+        },
+        credentials: "same-origin",
+        body: JSON.stringify({ id: memberId }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (res.ok && json.ok && Array.isArray(json.members)) {
+        state.teamMembers = json.members;
+        renderTeamTable();
+      } else {
+        btn.disabled = false;
+        btn.textContent = "Revoke";
+      }
+    } catch (_) {
+      btn.disabled = false;
+      btn.textContent = "Revoke";
+    }
   });
 
   $("geoPeriodCards").addEventListener("click", (e) => {
@@ -2574,9 +3045,20 @@ function renderAdminDashboardHtml() {
 module.exports = {
   ADMIN_COOKIE_NAME,
   DEFAULT_TOKEN_TTL_MS,
+  TEAM_ACCESS_DOC_ID,
   isEmulatorDeviceLabel,
   toEpochMs,
+  hashTeamPasskey,
+  verifyTeamPasskeyHash,
+  generateReadableTeamPasskey,
+  sanitizeTeamMembersForResponse,
+  loadTeamAccessMembers,
+  authenticateTeamPasskey,
+  isTeamMemberActive,
+  createTeamAccessMember,
+  revokeTeamAccessMember,
   createAdminDashboardToken,
+  verifyAdminDashboardSession,
   verifyAdminDashboardToken,
   extractDashboardTokenFromRequest,
   buildAdminDashboardStats,

@@ -49,8 +49,14 @@ const {
 const {
   ADMIN_COOKIE_NAME,
   createAdminDashboardToken,
-  verifyAdminDashboardToken,
+  verifyAdminDashboardSession,
   extractDashboardTokenFromRequest,
+  authenticateTeamPasskey,
+  isTeamMemberActive,
+  loadTeamAccessMembers,
+  sanitizeTeamMembersForResponse,
+  createTeamAccessMember,
+  revokeTeamAccessMember,
   buildAdminDashboardStats,
   renderAdminDashboardHtml,
 } = require("./adminDashboard");
@@ -58,6 +64,80 @@ const {
   createViewGeoTracker,
   extractClientIp,
 } = require("./geoTracker");
+
+const dashboardLoginAttempts = new Map();
+const DASHBOARD_LOGIN_WINDOW_MS = 5 * 60 * 1000;
+const DASHBOARD_LOGIN_MAX_ATTEMPTS = 15;
+
+function checkDashboardLoginRateLimit(clientIp) {
+  const ip = String(clientIp || "unknown").trim() || "unknown";
+  const now = Date.now();
+  const rec = dashboardLoginAttempts.get(ip);
+  if (!rec || now - rec.windowStart > DASHBOARD_LOGIN_WINDOW_MS) {
+    return { allowed: true, ip };
+  }
+  return { allowed: rec.count < DASHBOARD_LOGIN_MAX_ATTEMPTS, ip };
+}
+
+function recordDashboardLoginFailure(clientIp) {
+  const ip = String(clientIp || "unknown").trim() || "unknown";
+  const now = Date.now();
+  const rec = dashboardLoginAttempts.get(ip);
+  if (!rec || now - rec.windowStart > DASHBOARD_LOGIN_WINDOW_MS) {
+    dashboardLoginAttempts.set(ip, { count: 1, windowStart: now });
+  } else {
+    rec.count += 1;
+  }
+  if (dashboardLoginAttempts.size > 500) {
+    for (const [k, v] of dashboardLoginAttempts.entries()) {
+      if (now - v.windowStart > DASHBOARD_LOGIN_WINDOW_MS) dashboardLoginAttempts.delete(k);
+    }
+  }
+}
+
+function clearDashboardLoginFailures(clientIp) {
+  const ip = String(clientIp || "unknown").trim();
+  if (ip) dashboardLoginAttempts.delete(ip);
+}
+
+function isValidDashboardMutationRequest(req) {
+  const xrw = String(req?.headers?.["x-requested-with"] || "").trim();
+  if (xrw === "VidVora-Dashboard") return true;
+  const origin = String(req?.headers?.origin || "").trim();
+  if (!origin) return false;
+  try {
+    const originHost = new URL(origin).host.toLowerCase();
+    const expectedHost = String(req?.headers?.["x-forwarded-host"] || req?.headers?.host || "")
+      .split(",")[0]
+      .trim()
+      .toLowerCase();
+    return Boolean(expectedHost) && originHost === expectedHost;
+  } catch (_) {
+    return false;
+  }
+}
+
+function buildDashboardCookieHeader(token, isHttps, maxAgeSec = 604800) {
+  const parts = [`${ADMIN_COOKIE_NAME}=${encodeURIComponent(token)}`, "HttpOnly", "Path=/", `Max-Age=${maxAgeSec}`];
+  if (isHttps) {
+    parts.push("Secure", "SameSite=None", "Partitioned");
+  } else {
+    parts.push("SameSite=Lax");
+  }
+  return parts.join("; ");
+}
+
+async function resolveActiveDashboardSession(req) {
+  const token = extractDashboardTokenFromRequest(req);
+  const session = verifyAdminDashboardSession(token, PLAYBACK_SECRET);
+  if (!session) return null;
+  if (session.role === "superadmin") return session;
+  if (session.role === "team") {
+    const active = await isTeamMemberActive(db, session.sub);
+    return active ? session : null;
+  }
+  return null;
+}
 
 const DATABASE_ID =
   process.env.FIRESTORE_DATABASE_ID ||
@@ -578,10 +658,17 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ==================== REST API FOR ANDROID APP (UNLIMITED POSTGRESQL / ZERO FIRESTORE QUOTA) ====================
+  // ==================== REST API FOR ANDROID APP & ADMIN ANALYTICS ====================
   if (pathname.startsWith("/api/")) {
-    setCorsHeaders(res, "GET, POST, OPTIONS");
-    if (req.method === "OPTIONS") {
+    const isDashboardApi = pathname.startsWith("/api/admin-dashboard/");
+    if (!isDashboardApi) {
+      setCorsHeaders(res, "GET, POST, OPTIONS");
+      if (req.method === "OPTIONS") {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+    } else if (req.method === "OPTIONS") {
       res.writeHead(204);
       res.end();
       return;
@@ -598,28 +685,40 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // 1b. Desktop Chrome Admin Analytics Dashboard Auth & Stats APIs
+    // 1b. Chrome Admin & Team Analytics Dashboard Auth, Team Access & Stats APIs
     if (req.method === "POST" && pathname === "/api/admin-dashboard/login") {
       try {
-        const body = await readJsonBody(req);
-        const rawPasskey = String(body.passkey || body.key || "").trim();
-        const valid = await verifyAdminMigrationKey(rawPasskey);
-        if (!valid) {
-          sendJson(res, 401, { ok: false, error: "Invalid Superadmin Master Passkey." });
+        const clientIp = extractClientIp(req);
+        const rateCheck = checkDashboardLoginRateLimit(clientIp);
+        if (!rateCheck.allowed) {
+          sendJson(res, 429, {
+            ok: false,
+            error: "Too many failed attempts. Please wait 5 minutes and try again.",
+          });
           return;
         }
-        const token = createAdminDashboardToken(PLAYBACK_SECRET);
+        const body = await readJsonBody(req);
+        const rawPasskey = String(body.passkey || body.key || "").trim();
+        let sessionInfo = null;
+        if (await verifyAdminMigrationKey(rawPasskey)) {
+          sessionInfo = { role: "superadmin", sub: "superadmin", label: "Superadmin" };
+        } else {
+          const teamMatch = await authenticateTeamPasskey(db, rawPasskey);
+          if (teamMatch) {
+            sessionInfo = { role: "team", sub: teamMatch.id, label: teamMatch.label };
+          }
+        }
+        if (!sessionInfo) {
+          recordDashboardLoginFailure(clientIp);
+          sendJson(res, 401, { ok: false, error: "Invalid Superadmin or Team Passkey." });
+          return;
+        }
+        clearDashboardLoginFailures(clientIp);
+        const token = createAdminDashboardToken(PLAYBACK_SECRET, sessionInfo);
         const isHttps = String(req.headers["x-forwarded-proto"] || "").toLowerCase().includes("https");
-        const cookieParts = [
-          `${ADMIN_COOKIE_NAME}=${encodeURIComponent(token)}`,
-          "HttpOnly",
-          "SameSite=Lax",
-          "Path=/",
-          "Max-Age=604800",
-        ];
-        if (isHttps) cookieParts.push("Secure");
-        res.setHeader("Set-Cookie", cookieParts.join("; "));
-        sendJson(res, 200, { ok: true });
+        res.setHeader("Set-Cookie", buildDashboardCookieHeader(token, isHttps, 604800));
+        res.setHeader("Cache-Control", "no-store");
+        sendJson(res, 200, { ok: true, role: sessionInfo.role, label: sessionInfo.label });
       } catch (loginErr) {
         sendJson(res, 400, { ok: false, error: loginErr?.message || "Login failed" });
       }
@@ -627,18 +726,93 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "POST" && pathname === "/api/admin-dashboard/logout") {
-      res.setHeader(
-        "Set-Cookie",
-        `${ADMIN_COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`
-      );
+      if (!isValidDashboardMutationRequest(req)) {
+        sendJson(res, 403, { ok: false, error: "Invalid request origin." });
+        return;
+      }
+      const isHttps = String(req.headers["x-forwarded-proto"] || "").toLowerCase().includes("https");
+      res.setHeader("Set-Cookie", buildDashboardCookieHeader("", isHttps, 0));
       sendJson(res, 200, { ok: true });
       return;
     }
 
+    if (req.method === "GET" && pathname === "/api/admin-dashboard/team") {
+      const session = await resolveActiveDashboardSession(req);
+      if (!session) {
+        sendJson(res, 401, { ok: false, error: "Unauthorized." });
+        return;
+      }
+      if (session.role !== "superadmin") {
+        sendJson(res, 403, { ok: false, error: "Superadmin access required." });
+        return;
+      }
+      try {
+        const members = sanitizeTeamMembersForResponse(await loadTeamAccessMembers(db));
+        res.setHeader("Cache-Control", "no-store");
+        sendJson(res, 200, { ok: true, members });
+      } catch (teamErr) {
+        sendJson(res, 500, { ok: false, error: teamErr?.message || "Failed to load team list" });
+      }
+      return;
+    }
+
+    if (req.method === "POST" && pathname === "/api/admin-dashboard/team") {
+      if (!isValidDashboardMutationRequest(req)) {
+        sendJson(res, 403, { ok: false, error: "Invalid request origin." });
+        return;
+      }
+      const session = await resolveActiveDashboardSession(req);
+      if (!session) {
+        sendJson(res, 401, { ok: false, error: "Unauthorized." });
+        return;
+      }
+      if (session.role !== "superadmin") {
+        sendJson(res, 403, { ok: false, error: "Only Superadmin can create team logins." });
+        return;
+      }
+      try {
+        const body = await readJsonBody(req);
+        const created = await createTeamAccessMember(db, {
+          label: body.label,
+          passkey: body.passkey,
+        });
+        res.setHeader("Cache-Control", "no-store");
+        sendJson(res, 200, { ok: true, ...created });
+      } catch (createErr) {
+        sendJson(res, 400, { ok: false, error: createErr?.message || "Failed to create team login" });
+      }
+      return;
+    }
+
+    if (req.method === "POST" && pathname === "/api/admin-dashboard/team/revoke") {
+      if (!isValidDashboardMutationRequest(req)) {
+        sendJson(res, 403, { ok: false, error: "Invalid request origin." });
+        return;
+      }
+      const session = await resolveActiveDashboardSession(req);
+      if (!session) {
+        sendJson(res, 401, { ok: false, error: "Unauthorized." });
+        return;
+      }
+      if (session.role !== "superadmin") {
+        sendJson(res, 403, { ok: false, error: "Only Superadmin can revoke team logins." });
+        return;
+      }
+      try {
+        const body = await readJsonBody(req);
+        const members = await revokeTeamAccessMember(db, body.id);
+        res.setHeader("Cache-Control", "no-store");
+        sendJson(res, 200, { ok: true, members });
+      } catch (revokeErr) {
+        sendJson(res, 400, { ok: false, error: revokeErr?.message || "Failed to revoke team login" });
+      }
+      return;
+    }
+
     if (req.method === "GET" && pathname === "/api/admin-dashboard/stats") {
-      const token = extractDashboardTokenFromRequest(req);
-      if (!verifyAdminDashboardToken(token, PLAYBACK_SECRET)) {
-        sendJson(res, 401, { ok: false, error: "Unauthorized. Please log in with Superadmin Passkey." });
+      const session = await resolveActiveDashboardSession(req);
+      if (!session) {
+        sendJson(res, 401, { ok: false, error: "Unauthorized. Please log in with Admin or Team Passkey." });
         return;
       }
       try {
@@ -664,6 +838,7 @@ const server = http.createServer(async (req, res) => {
           geoStats,
           days: daysParam,
         });
+        stats.viewer = { role: session.role, label: session.label };
         res.setHeader("Cache-Control", "no-store");
         sendJson(res, 200, stats, req);
       } catch (statsErr) {

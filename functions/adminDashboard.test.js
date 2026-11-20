@@ -332,3 +332,78 @@ test("geoTracker resolves Country & City via IP cache, edge headers, and flushes
   assert.equal(stats.geo.cities[0].region, "Maharashtra");
 });
 
+test("Team Viewer Access hashes passkeys with scrypt, authenticates team role, strips hashes, and revokes immediately", async () => {
+  const {
+    TEAM_ACCESS_DOC_ID,
+    hashTeamPasskey,
+    verifyTeamPasskeyHash,
+    createTeamAccessMember,
+    authenticateTeamPasskey,
+    isTeamMemberActive,
+    revokeTeamAccessMember,
+    verifyAdminDashboardSession,
+  } = require("./adminDashboard");
+
+  // Direct hash verification
+  const hashed = hashTeamPasskey("TeamPass#2026");
+  assert.ok(hashed.startsWith("scrypt$"));
+  assert.equal(hashed.includes("TeamPass#2026"), false);
+  assert.equal(verifyTeamPasskeyHash("TeamPass#2026", hashed), true);
+  assert.equal(verifyTeamPasskeyHash("WrongPass", hashed), false);
+
+  // In-memory fake DB
+  const docStore = new Map();
+  const fakeDb = {
+    collection: (col) => ({
+      doc: (id) => ({
+        get: async () => {
+          const val = docStore.get(`${col}/${id}`);
+          return { exists: Boolean(val), data: () => val };
+        },
+        set: async (data) => {
+          docStore.set(`${col}/${id}`, data);
+        },
+      }),
+    }),
+  };
+
+  // Create auto-generated team passkey
+  const created = await createTeamAccessMember(fakeDb, { label: "Aman - Marketing", passkey: "" });
+  assert.ok(created.member.id.startsWith("tm_"));
+  assert.equal(created.member.label, "Aman - Marketing");
+  assert.ok(created.plainPasskey.startsWith("VV-"));
+
+  // Plaintext passkey MUST NEVER be stored in DB
+  const rawStored = JSON.stringify(docStore.get(`appConfig/${TEAM_ACCESS_DOC_ID}`));
+  assert.equal(rawStored.includes(created.plainPasskey), false);
+  // Sanitized API list MUST NEVER include passkeyHash
+  assert.equal(JSON.stringify(created.members).includes("passkeyHash"), false);
+
+  // Team member authenticates with their viewer passkey
+  const authMatch = await authenticateTeamPasskey(fakeDb, created.plainPasskey);
+  assert.ok(authMatch);
+  assert.equal(authMatch.role, "team");
+  assert.equal(authMatch.id, created.member.id);
+  assert.equal(await isTeamMemberActive(fakeDb, created.member.id), true);
+
+  // Role-aware token carries team role and member subject
+  const secret = "test-team-signing-secret";
+  const teamToken = createAdminDashboardToken(secret, {
+    role: "team",
+    sub: authMatch.id,
+    label: authMatch.label,
+  });
+  const decoded = verifyAdminDashboardSession(teamToken, secret);
+  assert.ok(decoded);
+  assert.equal(decoded.role, "team");
+  assert.equal(decoded.sub, authMatch.id);
+  assert.equal(decoded.label, "Aman - Marketing");
+
+  // Revoke immediately blocks active session & future logins
+  const remaining = await revokeTeamAccessMember(fakeDb, created.member.id);
+  assert.equal(remaining.length, 0);
+  assert.equal(await isTeamMemberActive(fakeDb, created.member.id), false);
+  assert.equal(await authenticateTeamPasskey(fakeDb, created.plainPasskey), null);
+});
+
+
