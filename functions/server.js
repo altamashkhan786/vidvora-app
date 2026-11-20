@@ -44,6 +44,14 @@ const {
   startWordPressAutoPosterScheduler,
   getWordPressAutoPosterStatus,
 } = require("./wpAutoPoster");
+const {
+  ADMIN_COOKIE_NAME,
+  createAdminDashboardToken,
+  verifyAdminDashboardToken,
+  extractDashboardTokenFromRequest,
+  buildAdminDashboardStats,
+  renderAdminDashboardHtml,
+} = require("./adminDashboard");
 
 const DATABASE_ID =
   process.env.FIRESTORE_DATABASE_ID ||
@@ -555,6 +563,79 @@ const server = http.createServer(async (req, res) => {
         postgresActive: Boolean(pgDb),
         cacheStats: pgDb && typeof pgDb.getCacheStats === "function" ? pgDb.getCacheStats() : null,
       }, req);
+      return;
+    }
+
+    // 1b. Desktop Chrome Admin Analytics Dashboard Auth & Stats APIs
+    if (req.method === "POST" && pathname === "/api/admin-dashboard/login") {
+      try {
+        const body = await readJsonBody(req);
+        const rawPasskey = String(body.passkey || body.key || "").trim();
+        const valid = await verifyAdminMigrationKey(rawPasskey);
+        if (!valid) {
+          sendJson(res, 401, { ok: false, error: "Invalid Superadmin Master Passkey." });
+          return;
+        }
+        const token = createAdminDashboardToken(PLAYBACK_SECRET);
+        const isHttps = String(req.headers["x-forwarded-proto"] || "").toLowerCase().includes("https");
+        const cookieParts = [
+          `${ADMIN_COOKIE_NAME}=${encodeURIComponent(token)}`,
+          "HttpOnly",
+          "SameSite=Lax",
+          "Path=/",
+          "Max-Age=604800",
+        ];
+        if (isHttps) cookieParts.push("Secure");
+        res.setHeader("Set-Cookie", cookieParts.join("; "));
+        sendJson(res, 200, { ok: true });
+      } catch (loginErr) {
+        sendJson(res, 400, { ok: false, error: loginErr?.message || "Login failed" });
+      }
+      return;
+    }
+
+    if (req.method === "POST" && pathname === "/api/admin-dashboard/logout") {
+      res.setHeader(
+        "Set-Cookie",
+        `${ADMIN_COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`
+      );
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    if (req.method === "GET" && pathname === "/api/admin-dashboard/stats") {
+      const token = extractDashboardTokenFromRequest(req);
+      if (!verifyAdminDashboardToken(token, PLAYBACK_SECRET)) {
+        sendJson(res, 401, { ok: false, error: "Unauthorized. Please log in with Superadmin Passkey." });
+        return;
+      }
+      try {
+        const daysParam = parseInt(urlObj.searchParams.get("days") || "14", 10);
+        const [installsSnap, videosSnap, membersSnap, withdrawalsSnap] = await Promise.all([
+          db.collection("appInstalls").get(),
+          db.collection("videos").get(),
+          db.collection("members").get(),
+          db.collection("withdrawalRequests").get(),
+        ]);
+
+        const installs = installsSnap.docs.map((d) => ({ _id: d.id, ...(d.data() || {}) }));
+        const videos = videosSnap.docs.map((d) => ({ _id: d.id, ...(d.data() || {}) }));
+        const members = membersSnap.docs.map((d) => ({ _id: d.id, ...(d.data() || {}) }));
+        const withdrawals = withdrawalsSnap.docs.map((d) => ({ _id: d.id, ...(d.data() || {}) }));
+
+        const stats = buildAdminDashboardStats({
+          installs,
+          videos,
+          members,
+          withdrawals,
+          days: daysParam,
+        });
+        res.setHeader("Cache-Control", "no-store");
+        sendJson(res, 200, stats, req);
+      } catch (statsErr) {
+        console.error("Admin dashboard stats error:", statsErr);
+        sendJson(res, 500, { ok: false, error: statsErr?.message || "Failed to build analytics" });
+      }
       return;
     }
 
@@ -1313,6 +1394,23 @@ const server = http.createServer(async (req, res) => {
       }
       return;
     }
+  }
+
+  if (
+    req.method === "GET" &&
+    (pathname === "/admin-dashboard" ||
+      pathname === "/admin-dashboard/" ||
+      pathname === "/dashboard" ||
+      pathname === "/dashboard/")
+  ) {
+    const htmlBuf = Buffer.from(renderAdminDashboardHtml(), "utf8");
+    res.writeHead(200, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+      "Content-Length": htmlBuf.length,
+    });
+    res.end(htmlBuf);
+    return;
   }
 
   res.writeHead(404, { "Content-Type": "text/plain" });
