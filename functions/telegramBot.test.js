@@ -19,6 +19,9 @@ const {
   extractDirectVideoUrlMessage,
   isAllowedTelegramVideoMessage,
   buildShareMessageCaption,
+  buildSharePlainFallbackText,
+  parseTelegramFloodWaitSeconds,
+  streamTelegramMtprotoWithRange,
   createFiveSecondPreviewAndThumbnail,
 } = require("./telegramBot");
 
@@ -85,14 +88,36 @@ test("token generation, stream HMAC signing, and share caption match VidVora for
   assert.ok(caption.includes("VidVora — Watch Video"));
   assert.ok(caption.includes("Watch Full Video:"));
   assert.ok(caption.includes(`${SHARE_LINK_BASE_URL}${token}`));
-  assert.ok(caption.includes("वीडियो कैसे देखे / How to play video"));
-  assert.ok(caption.includes("👇👇👇👇"));
-  assert.ok(caption.includes("https://t.me/VideoKaiseDekhe_ar"));
+  assert.ok(!caption.includes("वीडियो कैसे देखे"));
+  assert.ok(!caption.includes("How to play video"));
+  assert.ok(!caption.includes("👇👇👇👇"));
+  assert.ok(!caption.includes("VideoKaiseDekhe"));
   assert.ok(!caption.includes("Uploaded to VidVora"));
   assert.ok(!caption.includes("Preview Clip"));
   assert.ok(!caption.includes("Access Code"));
   assert.ok(!caption.includes("App Link"));
   assert.ok(!caption.includes("Forward this preview"));
+
+  const customCaption = buildShareMessageCaption({
+    title: "My Custom Post",
+    rawToken: token,
+    customHeader: "🔥 VIP Channel: https://t.me/MyVipHub",
+    customFooter: "📢 Join Backup: https://t.me/MyBackupLink",
+  });
+  assert.ok(customCaption.includes("VIP Channel: https://t.me/MyVipHub"));
+  assert.ok(customCaption.includes("Join Backup: https://t.me/MyBackupLink"));
+  assert.ok(!customCaption.includes("VidVora — Watch Video"));
+  assert.ok(!customCaption.includes("VideoKaiseDekhe"));
+
+  const plainFallback = buildSharePlainFallbackText({
+    title: "My Custom Post",
+    watchUrl: `${SHARE_LINK_BASE_URL}${token}`,
+    customHeader: "🔥 VIP Channel",
+    customFooter: "📢 Join https://t.me/MyBackupLink",
+  });
+  assert.ok(plainFallback.includes("🔥 VIP Channel"));
+  assert.ok(plainFallback.includes("📢 Join https://t.me/MyBackupLink"));
+  assert.ok(!plainFallback.includes("VideoKaiseDekhe"));
 });
 
 test("createFiveSecondPreviewAndThumbnail cuts a real 10s sample video down to <= 5s clip + jpg thumbnail", async () => {
@@ -1853,7 +1878,8 @@ test("handleTelegramUpdate instantly converts forwarded VidVora video post by re
     assert.equal(sendVideoCall.body.video, "FORWARDED_PREVIEW_CLIP_ID");
     assert.equal(sendVideoCall.body.parse_mode, "HTML");
     assert.ok(sendVideoCall.body.caption.includes(res.rawToken));
-    assert.ok(sendVideoCall.body.caption.includes("https://t.me/VideoKaiseDekhe_ar"));
+    assert.ok(!sendVideoCall.body.caption.includes("VideoKaiseDekhe"));
+    assert.ok(!sendVideoCall.body.caption.includes("How to play video"));
     assert.ok(!sendVideoCall.body.caption.includes("\\_"));
   } finally {
     global.fetch = origFetch;
@@ -2797,6 +2823,412 @@ test("link convert reuses 5-second clip file_id even on text-only link, avoids b
     else process.env.TELEGRAM_BOT_TOKEN = prevBotToken;
   }
 });
+
+test("creator Telegram bot allows editing custom Header & Footer via inline buttons, link replies, and commands, and applies them to video posts", async () => {
+  const { handleTelegramUpdate } = require("./telegramBot");
+
+  const sourceCode = "GM-HDRFTR99";
+  const sourceHash = hashToken(sourceCode);
+  const sessionsStore = new Map([
+    [
+      "777111",
+      {
+        telegramUserId: "777111",
+        memberId: "creator_hdr",
+        memberName: "Aman Creator",
+        memberEmail: "aman@vidvora.com",
+        role: "MEMBER",
+      },
+    ],
+  ]);
+  const membersStore = new Map([
+    [
+      "creator_hdr",
+      {
+        memberId: "creator_hdr",
+        name: "Aman Creator",
+        email: "aman@vidvora.com",
+        role: "MEMBER",
+        isActive: true,
+      },
+    ],
+  ]);
+  const videosStore = new Map([
+    [
+      "vid_src_hdr",
+      {
+        videoId: "vid_src_hdr",
+        title: "Sample Clip",
+        description: "desc",
+        storagePath: "https://cdn.example.com/sample.mp4",
+        tgPreviewClipFileId: "BAAC_PREVIEW_HDR",
+        tgThumbFileId: "AgAC_THUMB_HDR",
+        isActive: true,
+      },
+    ],
+  ]);
+  const linksStore = new Map([
+    [
+      "link_src_hdr",
+      {
+        linkId: "link_src_hdr",
+        tokenHash: sourceHash,
+        videoId: "vid_src_hdr",
+        isActive: true,
+      },
+    ],
+  ]);
+
+  const makeStoreCol = (map) => ({
+    doc: (id) => ({
+      get: async () => ({ exists: map.has(id), id, data: () => map.get(id) }),
+      set: async (data, opts) => {
+        const prev = opts?.merge && map.has(id) ? map.get(id) : {};
+        map.set(id, { ...prev, ...data });
+      },
+    }),
+    where: (field, _op, val) => ({
+      limit: () => ({
+        get: async () => {
+          const docs = [];
+          for (const [id, item] of map.entries()) {
+            if (item && item[field] === val) {
+              docs.push({ id, exists: true, data: () => item });
+            }
+          }
+          return { empty: docs.length === 0, docs };
+        },
+      }),
+    }),
+  });
+
+  const mockDb = {
+    collection: (name) => {
+      if (name === "telegramBotSessions") return makeStoreCol(sessionsStore);
+      if (name === "members") return makeStoreCol(membersStore);
+      if (name === "videos") return makeStoreCol(videosStore);
+      if (name === "accessLinks") return makeStoreCol(linksStore);
+      return {
+        doc: () => ({ get: async () => ({ exists: false }), set: async () => {} }),
+        where: () => ({ limit: () => ({ get: async () => ({ empty: true, docs: [] }) }) }),
+      };
+    },
+  };
+
+  const apiCalls = [];
+  const origFetch = global.fetch;
+  const prevBotToken = process.env.TELEGRAM_BOT_TOKEN;
+  process.env.TELEGRAM_BOT_TOKEN = "123456:TEST_HDR_TOKEN";
+  global.fetch = async (url, init = {}) => {
+    const method = String(url).split("/").pop();
+    const body = typeof init.body === "string" ? JSON.parse(init.body) : {};
+    apiCalls.push({ method, body });
+    return { ok: true, json: async () => ({ ok: true, result: { message_id: apiCalls.length + 10 } }) };
+  };
+
+  try {
+    // 1. /caption opens interactive settings menu with inline buttons
+    const r1 = await handleTelegramUpdate({
+      update: { message: { message_id: 1, chat: { id: 777111 }, from: { id: 777111 }, text: "/caption" } },
+      db: mockDb,
+      storage: null,
+      functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+      playbackSecret: "sec",
+    });
+    assert.equal(r1.ok, true);
+    assert.equal(r1.action, "caption_settings");
+    const menuCall = apiCalls.find((c) => c.method === "sendMessage");
+    assert.ok(menuCall.body.reply_markup?.inline_keyboard?.flat().some((b) => b.callback_data === "caption:edit_header"));
+    assert.ok(menuCall.body.reply_markup?.inline_keyboard?.flat().some((b) => b.callback_data === "caption:edit_footer"));
+
+    // 2. Click "Edit Header" inline button -> sets pendingInputAction = "set_header"
+    const r2 = await handleTelegramUpdate({
+      update: {
+        callback_query: {
+          id: "cb_1",
+          from: { id: 777111 },
+          data: "caption:edit_header",
+          message: { message_id: 11, chat: { id: 777111 } },
+        },
+      },
+      db: mockDb,
+      storage: null,
+      functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+      playbackSecret: "sec",
+    });
+    assert.equal(r2.ok, true);
+    assert.equal(r2.action, "prompt_header");
+    assert.equal(sessionsStore.get("777111").pendingInputAction, "set_header");
+
+    // 3. Creator replies with a Header containing a custom Telegram link (must NOT trigger URL rejection!)
+    const r3 = await handleTelegramUpdate({
+      update: {
+        message: {
+          message_id: 2,
+          chat: { id: 777111 },
+          from: { id: 777111 },
+          text: "🔥 Aman Movies HD\nhttps://t.me/AmanMoviesOfficial",
+        },
+      },
+      db: mockDb,
+      storage: null,
+      functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+      playbackSecret: "sec",
+    });
+    assert.equal(r3.ok, true);
+    assert.equal(r3.action, "header_updated");
+    assert.equal(sessionsStore.get("777111").customCaptionHeader, "🔥 Aman Movies HD\nhttps://t.me/AmanMoviesOfficial");
+    assert.equal(membersStore.get("creator_hdr").customCaptionHeader, "🔥 Aman Movies HD\nhttps://t.me/AmanMoviesOfficial");
+
+    // 4. Direct /footer command sets custom Footer link
+    const r4 = await handleTelegramUpdate({
+      update: {
+        message: {
+          message_id: 3,
+          chat: { id: 777111 },
+          from: { id: 777111 },
+          text: "/footer 📢 Join Backup: https://t.me/AmanBackupChannel",
+        },
+      },
+      db: mockDb,
+      storage: null,
+      functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+      playbackSecret: "sec",
+    });
+    assert.equal(r4.ok, true);
+    assert.equal(r4.action, "footer_updated");
+    assert.equal(sessionsStore.get("777111").customCaptionFooter, "📢 Join Backup: https://t.me/AmanBackupChannel");
+
+    // 5. Convert a VidVora link -> sendVideo caption uses custom Header & Footer and NO VideoKaiseDekhe_ar!
+    const r5 = await handleTelegramUpdate({
+      update: {
+        message: {
+          message_id: 4,
+          chat: { id: 777111 },
+          from: { id: 777111 },
+          text: `https://vidvora-share-bot.onrender.com/share?link=${sourceCode}`,
+        },
+      },
+      db: mockDb,
+      storage: null,
+      functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+      playbackSecret: "sec",
+    });
+    assert.equal(r5.ok, true);
+    const sendVideoCall = apiCalls.find((c) => c.method === "sendVideo");
+    assert.ok(sendVideoCall, "Expected sendVideo with custom caption");
+    assert.ok(sendVideoCall.body.caption.includes("Aman Movies HD"));
+    assert.ok(sendVideoCall.body.caption.includes("https://t.me/AmanMoviesOfficial"));
+    assert.ok(sendVideoCall.body.caption.includes("https://t.me/AmanBackupChannel"));
+    assert.ok(!sendVideoCall.body.caption.includes("VideoKaiseDekhe"));
+    assert.ok(!sendVideoCall.body.caption.includes("How to play video"));
+
+    // 6. Clear Header & Footer via inline callback buttons
+    const r6 = await handleTelegramUpdate({
+      update: {
+        callback_query: {
+          id: "cb_2",
+          from: { id: 777111 },
+          data: "caption:clear_header",
+          message: { message_id: 11, chat: { id: 777111 } },
+        },
+      },
+      db: mockDb,
+      storage: null,
+      functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+      playbackSecret: "sec",
+    });
+    assert.equal(r6.ok, true);
+    assert.equal(sessionsStore.get("777111").customCaptionHeader, "");
+
+    const r7 = await handleTelegramUpdate({
+      update: {
+        message: { message_id: 5, chat: { id: 777111 }, from: { id: 777111 }, text: "/clearfooter" },
+      },
+      db: mockDb,
+      storage: null,
+      functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+      playbackSecret: "sec",
+    });
+    assert.equal(r7.ok, true);
+    assert.equal(sessionsStore.get("777111").customCaptionFooter, "");
+  } finally {
+    global.fetch = origFetch;
+    if (prevBotToken === undefined) delete process.env.TELEGRAM_BOT_TOKEN;
+    else process.env.TELEGRAM_BOT_TOKEN = prevBotToken;
+  }
+});
+
+test("MTProto session persistence saves StringSession on first login and reuses it on subsequent boots without re-calling auth.ImportBotAuthorization", async () => {
+  assert.equal(
+    parseTelegramFloodWaitSeconds(new Error("A wait of 1754 seconds is required (caused by auth.ImportBotAuthorization)")),
+    1754
+  );
+  assert.equal(parseTelegramFloodWaitSeconds({ errorMessage: "FLOOD_WAIT_900" }), 900);
+  assert.equal(parseTelegramFloodWaitSeconds({ seconds: 42 }), 42);
+
+  const appConfigStore = new Map();
+  const mockDb = {
+    collection: (name) => {
+      if (name === "appConfig") {
+        return {
+          doc: (id) => ({
+            get: async () => ({ exists: appConfigStore.has(id), id, data: () => appConfigStore.get(id) }),
+            set: async (data, opts) => {
+              const prev = opts?.merge && appConfigStore.has(id) ? appConfigStore.get(id) : {};
+              appConfigStore.set(id, { ...prev, ...data });
+            },
+          }),
+        };
+      }
+      return { doc: () => ({ get: async () => ({ exists: false }) }) };
+    },
+  };
+
+  let startCalls = 0;
+  let connectCalls = 0;
+
+  class FakeStringSession {
+    constructor(val = "") {
+      this._val = String(val || "");
+    }
+    save() {
+      return this._val || "PERSISTED_GRAMJS_SESSION_STRING_V1";
+    }
+  }
+
+  class FakeTelegramClient {
+    constructor(session) {
+      this.session = session;
+      this.disconnected = false;
+    }
+    setLogLevel() {}
+    async connect() {
+      connectCalls += 1;
+    }
+    async checkAuthorization() {
+      return Boolean(this.session && this.session._val === "PERSISTED_GRAMJS_SESSION_STRING_V1");
+    }
+    async start() {
+      startCalls += 1;
+      this.session._val = "PERSISTED_GRAMJS_SESSION_STRING_V1";
+    }
+    async getMessages() {
+      return [
+        {
+          id: 55,
+          media: {
+            document: {
+              id: 1001n,
+              accessHash: 2002n,
+              fileReference: Buffer.from([1, 2, 3]),
+              size: 16,
+              mimeType: "video/mp4",
+            },
+          },
+        },
+      ];
+    }
+    async *iterDownload() {
+      yield Buffer.from("0123456789abcdef");
+    }
+  }
+
+  const fakeTelegramLib = {
+    TelegramClient: FakeTelegramClient,
+    StringSession: FakeStringSession,
+    Api: {
+      InputDocumentFileLocation: class {
+        constructor(args) {
+          Object.assign(this, args);
+        }
+      },
+    },
+    bigInt: (v) => BigInt(v),
+  };
+
+  const prevEnv = {
+    botToken: process.env.TELEGRAM_BOT_TOKEN,
+    apiId: process.env.TELEGRAM_API_ID,
+    apiHash: process.env.TELEGRAM_API_HASH,
+    mtprotoSess: process.env.TELEGRAM_MTPROTO_SESSION,
+  };
+  process.env.TELEGRAM_BOT_TOKEN = "999999:MTPROTO_PERSIST_TEST";
+  process.env.TELEGRAM_API_ID = "123456";
+  process.env.TELEGRAM_API_HASH = "abcdef1234567890abcdef1234567890";
+  delete process.env.TELEGRAM_MTPROTO_SESSION;
+
+  const makeMockRes = () => {
+    const chunks = [];
+    return {
+      status: 0,
+      headers: {},
+      headersSent: false,
+      writableEnded: false,
+      writeHead(code, headers) {
+        this.status = code;
+        this.headers = headers || {};
+        this.headersSent = true;
+      },
+      write(chunk) {
+        chunks.push(Buffer.from(chunk));
+        return true;
+      },
+      end(chunk) {
+        if (chunk) chunks.push(Buffer.from(chunk));
+        this.writableEnded = true;
+      },
+      getBody() {
+        return Buffer.concat(chunks).toString("utf8");
+      },
+    };
+  };
+
+  try {
+    // 1st boot: DB has no saved session -> calls start() ONCE and persists StringSession to appConfig
+    const res1 = makeMockRes();
+    await streamTelegramMtprotoWithRange({
+      videoData: { tgChatId: "12345", tgMessageId: 55, tgFileSize: 16, tgMimeType: "video/mp4" },
+      method: "GET",
+      rangeHeader: "",
+      res: res1,
+      db: mockDb,
+      telegramLibOverride: fakeTelegramLib,
+    });
+    assert.equal(res1.status, 200);
+    assert.equal(res1.getBody(), "0123456789abcdef");
+    assert.equal(startCalls, 1);
+    assert.equal(
+      appConfigStore.get("telegramMtprotoSession")?.sessionString,
+      "PERSISTED_GRAMJS_SESSION_STRING_V1"
+    );
+
+    // 2nd boot (simulating Render redeploy/restart): restores saved StringSession via connect() with ZERO start() calls!
+    const res2 = makeMockRes();
+    await streamTelegramMtprotoWithRange({
+      videoData: { tgChatId: "12345", tgMessageId: 55, tgFileSize: 16, tgMimeType: "video/mp4" },
+      method: "GET",
+      rangeHeader: "",
+      res: res2,
+      db: mockDb,
+      telegramLibOverride: fakeTelegramLib,
+    });
+    assert.equal(res2.status, 200);
+    assert.equal(res2.getBody(), "0123456789abcdef");
+    assert.equal(startCalls, 1, "Must NOT call client.start() / auth.ImportBotAuthorization again!");
+    assert.equal(connectCalls, 1, "Must reconnect using persisted StringSession!");
+  } finally {
+    if (prevEnv.botToken === undefined) delete process.env.TELEGRAM_BOT_TOKEN;
+    else process.env.TELEGRAM_BOT_TOKEN = prevEnv.botToken;
+    if (prevEnv.apiId === undefined) delete process.env.TELEGRAM_API_ID;
+    else process.env.TELEGRAM_API_ID = prevEnv.apiId;
+    if (prevEnv.apiHash === undefined) delete process.env.TELEGRAM_API_HASH;
+    else process.env.TELEGRAM_API_HASH = prevEnv.apiHash;
+    if (prevEnv.mtprotoSess === undefined) delete process.env.TELEGRAM_MTPROTO_SESSION;
+    else process.env.TELEGRAM_MTPROTO_SESSION = prevEnv.mtprotoSess;
+  }
+});
+
 
 
 

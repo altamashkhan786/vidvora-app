@@ -472,23 +472,96 @@ function escapeHtml(str) {
     .replace(/"/g, "&quot;");
 }
 
+const MAX_CUSTOM_HEADER_LENGTH = 300;
+const MAX_CUSTOM_FOOTER_LENGTH = 400;
+const MAX_CUSTOM_CAPTION_LINES = 8;
+
+function sanitizeCustomCaptionBlock(raw, maxLength = MAX_CUSTOM_FOOTER_LENGTH) {
+  const normalized = String(raw || "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .slice(0, MAX_CUSTOM_CAPTION_LINES)
+    .join("\n")
+    .trim();
+  if (!normalized) return "";
+  return normalized.slice(0, maxLength).trim();
+}
+
 function buildShareMessageCaption({
   rawToken,
   shareLinkBaseUrl = SHARE_LINK_BASE_URL,
+  customHeader = "",
+  customFooter = "",
 }) {
   const effectiveBase = shareLinkBaseUrl || SHARE_LINK_BASE_URL;
   const watchUrl = `${effectiveBase}${rawToken}`;
+  const cleanHeader = sanitizeCustomCaptionBlock(customHeader, MAX_CUSTOM_HEADER_LENGTH);
+  const cleanFooter = sanitizeCustomCaptionBlock(customFooter, MAX_CUSTOM_FOOTER_LENGTH);
   const lines = [
-    "🎬 <b>VidVora — Watch Video</b>",
+    cleanHeader ? escapeHtml(cleanHeader) : "🎬 <b>VidVora — Watch Video</b>",
     "",
     "🔗 <b>Watch Full Video:</b>",
     escapeHtml(watchUrl),
-    "",
-    "वीडियो कैसे देखे / How to play video",
-    "👇👇👇👇",
-    "https://t.me/VideoKaiseDekhe_ar",
   ];
+  if (cleanFooter) {
+    lines.push("", escapeHtml(cleanFooter));
+  }
   return lines.join("\n");
+}
+
+function buildSharePlainFallbackText({
+  rawToken,
+  shareLinkBaseUrl = SHARE_LINK_BASE_URL,
+  customHeader = "",
+  customFooter = "",
+}) {
+  const effectiveBase = shareLinkBaseUrl || SHARE_LINK_BASE_URL;
+  const watchUrl = `${effectiveBase}${rawToken}`;
+  const cleanHeader = sanitizeCustomCaptionBlock(customHeader, MAX_CUSTOM_HEADER_LENGTH);
+  const cleanFooter = sanitizeCustomCaptionBlock(customFooter, MAX_CUSTOM_FOOTER_LENGTH);
+  const lines = [
+    cleanHeader || "🎬 VidVora — Watch Video",
+    "",
+    "🔗 Watch Full Video:",
+    watchUrl,
+  ];
+  if (cleanFooter) {
+    lines.push("", cleanFooter);
+  }
+  return lines.join("\n");
+}
+
+function buildCaptionSettingsKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: "✏️ Edit Header", callback_data: "caption:edit_header" },
+        { text: "✏️ Edit Footer", callback_data: "caption:edit_footer" },
+      ],
+      [
+        { text: "🗑 Reset Header", callback_data: "caption:clear_header" },
+        { text: "🗑 Clear Footer", callback_data: "caption:clear_footer" },
+      ],
+      [{ text: "👁️ Preview Post", callback_data: "caption:preview" }],
+    ],
+  };
+}
+
+function buildCaptionSettingsHtml(session) {
+  const header = sanitizeCustomCaptionBlock(session?.customCaptionHeader || "", MAX_CUSTOM_HEADER_LENGTH);
+  const footer = sanitizeCustomCaptionBlock(session?.customCaptionFooter || "", MAX_CUSTOM_FOOTER_LENGTH);
+  return [
+    "📝 <b>Post Header &amp; Footer Settings</b>",
+    "",
+    `<b>Header:</b>\n${header ? escapeHtml(header) : "<i>Default (🎬 VidVora — Watch Video)</i>"}`,
+    "",
+    `<b>Footer:</b>\n${footer ? escapeHtml(footer) : "<i>None (Empty)</i>"}`,
+    "",
+    "Neeche button dabakar apna Header ya Footer (apna channel link, promo text, emojis) khud edit kar sakte hain, ya direct bhejein:",
+    "• <code>/header Apna Header Text</code>",
+    "• <code>/footer Apna Footer ya Link</code>",
+  ].join("\n");
 }
 
 function escapeMarkdown(str) {
@@ -1082,7 +1155,62 @@ function decodeTelegramBotFileId(fileId) {
   }
 }
 
+const MTPROTO_SESSION_DOC_ID = "telegramMtprotoSession";
 let mtprotoState = { key: "", client: null, promise: null };
+let mtprotoFloodWaitUntilMs = 0;
+
+function parseTelegramFloodWaitSeconds(err) {
+  const direct = Number(err?.seconds || 0);
+  if (Number.isFinite(direct) && direct > 0) return Math.ceil(direct);
+  const text = String(err?.errorMessage || err?.message || "");
+  const m1 = text.match(/FLOOD_WAIT_(\d+)/i);
+  if (m1 && m1[1]) return Math.ceil(Number(m1[1]));
+  const m2 = text.match(/wait of (\d+) seconds/i);
+  if (m2 && m2[1]) return Math.ceil(Number(m2[1]));
+  return 0;
+}
+
+function computeMtprotoKeyHash(apiId, apiHash, botToken) {
+  return crypto
+    .createHash("sha256")
+    .update(`${Number(apiId)}:${String(apiHash || "").trim()}:${String(botToken || "").trim()}`)
+    .digest("hex");
+}
+
+async function loadPersistedMtprotoSession(db, keyHash) {
+  const envSession = String(process.env.TELEGRAM_MTPROTO_SESSION || "").trim();
+  if (envSession) return envSession;
+  if (!db || typeof db.collection !== "function") return "";
+  try {
+    const snap = await db.collection("appConfig").doc(MTPROTO_SESSION_DOC_ID).get();
+    if (!snap || !snap.exists) return "";
+    const data = snap.data() || {};
+    const savedSession = String(data.sessionString || "").trim();
+    if (!savedSession) return "";
+    if (data.keyHash && String(data.keyHash) !== String(keyHash)) return "";
+    return savedSession;
+  } catch (err) {
+    console.warn("Could not load persisted MTProto session:", err?.message || err);
+    return "";
+  }
+}
+
+async function savePersistedMtprotoSession(db, keyHash, sessionString) {
+  const cleanSession = String(sessionString || "").trim();
+  if (!cleanSession || !db || typeof db.collection !== "function") return;
+  try {
+    await db.collection("appConfig").doc(MTPROTO_SESSION_DOC_ID).set(
+      {
+        sessionString: cleanSession,
+        keyHash: String(keyHash),
+        updatedAt: new Date(),
+      },
+      { merge: true }
+    );
+  } catch (err) {
+    console.warn("Could not save persisted MTProto session:", err?.message || err);
+  }
+}
 
 function loadTelegramMtprotoLibs(telegramLibOverride = null) {
   if (telegramLibOverride) {
@@ -1094,7 +1222,7 @@ function loadTelegramMtprotoLibs(telegramLibOverride = null) {
   return { TelegramClient, Api, StringSession, bigInt };
 }
 
-async function getMtprotoClient({ apiId, apiHash, botToken, telegramLibOverride = null }) {
+async function getMtprotoClient({ apiId, apiHash, botToken, db = null, telegramLibOverride = null }) {
   const numApiId = Number(apiId);
   const cleanHash = String(apiHash || "").trim();
   const cleanToken = String(botToken || "").trim();
@@ -1102,14 +1230,33 @@ async function getMtprotoClient({ apiId, apiHash, botToken, telegramLibOverride 
     throw new Error("TELEGRAM_API_ID and TELEGRAM_API_HASH are required for >20 MB MTProto downloads.");
   }
 
+  const keyHash = computeMtprotoKeyHash(numApiId, cleanHash, cleanToken);
+
   if (telegramLibOverride) {
     const libs = loadTelegramMtprotoLibs(telegramLibOverride);
-    const client = new libs.TelegramClient(new libs.StringSession(""), numApiId, cleanHash, {
+    const savedSession = await loadPersistedMtprotoSession(db, keyHash);
+    const client = new libs.TelegramClient(new libs.StringSession(savedSession), numApiId, cleanHash, {
       connectionRetries: 3,
       useWSS: false,
     });
     if (typeof client.setLogLevel === "function") client.setLogLevel("warn");
-    await client.start({ botAuthToken: cleanToken });
+    let reused = false;
+    if (savedSession && typeof client.connect === "function") {
+      try {
+        await client.connect();
+        const authed = typeof client.checkAuthorization === "function" ? await client.checkAuthorization() : true;
+        reused = Boolean(authed);
+      } catch (_) {
+        reused = false;
+      }
+    }
+    if (!reused) {
+      await client.start({ botAuthToken: cleanToken });
+      const freshSession = typeof client.session?.save === "function" ? String(client.session.save() || "") : "";
+      if (freshSession) {
+        await savePersistedMtprotoSession(db, keyHash, freshSession);
+      }
+    }
     return { client, libs };
   }
 
@@ -1122,29 +1269,110 @@ async function getMtprotoClient({ apiId, apiHash, botToken, telegramLibOverride 
   }
 
   const prevClient = mtprotoState.client;
+  const prevKey = mtprotoState.key;
   const connectPromise = (async () => {
+    const libs = loadTelegramMtprotoLibs();
+
+    // 1. If we already have an authorized client in memory for the same key and it only disconnected,
+    //    reconnect the SAME session via client.connect() — NEVER trigger auth.ImportBotAuthorization again!
+    if (prevKey === key && prevClient && typeof prevClient.connect === "function") {
+      try {
+        await prevClient.connect();
+        const authed =
+          typeof prevClient.checkAuthorization === "function" ? await prevClient.checkAuthorization() : true;
+        if (authed) {
+          mtprotoState = { key, client: prevClient, promise: null };
+          return { client: prevClient, libs };
+        }
+      } catch (reconnErr) {
+        console.warn("In-memory MTProto reconnect failed, checking persisted session:", reconnErr?.message || reconnErr);
+      }
+    }
+
     if (prevClient && typeof prevClient.disconnect === "function") {
       await prevClient.disconnect().catch(() => {});
     }
-    const libs = loadTelegramMtprotoLibs();
+
+    // 2. Cold boot / Render restart: restore persisted StringSession from PostgreSQL/Firestore so
+    //    deployments & restarts NEVER call auth.ImportBotAuthorization (zero Telegram FLOOD_WAIT!).
+    const savedSession = await loadPersistedMtprotoSession(db, keyHash);
+    if (savedSession) {
+      const restoredClient = new libs.TelegramClient(new libs.StringSession(savedSession), numApiId, cleanHash, {
+        connectionRetries: 5,
+        autoReconnect: true,
+        useWSS: false,
+      });
+      if (typeof restoredClient.setLogLevel === "function") {
+        restoredClient.setLogLevel("warn");
+      }
+      try {
+        await restoredClient.connect();
+        const authed =
+          typeof restoredClient.checkAuthorization === "function"
+            ? await restoredClient.checkAuthorization()
+            : true;
+        if (authed) {
+          mtprotoState = { key, client: restoredClient, promise: null };
+          return { client: restoredClient, libs };
+        }
+      } catch (restoreErr) {
+        console.warn("Persisted MTProto session invalid, falling back to bot login:", restoreErr?.message || restoreErr);
+      }
+      if (typeof restoredClient.disconnect === "function") {
+        await restoredClient.disconnect().catch(() => {});
+      }
+    }
+
+    // 3. First-time bot login (or revoked key): respect active FLOOD_WAIT cooldown so retries don't extend it
+    const nowMs = Date.now();
+    if (mtprotoFloodWaitUntilMs > nowMs) {
+      const remainingSec = Math.max(1, Math.ceil((mtprotoFloodWaitUntilMs - nowMs) / 1000));
+      const err = new Error(`Telegram stream session cooling down. Please retry in ${remainingSec} seconds.`);
+      err.statusCode = 503;
+      err.retryAfterSec = remainingSec;
+      throw err;
+    }
+
     const client = new libs.TelegramClient(new libs.StringSession(""), numApiId, cleanHash, {
       connectionRetries: 5,
+      autoReconnect: true,
       useWSS: false,
     });
     if (typeof client.setLogLevel === "function") {
       client.setLogLevel("warn");
     }
-    await client.start({ botAuthToken: cleanToken });
+    try {
+      await client.start({ botAuthToken: cleanToken });
+    } catch (startErr) {
+      const waitSec = parseTelegramFloodWaitSeconds(startErr);
+      if (waitSec > 0) {
+        mtprotoFloodWaitUntilMs = Date.now() + waitSec * 1000;
+        const wrapped = new Error(
+          `Telegram stream login temporarily rate-limited. Please retry in ${waitSec} seconds.`
+        );
+        wrapped.statusCode = 503;
+        wrapped.retryAfterSec = waitSec;
+        throw wrapped;
+      }
+      throw startErr;
+    }
+
+    mtprotoFloodWaitUntilMs = 0;
+    const freshSession = typeof client.session?.save === "function" ? String(client.session.save() || "") : "";
+    if (freshSession) {
+      await savePersistedMtprotoSession(db, keyHash, freshSession);
+    }
+
     mtprotoState = { key, client, promise: null };
     return { client, libs };
   })();
 
-  mtprotoState = { key, client: null, promise: connectPromise };
+  mtprotoState = { key, client: prevKey === key ? prevClient : null, promise: connectPromise };
   try {
     return await connectPromise;
   } catch (err) {
     if (mtprotoState.promise === connectPromise) {
-      mtprotoState = { key: "", client: null, promise: null };
+      mtprotoState = { key: prevKey === key ? key : "", client: prevKey === key ? prevClient : null, promise: null };
     }
     throw err;
   }
@@ -1208,9 +1436,10 @@ async function downloadTelegramFileViaMtproto({
   tgMessageId = null,
   tgFileSize = 0,
   destPath,
+  db = null,
   telegramLibOverride = null,
 }) {
-  const { client, libs } = await getMtprotoClient({ apiId, apiHash, botToken, telegramLibOverride });
+  const { client, libs } = await getMtprotoClient({ apiId, apiHash, botToken, db, telegramLibOverride });
   let descriptor = await resolveMtprotoMediaDescriptor({
     client,
     libs,
@@ -1489,13 +1718,16 @@ async function handleTelegramUpdate({
   if (recordAndCheckDuplicateUpdate(update?.update_id)) {
     return { ok: true, duplicate: true };
   }
+  const callbackQuery = update?.callback_query;
   const message = update?.message || update?.edited_message;
-  if (!message || !message.chat || !message.from) {
+  const activeChatId = callbackQuery?.message?.chat?.id ?? message?.chat?.id;
+  const activeFrom = callbackQuery?.from || message?.from;
+  if (!activeChatId || !activeFrom) {
     return { ok: true, ignored: true };
   }
 
-  const chatId = message.chat.id;
-  const telegramUserId = String(message.from.id);
+  const chatId = activeChatId;
+  const telegramUserId = String(activeFrom.id);
   const { botToken, apiBase, shareLinkBaseUrl, apiId, apiHash } = await resolveBotRuntimeConfig(db);
   if (!botToken) {
     throw new Error("TELEGRAM_BOT_TOKEN is not configured.");
@@ -1507,41 +1739,6 @@ async function handleTelegramUpdate({
       text,
       ...extra,
     });
-
-  const textBody = String(message.text || "").trim();
-
-  // 1. Commands
-  if (/^\/start(?:@\w+)?/i.test(textBody) || /^\/help(?:@\w+)?/i.test(textBody)) {
-    await replyText(
-      [
-        "🎬 *VidVora Creator Auto-Upload & Channel Auto-Post Bot*",
-        "",
-        "1️⃣ Apna VidVora Creator / Admin account link karein:",
-        "_(Bas apna Password seedha yahan bhej dein)_",
-        "",
-        "2️⃣ *Auto-Channel Post Set Karein (Optional):*",
-        "• Bot ko apne Telegram Channel me *Admin (Post Messages)* banayein.",
-        "• Phir bhejein: `/setchannel @YourChannelUsername`",
-        "_(Private channel ke liye channel ka koi bhi text message yahan forward karein)_",
-        "",
-        "3️⃣ *Video Bhejein → Direct Channel Post:*",
-        "Ab aap 1 ya 10–50 *video files* / *VidVora links* yahan bhejein — bot khud link + preview banakar seedha aapke channel me post kar dega!",
-        "",
-        "Commands: `/setchannel` • `/channel` • `/clearchannel` • `/status` • `/logout`",
-      ].join("\n"),
-      { parse_mode: "Markdown" }
-    );
-    return { ok: true, action: "help" };
-  }
-
-  if (/^\/logout(?:@\w+)?/i.test(textBody)) {
-    deleteCachedBotSession(db, telegramUserId);
-    await db.collection("telegramBotSessions").doc(telegramUserId).delete().catch(() => {});
-    await replyText("🔓 Unlinked your VidVora account from this bot. Send `/login PASSWORD` anytime to reconnect.", {
-      parse_mode: "Markdown",
-    });
-    return { ok: true, action: "logout" };
-  }
 
   const loadCurrentBotSession = async () => {
     let s = getCachedBotSession(db, telegramUserId);
@@ -1555,6 +1752,316 @@ async function handleTelegramUpdate({
     return s || null;
   };
 
+  const persistCreatorCaptionPrefs = async (currentSession, patch) => {
+    const updated = {
+      ...currentSession,
+      ...patch,
+    };
+    await db.collection("telegramBotSessions").doc(telegramUserId).set(patch, { merge: true });
+    setCachedBotSession(db, telegramUserId, updated);
+    const memberId = String(updated.memberId || "").trim();
+    if (
+      memberId &&
+      memberId !== "admin" &&
+      (Object.prototype.hasOwnProperty.call(patch, "customCaptionHeader") ||
+        Object.prototype.hasOwnProperty.call(patch, "customCaptionFooter"))
+    ) {
+      const memberPatch = {};
+      if (Object.prototype.hasOwnProperty.call(patch, "customCaptionHeader")) {
+        memberPatch.customCaptionHeader = patch.customCaptionHeader;
+      }
+      if (Object.prototype.hasOwnProperty.call(patch, "customCaptionFooter")) {
+        memberPatch.customCaptionFooter = patch.customCaptionFooter;
+      }
+      await db.collection("members").doc(memberId).set(memberPatch, { merge: true }).catch(() => {});
+    }
+    return updated;
+  };
+
+  const hydrateCreatorCaptionPrefs = async (memberId, prevSession) => {
+    let customCaptionHeader = sanitizeCustomCaptionBlock(
+      prevSession?.customCaptionHeader || "",
+      MAX_CUSTOM_HEADER_LENGTH
+    );
+    let customCaptionFooter = sanitizeCustomCaptionBlock(
+      prevSession?.customCaptionFooter || "",
+      MAX_CUSTOM_FOOTER_LENGTH
+    );
+    if ((!customCaptionHeader || !customCaptionFooter) && memberId && memberId !== "admin") {
+      try {
+        const mSnap = await db.collection("members").doc(memberId).get();
+        if (mSnap && mSnap.exists) {
+          const mData = mSnap.data() || {};
+          if (!customCaptionHeader && mData.customCaptionHeader) {
+            customCaptionHeader = sanitizeCustomCaptionBlock(mData.customCaptionHeader, MAX_CUSTOM_HEADER_LENGTH);
+          }
+          if (!customCaptionFooter && mData.customCaptionFooter) {
+            customCaptionFooter = sanitizeCustomCaptionBlock(mData.customCaptionFooter, MAX_CUSTOM_FOOTER_LENGTH);
+          }
+        }
+      } catch (_) {
+        // Best-effort restore
+      }
+    }
+    return { customCaptionHeader, customCaptionFooter };
+  };
+
+  // 0. Handle Inline Button Callbacks (Header / Footer Edit & Preview)
+  if (callbackQuery) {
+    const cbData = String(callbackQuery.data || "").trim();
+    await telegramApiJson(apiBase, botToken, "answerCallbackQuery", {
+      callback_query_id: callbackQuery.id,
+    }).catch(() => {});
+
+    const s = await loadCurrentBotSession();
+    if (!s) {
+      await replyText("🔐 Pehle apna VidVora Password bhej kar account link karein.");
+      return { ok: true, action: "auth_required" };
+    }
+
+    if (cbData === "caption:edit_header") {
+      await persistCreatorCaptionPrefs(s, { pendingInputAction: "set_header" });
+      await replyText(
+        [
+          "✏️ <b>Apna naya Header bhejein</b>",
+          "",
+          "Jo bhi text, emoji ya link aap yahan bhejenge woh har video post ke <b>upar (Header)</b> me lag jayega.",
+          "<i>Cancel karne ke liye /cancel bhejein.</i>",
+        ].join("\n"),
+        { parse_mode: "HTML" }
+      );
+      return { ok: true, action: "prompt_header" };
+    }
+
+    if (cbData === "caption:edit_footer") {
+      await persistCreatorCaptionPrefs(s, { pendingInputAction: "set_footer" });
+      await replyText(
+        [
+          "✏️ <b>Apna naya Footer bhejein</b>",
+          "",
+          "Jo bhi text, channel link ya promo message aap yahan bhejenge woh har video post ke <b>neeche (Footer)</b> me lag jayega.",
+          "<i>Cancel karne ke liye /cancel bhejein.</i>",
+        ].join("\n"),
+        { parse_mode: "HTML" }
+      );
+      return { ok: true, action: "prompt_footer" };
+    }
+
+    if (cbData === "caption:clear_header") {
+      const updated = await persistCreatorCaptionPrefs(s, {
+        customCaptionHeader: "",
+        pendingInputAction: "",
+      });
+      await replyText(`✅ Header default par reset ho gaya.\n\n${buildCaptionSettingsHtml(updated)}`, {
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+        reply_markup: buildCaptionSettingsKeyboard(),
+      });
+      return { ok: true, action: "header_cleared" };
+    }
+
+    if (cbData === "caption:clear_footer") {
+      const updated = await persistCreatorCaptionPrefs(s, {
+        customCaptionFooter: "",
+        pendingInputAction: "",
+      });
+      await replyText(`✅ Footer remove kar diya gaya hai.\n\n${buildCaptionSettingsHtml(updated)}`, {
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+        reply_markup: buildCaptionSettingsKeyboard(),
+      });
+      return { ok: true, action: "footer_cleared" };
+    }
+
+    if (cbData === "caption:preview") {
+      const sampleCaption = buildShareMessageCaption({
+        rawToken: "GM-SAMPLE99",
+        shareLinkBaseUrl: shareLinkBaseUrl || SHARE_LINK_BASE_URL,
+        customHeader: s.customCaptionHeader || "",
+        customFooter: s.customCaptionFooter || "",
+      });
+      await replyText(`👁️ <b>Live Post Preview:</b>\n\n${sampleCaption}`, {
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+        reply_markup: buildCaptionSettingsKeyboard(),
+      });
+      return { ok: true, action: "caption_preview" };
+    }
+
+    return { ok: true, action: "callback_ignored" };
+  }
+
+  const textBody = String(message.text || "").trim();
+
+  // 1. Commands
+  if (/^\/start(?:@\w+)?/i.test(textBody) || /^\/help(?:@\w+)?/i.test(textBody)) {
+    await replyText(
+      [
+        "🎬 *VidVora Creator Auto-Upload & Channel Auto-Post Bot*",
+        "",
+        "1️⃣ Apna VidVora Creator / Admin account link karein:",
+        "_(Bas apna Password seedha yahan bhej dein)_",
+        "",
+        "2️⃣ *Custom Header & Footer Set Karein:*",
+        "• `/caption` — Button se Header / Footer edit karein (apna channel link ya text lagayein)",
+        "• `/header Apna Header` • `/footer Apna Footer ya Link`",
+        "",
+        "3️⃣ *Auto-Channel Post Set Karein (Optional):*",
+        "• Bot ko apne Telegram Channel me *Admin (Post Messages)* banayein.",
+        "• Phir bhejein: `/setchannel @YourChannelUsername`",
+        "_(Private channel ke liye channel ka koi bhi text message yahan forward karein)_",
+        "",
+        "4️⃣ *Video Bhejein → Direct Channel Post:*",
+        "Ab aap 1 ya 10–50 *video files* / *VidVora links* yahan bhejein — bot khud link + preview banakar post kar dega!",
+        "",
+        "Commands: `/caption` • `/header` • `/footer` • `/setchannel` • `/channel` • `/clearchannel` • `/status` • `/logout`",
+      ].join("\n"),
+      { parse_mode: "Markdown" }
+    );
+    return { ok: true, action: "help" };
+  }
+
+  if (/^\/cancel(?:@\w+)?(?:\s|$)/i.test(textBody)) {
+    const s = await loadCurrentBotSession();
+    if (s && s.pendingInputAction) {
+      await persistCreatorCaptionPrefs(s, { pendingInputAction: "" });
+      await replyText("✅ Edit cancel kar diya gaya hai.");
+    } else {
+      await replyText("ℹ️ Koi active edit mode nahi chal raha hai.");
+    }
+    return { ok: true, action: "cancelled" };
+  }
+
+  if (/^\/(?:caption|editcaption|settings)(?:@\w+)?(?:\s|$)/i.test(textBody)) {
+    const s = await loadCurrentBotSession();
+    if (!s) {
+      await replyText("🔐 Pehle apna VidVora Password bhej kar account link karein.");
+      return { ok: true, action: "auth_required" };
+    }
+    if (s.pendingInputAction) {
+      await persistCreatorCaptionPrefs(s, { pendingInputAction: "" });
+    }
+    await replyText(buildCaptionSettingsHtml(s), {
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      reply_markup: buildCaptionSettingsKeyboard(),
+    });
+    return { ok: true, action: "caption_settings" };
+  }
+
+  if (/^\/(?:set)?header(?:@\w+)?(?:\s|$)/i.test(textBody)) {
+    const s = await loadCurrentBotSession();
+    if (!s) {
+      await replyText("🔐 Pehle apna VidVora Password bhej kar account link karein.");
+      return { ok: true, action: "auth_required" };
+    }
+    const rawHeader = textBody.replace(/^\/(?:set)?header(?:@\w+)?/i, "").trim();
+    if (!rawHeader) {
+      await persistCreatorCaptionPrefs(s, { pendingInputAction: "set_header" });
+      await replyText(
+        [
+          "✏️ <b>Apna naya Header text/link bhejein:</b>",
+          "",
+          `Current Header: ${s.customCaptionHeader ? escapeHtml(s.customCaptionHeader) : "<i>Default (🎬 VidVora — Watch Video)</i>"}`,
+          "",
+          "<i>Direct bhejne ke liye apna text reply karein, ya /clearheader se reset karein, ya /cancel se band karein.</i>",
+        ].join("\n"),
+        { parse_mode: "HTML", disable_web_page_preview: true, reply_markup: buildCaptionSettingsKeyboard() }
+      );
+      return { ok: true, action: "prompt_header" };
+    }
+    const cleanHeader = sanitizeCustomCaptionBlock(rawHeader, MAX_CUSTOM_HEADER_LENGTH);
+    const updated = await persistCreatorCaptionPrefs(s, {
+      customCaptionHeader: cleanHeader,
+      pendingInputAction: "",
+    });
+    await replyText(`✅ <b>Header update ho gaya!</b>\n\n${buildCaptionSettingsHtml(updated)}`, {
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      reply_markup: buildCaptionSettingsKeyboard(),
+    });
+    return { ok: true, action: "header_updated", customCaptionHeader: cleanHeader };
+  }
+
+  if (/^\/(?:set)?footer(?:@\w+)?(?:\s|$)/i.test(textBody)) {
+    const s = await loadCurrentBotSession();
+    if (!s) {
+      await replyText("🔐 Pehle apna VidVora Password bhej kar account link karein.");
+      return { ok: true, action: "auth_required" };
+    }
+    const rawFooter = textBody.replace(/^\/(?:set)?footer(?:@\w+)?/i, "").trim();
+    if (!rawFooter) {
+      await persistCreatorCaptionPrefs(s, { pendingInputAction: "set_footer" });
+      await replyText(
+        [
+          "✏️ <b>Apna naya Footer text ya link bhejein:</b>",
+          "",
+          `Current Footer: ${s.customCaptionFooter ? escapeHtml(s.customCaptionFooter) : "<i>None (Empty)</i>"}`,
+          "",
+          "<i>Apna text/link seedha bhej dein, ya /clearfooter se hatayein, ya /cancel se band karein.</i>",
+        ].join("\n"),
+        { parse_mode: "HTML", disable_web_page_preview: true, reply_markup: buildCaptionSettingsKeyboard() }
+      );
+      return { ok: true, action: "prompt_footer" };
+    }
+    const cleanFooter = sanitizeCustomCaptionBlock(rawFooter, MAX_CUSTOM_FOOTER_LENGTH);
+    const updated = await persistCreatorCaptionPrefs(s, {
+      customCaptionFooter: cleanFooter,
+      pendingInputAction: "",
+    });
+    await replyText(`✅ <b>Footer update ho gaya!</b>\n\n${buildCaptionSettingsHtml(updated)}`, {
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      reply_markup: buildCaptionSettingsKeyboard(),
+    });
+    return { ok: true, action: "footer_updated", customCaptionFooter: cleanFooter };
+  }
+
+  if (/^\/(?:clear|reset|remove)header(?:@\w+)?(?:\s|$)/i.test(textBody)) {
+    const s = await loadCurrentBotSession();
+    if (!s) {
+      await replyText("🔐 Pehle apna VidVora Password bhej kar account link karein.");
+      return { ok: true, action: "auth_required" };
+    }
+    const updated = await persistCreatorCaptionPrefs(s, {
+      customCaptionHeader: "",
+      pendingInputAction: "",
+    });
+    await replyText(`✅ Header default par reset ho gaya.\n\n${buildCaptionSettingsHtml(updated)}`, {
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      reply_markup: buildCaptionSettingsKeyboard(),
+    });
+    return { ok: true, action: "header_cleared" };
+  }
+
+  if (/^\/(?:clear|reset|remove)footer(?:@\w+)?(?:\s|$)/i.test(textBody)) {
+    const s = await loadCurrentBotSession();
+    if (!s) {
+      await replyText("🔐 Pehle apna VidVora Password bhej kar account link karein.");
+      return { ok: true, action: "auth_required" };
+    }
+    const updated = await persistCreatorCaptionPrefs(s, {
+      customCaptionFooter: "",
+      pendingInputAction: "",
+    });
+    await replyText(`✅ Footer remove kar diya gaya hai.\n\n${buildCaptionSettingsHtml(updated)}`, {
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      reply_markup: buildCaptionSettingsKeyboard(),
+    });
+    return { ok: true, action: "footer_cleared" };
+  }
+
+  if (/^\/logout(?:@\w+)?/i.test(textBody)) {
+    deleteCachedBotSession(db, telegramUserId);
+    await db.collection("telegramBotSessions").doc(telegramUserId).delete().catch(() => {});
+    await replyText("🔓 Unlinked your VidVora account from this bot. Send `/login PASSWORD` anytime to reconnect.", {
+      parse_mode: "Markdown",
+    });
+    return { ok: true, action: "logout" };
+  }
+
   if (/^\/status(?:@\w+)?/i.test(textBody) || /^\/channel(?:@\w+)?(?:\s|$)/i.test(textBody)) {
     const s = await loadCurrentBotSession();
     if (!s) {
@@ -1567,17 +2074,20 @@ async function handleTelegramUpdate({
     const chLabel = chId
       ? `${escapeMarkdown(s.autoPostChannelTitle || chId)}${s.autoPostChannelUsername ? ` (@${escapeMarkdown(s.autoPostChannelUsername)})` : ""}`
       : "OFF _(Sirf isi bot chat me reply aayega)_";
+    const hasCustomHeader = Boolean(sanitizeCustomCaptionBlock(s.customCaptionHeader || "", MAX_CUSTOM_HEADER_LENGTH));
+    const hasCustomFooter = Boolean(sanitizeCustomCaptionBlock(s.customCaptionFooter || "", MAX_CUSTOM_FOOTER_LENGTH));
     await replyText(
       [
         `✅ Linked Account: *${escapeMarkdown(s.memberName || "Creator")}*`,
         `📤 Uploads via Bot: *${s.uploadCount || 0}*`,
         `📢 Auto-Post Channel: *${chLabel}*`,
+        `📝 Header: *${hasCustomHeader ? "Custom Set" : "Default"}* • Footer: *${hasCustomFooter ? "Custom Set" : "None"}*`,
         "",
         chId
-          ? "Band karne ke liye `/clearchannel` bhejein, ya badalne ke liye `/setchannel @NewChannel` bhejein."
-          : "Auto-Post chalu karne ke liye bot ko channel me Admin bana kar bhejein: `/setchannel @YourChannel`",
+          ? "Band karne ke liye `/clearchannel` bhejein, ya Header/Footer edit karne ke liye neeche button dabayein:"
+          : "Auto-Post ke liye `/setchannel @YourChannel` bhejein, ya Header/Footer edit karne ke liye neeche button dabayein:",
       ].join("\n"),
-      { parse_mode: "Markdown" }
+      { parse_mode: "Markdown", reply_markup: buildCaptionSettingsKeyboard() }
     );
     return { ok: true, action: "status" };
   }
@@ -1706,6 +2216,7 @@ async function handleTelegramUpdate({
       return { ok: true, action: "login_forbidden" };
     }
     const prevSession = await loadCurrentBotSession();
+    const restoredCaptionPrefs = await hydrateCreatorCaptionPrefs(creator.memberId, prevSession);
     const newSessionPayload = {
       ...(prevSession?.autoPostChannelId
         ? {
@@ -1714,6 +2225,9 @@ async function handleTelegramUpdate({
             autoPostChannelUsername: prevSession.autoPostChannelUsername || "",
           }
         : {}),
+      customCaptionHeader: restoredCaptionPrefs.customCaptionHeader,
+      customCaptionFooter: restoredCaptionPrefs.customCaptionFooter,
+      pendingInputAction: "",
       telegramUserId,
       chatId: String(chatId),
       memberId: creator.memberId,
@@ -1731,15 +2245,45 @@ async function handleTelegramUpdate({
       });
     }
     await replyText(
-      `✅ Welcome *${escapeMarkdown(creator.name)}*!\n\nYour VidVora account is now linked. Send any video (caption = Title) and I will upload it & send back your *5-sec preview clip + watch link*.`,
-      { parse_mode: "Markdown" }
+      `✅ Welcome *${escapeMarkdown(creator.name)}*!\n\nYour VidVora account is now linked. Send any video (caption = Title) and I will upload it & send back your *5-sec preview clip + watch link*.\n\nApne post ka Header / Footer edit karne ke liye `/caption` ya neeche buttons use karein:`,
+      { parse_mode: "Markdown", reply_markup: buildCaptionSettingsKeyboard() }
     );
     return { ok: true, action: "login_success" };
   }
 
+  // 1.5 Interactive Header/Footer edit capture (runs BEFORE link/video parsing so creator can put links in Header/Footer!)
+  const isVideoMsg = isAllowedTelegramVideoMessage(message);
+  if (textBody && !textBody.startsWith("/") && !isVideoMsg) {
+    const pendingSession = await loadCurrentBotSession();
+    const pendingAction = String(pendingSession?.pendingInputAction || "").trim();
+    if (pendingSession && (pendingAction === "set_header" || pendingAction === "set_footer")) {
+      const isHeader = pendingAction === "set_header";
+      const cleanVal = sanitizeCustomCaptionBlock(
+        textBody,
+        isHeader ? MAX_CUSTOM_HEADER_LENGTH : MAX_CUSTOM_FOOTER_LENGTH
+      );
+      const updated = await persistCreatorCaptionPrefs(pendingSession, {
+        ...(isHeader ? { customCaptionHeader: cleanVal } : { customCaptionFooter: cleanVal }),
+        pendingInputAction: "",
+      });
+      await replyText(
+        `✅ <b>${isHeader ? "Header" : "Footer"} save ho gaya!</b>\n\n${buildCaptionSettingsHtml(updated)}`,
+        {
+          parse_mode: "HTML",
+          disable_web_page_preview: true,
+          reply_markup: buildCaptionSettingsKeyboard(),
+        }
+      );
+      return {
+        ok: true,
+        action: isHeader ? "header_updated" : "footer_updated",
+        ...(isHeader ? { customCaptionHeader: cleanVal } : { customCaptionFooter: cleanVal }),
+      };
+    }
+  }
+
   // 2. Check upload session before handling VidVora link conversion, video, or direct URL
   const combinedText = String(message.text || message.caption || "").trim();
-  const isVideoMsg = isAllowedTelegramVideoMessage(message);
   const vidvoraConvertTarget = extractVidVoraShareTarget(combinedText, message, {
     strictVidVoraOnly: isVideoMsg,
   });
@@ -1762,6 +2306,7 @@ async function handleTelegramUpdate({
           return { ok: true, action: "login_forbidden" };
         }
         const prevDirectSession = await loadCurrentBotSession();
+        const restoredDirectPrefs = await hydrateCreatorCaptionPrefs(directCreator.memberId, prevDirectSession);
         const directSessionPayload = {
           ...(prevDirectSession?.autoPostChannelId
             ? {
@@ -1770,6 +2315,9 @@ async function handleTelegramUpdate({
                 autoPostChannelUsername: prevDirectSession.autoPostChannelUsername || "",
               }
             : {}),
+          customCaptionHeader: restoredDirectPrefs.customCaptionHeader,
+          customCaptionFooter: restoredDirectPrefs.customCaptionFooter,
+          pendingInputAction: "",
           telegramUserId,
           chatId: String(chatId),
           memberId: directCreator.memberId,
@@ -1787,8 +2335,8 @@ async function handleTelegramUpdate({
           });
         }
         await replyText(
-          `✅ Welcome *${escapeMarkdown(directCreator.name)}*!\n\nYour VidVora account is now linked. Send any *Video* or paste any *VidVora Share Link* to convert into your own link!`,
-          { parse_mode: "Markdown" }
+          `✅ Welcome *${escapeMarkdown(directCreator.name)}*!\n\nYour VidVora account is now linked. Send any *Video* or paste any *VidVora Share Link* to convert into your own link!\n\nApne post ka Header / Footer edit karne ke liye `/caption` ya neeche buttons use karein:`,
+          { parse_mode: "Markdown", reply_markup: buildCaptionSettingsKeyboard() }
         );
         return { ok: true, action: "login_success" };
       }
@@ -2077,6 +2625,7 @@ async function handleTelegramUpdate({
               tgMessageId: message.message_id,
               tgFileSize: reportedFileSize,
               destPath: localVideoPath,
+              db,
               telegramLibOverride,
             });
             hasDownloadedLocalVideo = fs.existsSync(localVideoPath) && fs.statSync(localVideoPath).size > 0;
@@ -2330,21 +2879,19 @@ async function handleTelegramUpdate({
       rawToken,
       previewSeconds: DEFAULT_PREVIEW_SECONDS,
       shareLinkBaseUrl: resolvedShareBase,
+      customHeader: session.customCaptionHeader || "",
+      customFooter: session.customCaptionFooter || "",
     });
     const watchInlineMarkup = {
       inline_keyboard: [[{ text: "▶️ Watch Full Video on VidVora", url: watchUrl }]],
     };
 
-    const plainFallbackText = [
-      "🎬 VidVora — Watch Video",
-      "",
-      "🔗 Watch Full Video:",
-      watchUrl,
-      "",
-      "वीडियो कैसे देखे / How to play video",
-      "👇👇👇👇",
-      "https://t.me/VideoKaiseDekhe_ar",
-    ].join("\n");
+    const plainFallbackText = buildSharePlainFallbackText({
+      rawToken,
+      shareLinkBaseUrl: resolvedShareBase,
+      customHeader: session.customCaptionHeader || "",
+      customFooter: session.customCaptionFooter || "",
+    });
 
     const localThumbReady = fs.existsSync(thumbPath) && fs.statSync(thumbPath).size > 0;
 
@@ -2633,6 +3180,7 @@ function compactVideoDocForStreamCache(raw) {
 function clearTelegramRuntimeCaches() {
   videoDocCache.clear();
   telegramFileUrlCache.clear();
+  mtprotoFloodWaitUntilMs = 0;
 }
 
 function parseHttpByteRange(rangeHeader, fileSize) {
@@ -3019,7 +3567,7 @@ async function streamTelegramMtprotoWithRange({
     throw err;
   }
 
-  const { client, libs } = await getMtprotoClient({ apiId, apiHash, botToken, telegramLibOverride });
+  const { client, libs } = await getMtprotoClient({ apiId, apiHash, botToken, db, telegramLibOverride });
   const isHead = String(method || "GET").toUpperCase() === "HEAD";
   const contentType = String(videoData.tgMimeType || "video/mp4").startsWith("video/")
     ? String(videoData.tgMimeType)
@@ -3378,7 +3926,11 @@ async function handleStreamPublicVideo({
     } catch (tgStreamErr) {
       const status = tgStreamErr.statusCode || 502;
       if (!res.headersSent) {
-        res.writeHead(status, { "Content-Type": "text/plain" });
+        const errHeaders = { "Content-Type": "text/plain" };
+        if (Number(tgStreamErr.retryAfterSec) > 0) {
+          errHeaders["Retry-After"] = String(Math.ceil(Number(tgStreamErr.retryAfterSec)));
+        }
+        res.writeHead(status, errHeaders);
         res.end(tgStreamErr.message || "Unable to stream video from Telegram.");
       } else if (!res.writableEnded) {
         res.end();
@@ -3413,6 +3965,10 @@ module.exports = {
   resolveVidVoraSourceVideo,
   isAllowedTelegramVideoMessage,
   buildShareMessageCaption,
+  buildSharePlainFallbackText,
+  sanitizeCustomCaptionBlock,
+  buildCaptionSettingsKeyboard,
+  parseTelegramFloodWaitSeconds,
   createFiveSecondPreviewAndThumbnail,
   decodeTelegramBotFileId,
   resolveBotRuntimeConfig,

@@ -1877,14 +1877,24 @@ async function registerSingleWebhook({ label, botToken, apiBase, webhookSecret, 
     const infoData = await infoRes.json().catch(() => ({}));
     const currentUrl = infoData?.result?.url || "";
     const hasLastError = Boolean(infoData?.result?.last_error_message);
-    if (infoData.ok && currentUrl === desiredWebhookUrl && !hasLastError && !webhookSecret) {
+    const currentAllowed = Array.isArray(infoData?.result?.allowed_updates)
+      ? infoData.result.allowed_updates
+      : [];
+    const hasCallbackQueryAllowed = currentAllowed.includes("callback_query");
+    if (
+      infoData.ok &&
+      currentUrl === desiredWebhookUrl &&
+      hasCallbackQueryAllowed &&
+      !hasLastError &&
+      !webhookSecret
+    ) {
       console.log(`${label} webhook already active: ${desiredWebhookUrl}`);
       return;
     }
 
     const payload = {
       url: desiredWebhookUrl,
-      allowed_updates: ["message", "edited_message"],
+      allowed_updates: ["message", "edited_message", "callback_query"],
     };
     if (webhookSecret) {
       payload.secret_token = webhookSecret;

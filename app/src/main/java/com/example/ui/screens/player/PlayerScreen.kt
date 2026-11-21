@@ -203,8 +203,24 @@ fun PlayerScreen(
   var retryTrigger by remember(video.streamUrl) {
     mutableIntStateOf(0)
   }
+  var autoSourceRetryAttempt by remember(video.streamUrl) {
+    mutableIntStateOf(0)
+  }
+  var pendingAutoRetry by remember(video.streamUrl) {
+    mutableStateOf(false)
+  }
   var resumePositionMs by remember(video.streamUrl) {
     mutableLongStateOf(0L)
+  }
+
+  LaunchedEffect(pendingAutoRetry) {
+    if (pendingAutoRetry) {
+      delay(1500)
+      pendingAutoRetry = false
+      playbackError = null
+      isBuffering = true
+      retryTrigger += 1
+    }
   }
 
   // Video Quality states
@@ -560,6 +576,22 @@ fun PlayerScreen(
           playbackError = null
           isBuffering = true
           useSoftwareDecoderFallback = true
+          return
+        }
+
+        val isTransientSourceError =
+          error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ||
+            error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
+            error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT ||
+            error.errorCode == PlaybackException.ERROR_CODE_IO_UNSPECIFIED ||
+            errorMsg.contains("Source error", ignoreCase = true)
+
+        if (isTransientSourceError && autoSourceRetryAttempt < 1) {
+          autoSourceRetryAttempt += 1
+          resumePositionMs = exoPlayer.currentPosition.coerceAtLeast(0L)
+          playbackError = null
+          isBuffering = true
+          pendingAutoRetry = true
           return
         }
 
