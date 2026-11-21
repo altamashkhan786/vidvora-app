@@ -220,6 +220,35 @@ fun CreatorEarningsSection(
             modifier = Modifier.weight(1f)
           )
         }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Separate display: Own Views Earning vs Referral Bonus (7% Admin) — unified in Total Earning for withdrawal
+        Row(
+          modifier = Modifier
+            .fillMaxWidth()
+            .testTag("creator_earning_source_breakdown"),
+          horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+          MiniEarningMetric(
+            label = "Own Views Earning",
+            value = formatInr(summary.ownViewsEarning),
+            valueColor = MasalaTextPrimary,
+            modifier = Modifier.weight(1f)
+          )
+          MiniEarningMetric(
+            label = "Referral Bonus (7%)",
+            value = formatInr(summary.referralBonusEarning),
+            valueColor = MasalaGold,
+            modifier = Modifier.weight(1f)
+          )
+        }
+        Text(
+          text = "Own Views + Referral Bonus dono milkar ek hi Total Earning wallet me withdraw hote hain",
+          color = MasalaTextMuted,
+          fontSize = 10.sp,
+          modifier = Modifier.padding(top = 5.dp)
+        )
       }
 
       if (showWithdrawButton) {
@@ -672,6 +701,24 @@ fun ManageCreatorEarningDialog(
           modifier = Modifier.padding(top = 2.dp)
         )
 
+        if (memberStats.member.referredByName.isNotBlank()) {
+          Spacer(modifier = Modifier.height(6.dp))
+          Surface(
+            shape = RoundedCornerShape(8.dp),
+            color = MasalaGold.copy(alpha = 0.14f),
+            border = BorderStroke(1.dp, MasalaGold.copy(alpha = 0.45f)),
+            modifier = Modifier.fillMaxWidth()
+          ) {
+            Text(
+              text = "Referred by ${memberStats.member.referredByName} • +7% Admin Bonus auto-add hoga (Creator se kuch nahi katega)",
+              color = MasalaGold,
+              fontSize = 10.5.sp,
+              fontWeight = FontWeight.SemiBold,
+              modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
+            )
+          }
+        }
+
         Spacer(modifier = Modifier.height(12.dp))
 
         // Admin Overview Pill: 24h Views, Real Views (Admin-only), Creator Views vs Total Earning
@@ -882,8 +929,16 @@ fun ManageCreatorEarningDialog(
           val previewEarningResult = if (isAddition) {
             memberStats.earningSummary.totalEarning + calculatedInr
           } else {
-            calculatedInr
+            calculatedInr + memberStats.member.referralBonusEarning
           }
+          val previewPositiveDelta = if (isAddition) {
+            calculatedInr.coerceAtLeast(0.0)
+          } else {
+            (previewEarningResult - memberStats.earningSummary.totalEarning).coerceAtLeast(0.0)
+          }
+          val previewRefBonus = if (memberStats.member.referredByMemberId.isNotBlank() && previewPositiveDelta > 0.0) {
+            FirestoreVideoRepository.calculateReferralBonus(previewPositiveDelta)
+          } else 0.0
 
           Column(
             modifier = Modifier
@@ -910,6 +965,15 @@ fun ManageCreatorEarningDialog(
               fontSize = 11.sp,
               modifier = Modifier.padding(top = 2.dp)
             )
+            if (previewRefBonus > 0.0) {
+              Text(
+                text = "+${formatInr(previewRefBonus)} (7% Admin Bonus) → ${memberStats.member.referredByName.ifBlank { "Referrer" }}",
+                color = MasalaSuccess,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(top = 2.dp)
+              )
+            }
           }
         } else {
           OutlinedTextField(

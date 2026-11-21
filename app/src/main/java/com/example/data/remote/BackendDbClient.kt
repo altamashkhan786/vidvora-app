@@ -491,7 +491,12 @@ class BackendDbClient(
         allowedOptions = resolvedOptions,
         hourlyViews = parsedHourly,
         lastViewsUpdateCycleKey = optStringClean(d, "lastViewsUpdateCycleKey", ""),
-        lastViewsUpdatedAtMs = d.optLong("lastViewsUpdatedAtMs", 0L).coerceAtLeast(0L)
+        lastViewsUpdatedAtMs = d.optLong("lastViewsUpdatedAtMs", 0L).coerceAtLeast(0L),
+        referralCode = optStringClean(d, "referralCode", ""),
+        referredByMemberId = optStringClean(d, "referredByMemberId", ""),
+        referredByName = optStringClean(d, "referredByName", ""),
+        referralBonusEarning = (d.optDouble("referralBonusEarning", 0.0).takeIf { !it.isNaN() } ?: 0.0).coerceAtLeast(0.0),
+        referralCommissionGenerated = (d.optDouble("referralCommissionGenerated", 0.0).takeIf { !it.isNaN() } ?: 0.0).coerceAtLeast(0.0)
       )
     }
 

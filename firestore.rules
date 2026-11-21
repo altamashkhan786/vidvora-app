@@ -135,7 +135,13 @@ service cloud.firestore {
          (data.creditedViews is int && data.creditedViews >= 0)) &&
         (!('viewRatePer1000' in data) ||
          ((data.viewRatePer1000 is int || data.viewRatePer1000 is float) &&
-          data.viewRatePer1000 >= 0));
+          data.viewRatePer1000 >= 0)) &&
+        (!('referralBonusEarning' in data) ||
+         ((data.referralBonusEarning is int || data.referralBonusEarning is float) &&
+          data.referralBonusEarning >= 0)) &&
+        (!('referralCommissionGenerated' in data) ||
+         ((data.referralCommissionGenerated is int || data.referralCommissionGenerated is float) &&
+          data.referralCommissionGenerated >= 0));
     }
 
     // Members / Uploaders Collection:

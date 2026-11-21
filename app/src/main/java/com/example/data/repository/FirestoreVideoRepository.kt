@@ -1956,7 +1956,12 @@ class FirestoreVideoRepository(
       allowedOptions = resolvedOptions,
       hourlyViews = parsedHourlyViews,
       lastViewsUpdateCycleKey = doc.getString("lastViewsUpdateCycleKey")?.trim().orEmpty(),
-      lastViewsUpdatedAtMs = (doc.get("lastViewsUpdatedAtMs") as? Number)?.toLong()?.coerceAtLeast(0L) ?: 0L
+      lastViewsUpdatedAtMs = (doc.get("lastViewsUpdatedAtMs") as? Number)?.toLong()?.coerceAtLeast(0L) ?: 0L,
+      referralCode = doc.getString("referralCode")?.trim().orEmpty(),
+      referredByMemberId = doc.getString("referredByMemberId")?.trim().orEmpty(),
+      referredByName = doc.getString("referredByName")?.trim().orEmpty(),
+      referralBonusEarning = ((doc.get("referralBonusEarning") as? Number)?.toDouble() ?: 0.0).coerceAtLeast(0.0),
+      referralCommissionGenerated = ((doc.get("referralCommissionGenerated") as? Number)?.toDouble() ?: 0.0).coerceAtLeast(0.0)
     )
   }
 
@@ -2009,7 +2014,8 @@ class FirestoreVideoRepository(
     emailOrPhone: String,
     passkey: String,
     role: String = MemberRole.CREATOR,
-    allowedOptions: List<String> = MemberOption.defaultKeysForRole(role)
+    allowedOptions: List<String> = MemberOption.defaultKeysForRole(role),
+    referralCode: String = ""
   ): Result<FirestoreMember> {
     return try {
       val validationError = validateMemberInput(name, emailOrPhone, passkey)
@@ -2021,6 +2027,7 @@ class FirestoreVideoRepository(
       val cleanPass = passkey.trim()
       val normalizedRole = MemberRole.normalize(role)
       val cleanOptions = MemberOption.sanitizeKeys(allowedOptions)
+      val cleanRefCode = normalizeReferralCode(referralCode)
       if (cleanOptions.isEmpty()) {
         return Result.failure(IllegalArgumentException("Please select at least 1 option for this account."))
       }
@@ -2044,7 +2051,16 @@ class FirestoreVideoRepository(
         if (keyCollision) {
           return Result.failure(IllegalArgumentException("This Password is already assigned to another member."))
         }
+        val referrer = if (cleanRefCode.isNotBlank()) {
+          existingMembers.map { BackendDbClient.parseMember(it) }.firstOrNull { m ->
+            m.isActive && m.effectiveReferralCode().equals(cleanRefCode, ignoreCase = true)
+          } ?: return Result.failure(
+            IllegalArgumentException("Galat Referral Code hai. Sahi code dalein ya blank chhod dein.")
+          )
+        } else null
+
         val memberId = "mem_" + UUID.randomUUID().toString().replace("-", "").take(10)
+        val ownReferralCode = generateReferralCode(memberId)
         val member = FirestoreMember(
           memberId = memberId,
           name = cleanName,
@@ -2056,7 +2072,12 @@ class FirestoreVideoRepository(
           totalEarning = 0.0,
           creditedViews = 0L,
           viewRatePer1000 = DEFAULT_VIEW_RATE_PER_1000,
-          allowedOptions = cleanOptions
+          allowedOptions = cleanOptions,
+          referralCode = ownReferralCode,
+          referredByMemberId = referrer?.memberId.orEmpty(),
+          referredByName = referrer?.name.orEmpty(),
+          referralBonusEarning = 0.0,
+          referralCommissionGenerated = 0.0
         )
         val pgPayload = mapOf(
           "memberId" to member.memberId,
@@ -2069,7 +2090,12 @@ class FirestoreVideoRepository(
           "createdAt" to BackendDbClient.serverTimestampMarker(),
           "totalEarning" to 0.0,
           "creditedViews" to 0L,
-          "viewRatePer1000" to DEFAULT_VIEW_RATE_PER_1000
+          "viewRatePer1000" to DEFAULT_VIEW_RATE_PER_1000,
+          "referralCode" to ownReferralCode,
+          "referredByMemberId" to member.referredByMemberId,
+          "referredByName" to member.referredByName,
+          "referralBonusEarning" to 0.0,
+          "referralCommissionGenerated" to 0.0
         )
         val ok = backendDb.writeDoc("members", memberId, "set", pgPayload)
         if (!ok) return Result.failure(IllegalStateException("Failed to create member on backend."))
@@ -2100,7 +2126,16 @@ class FirestoreVideoRepository(
         return Result.failure(IllegalArgumentException("This Password is already assigned to another member."))
       }
 
+      val referrer = if (cleanRefCode.isNotBlank()) {
+        existingMembers.documents.map { parseMemberDoc(it) }.firstOrNull { m ->
+          m.isActive && m.effectiveReferralCode().equals(cleanRefCode, ignoreCase = true)
+        } ?: return Result.failure(
+          IllegalArgumentException("Galat Referral Code hai. Sahi code dalein ya blank chhod dein.")
+        )
+      } else null
+
       val memberId = "mem_" + UUID.randomUUID().toString().replace("-", "").take(10)
+      val ownReferralCode = generateReferralCode(memberId)
       val member = FirestoreMember(
         memberId = memberId,
         name = cleanName,
@@ -2112,7 +2147,12 @@ class FirestoreVideoRepository(
         totalEarning = 0.0,
         creditedViews = 0L,
         viewRatePer1000 = DEFAULT_VIEW_RATE_PER_1000,
-        allowedOptions = cleanOptions
+        allowedOptions = cleanOptions,
+        referralCode = ownReferralCode,
+        referredByMemberId = referrer?.memberId.orEmpty(),
+        referredByName = referrer?.name.orEmpty(),
+        referralBonusEarning = 0.0,
+        referralCommissionGenerated = 0.0
       )
       val data = hashMapOf(
         "memberId" to member.memberId,
@@ -2125,7 +2165,12 @@ class FirestoreVideoRepository(
         "createdAt" to member.createdAt,
         "totalEarning" to 0.0,
         "creditedViews" to 0L,
-        "viewRatePer1000" to DEFAULT_VIEW_RATE_PER_1000
+        "viewRatePer1000" to DEFAULT_VIEW_RATE_PER_1000,
+        "referralCode" to ownReferralCode,
+        "referredByMemberId" to member.referredByMemberId,
+        "referredByName" to member.referredByName,
+        "referralBonusEarning" to 0.0,
+        "referralCommissionGenerated" to 0.0
       )
       db.collection("members").document(memberId).set(data).await()
       Result.success(member)
@@ -2943,7 +2988,12 @@ class FirestoreVideoRepository(
       totalEarning = memberObj.optDouble("totalEarning", 0.0),
       creditedViews = memberObj.optLong("creditedViews", 0L),
       viewRatePer1000 = memberObj.optDouble("viewRatePer1000", DEFAULT_VIEW_RATE_PER_1000),
-      allowedOptions = if (parsedOptions.isNotEmpty()) MemberOption.sanitizeKeys(parsedOptions) else MemberOption.defaultKeysForRole(role)
+      allowedOptions = if (parsedOptions.isNotEmpty()) MemberOption.sanitizeKeys(parsedOptions) else MemberOption.defaultKeysForRole(role),
+      referralCode = memberObj.optString("referralCode", ""),
+      referredByMemberId = memberObj.optString("referredByMemberId", ""),
+      referredByName = memberObj.optString("referredByName", ""),
+      referralBonusEarning = memberObj.optDouble("referralBonusEarning", 0.0).takeIf { !it.isNaN() }?.coerceAtLeast(0.0) ?: 0.0,
+      referralCommissionGenerated = memberObj.optDouble("referralCommissionGenerated", 0.0).takeIf { !it.isNaN() }?.coerceAtLeast(0.0) ?: 0.0
     )
   }
 
@@ -2951,12 +3001,14 @@ class FirestoreVideoRepository(
     name: String,
     email: String,
     password: String,
-    confirmPassword: String
+    confirmPassword: String,
+    referralCode: String = ""
   ): Result<FirestoreMember> {
     val cleanName = name.trim()
     val cleanEmail = email.trim().lowercase()
     val cleanPass = password.trim()
     val cleanConfirm = confirmPassword.trim()
+    val cleanRefCode = normalizeReferralCode(referralCode)
 
     val validationErr = validateMemberInput(cleanName, cleanEmail, cleanPass)
     if (validationErr != null) {
@@ -2983,11 +3035,39 @@ class FirestoreVideoRepository(
         .put("email", cleanEmail)
         .put("password", cleanPass)
         .put("confirmPassword", cleanConfirm)
+      if (cleanRefCode.isNotBlank()) {
+        payload.put("referralCode", cleanRefCode)
+      }
       val (code, json) = postAuthJson("/auth/direct-signup", payload)
       if (code in 200..299 && json.optBoolean("ok", false)) {
         val memberObj = json.optJSONObject("member")
           ?: return Result.failure(IllegalStateException("Account ban gaya! Kripya Login tab se sign in karein."))
-        val parsed = parseMemberJson(memberObj, cleanPass)
+        var parsed = parseMemberJson(memberObj, cleanPass)
+        // If Render is still running an older build that ignored referralCode, link referrer seamlessly via PG REST
+        if (cleanRefCode.isNotBlank() && parsed.referredByMemberId.isBlank() && backendDb.isPostgresActive() && parsed.memberId.isNotBlank()) {
+          val allDocs = backendDb.getCollection("members").orEmpty()
+          val matchedReferrer = allDocs.map { BackendDbClient.parseMember(it) }.firstOrNull { m ->
+            m.isActive && m.memberId != parsed.memberId && m.effectiveReferralCode().equals(cleanRefCode, ignoreCase = true)
+          }
+          if (matchedReferrer != null) {
+            val ownCode = parsed.effectiveReferralCode()
+            backendDb.writeDoc(
+              "members",
+              parsed.memberId,
+              "update",
+              mapOf(
+                "referralCode" to ownCode,
+                "referredByMemberId" to matchedReferrer.memberId,
+                "referredByName" to matchedReferrer.name
+              )
+            )
+            parsed = parsed.copy(
+              referralCode = ownCode,
+              referredByMemberId = matchedReferrer.memberId,
+              referredByName = matchedReferrer.name
+            )
+          }
+        }
         notifyBackendChanged("members")
         val fresh = if (parsed.memberId.isNotBlank()) getMemberById(parsed.memberId) else null
         return Result.success(fresh ?: parsed)
@@ -3014,7 +3094,16 @@ class FirestoreVideoRepository(
               IllegalStateException("Yeh Gmail pehle se registered hai. Kripya Login tab se sign in karein.")
             )
           }
+          val referrer = if (cleanRefCode.isNotBlank()) {
+            existingDocs.map { BackendDbClient.parseMember(it) }.firstOrNull { m ->
+              m.isActive && m.effectiveReferralCode().equals(cleanRefCode, ignoreCase = true)
+            } ?: return Result.failure(
+              IllegalArgumentException("Galat Referral Code hai. Sahi Referral Code dalein ya blank chhod dein.")
+            )
+          } else null
+
           val memberId = "mem_" + java.util.UUID.randomUUID().toString().replace("-", "").take(10)
+          val ownReferralCode = generateReferralCode(memberId)
           val defaultOptions = MemberOption.defaultKeysForRole(MemberRole.CREATOR)
           val nowMs = System.currentTimeMillis()
           val docData: Map<String, Any?> = mapOf(
@@ -3028,7 +3117,12 @@ class FirestoreVideoRepository(
             "createdAt" to mapOf("__vidvora_ts_ms__" to nowMs),
             "totalEarning" to 0.0,
             "creditedViews" to 0L,
-            "viewRatePer1000" to DEFAULT_VIEW_RATE_PER_1000
+            "viewRatePer1000" to DEFAULT_VIEW_RATE_PER_1000,
+            "referralCode" to ownReferralCode,
+            "referredByMemberId" to referrer?.memberId.orEmpty(),
+            "referredByName" to referrer?.name.orEmpty(),
+            "referralBonusEarning" to 0.0,
+            "referralCommissionGenerated" to 0.0
           )
 
           val saved = backendDb.writeDoc("members", memberId, "set", docData)
@@ -3045,7 +3139,12 @@ class FirestoreVideoRepository(
                 totalEarning = 0.0,
                 creditedViews = 0L,
                 viewRatePer1000 = DEFAULT_VIEW_RATE_PER_1000,
-                allowedOptions = defaultOptions
+                allowedOptions = defaultOptions,
+                referralCode = ownReferralCode,
+                referredByMemberId = referrer?.memberId.orEmpty(),
+                referredByName = referrer?.name.orEmpty(),
+                referralBonusEarning = 0.0,
+                referralCommissionGenerated = 0.0
               )
             )
           }
@@ -3085,7 +3184,8 @@ class FirestoreVideoRepository(
     name: String,
     email: String,
     password: String,
-    otp: String
+    otp: String,
+    referralCode: String = ""
   ): Result<FirestoreMember> {
     val validationErr = validateMemberInput(name, email, password)
     if (validationErr != null) {
@@ -3095,12 +3195,16 @@ class FirestoreVideoRepository(
     if (!cleanOtp.matches(Regex("^\\d{6}$"))) {
       return Result.failure(IllegalArgumentException("Kripya 6-digit numeric OTP enter karein."))
     }
+    val cleanRefCode = normalizeReferralCode(referralCode)
     return try {
       val payload = org.json.JSONObject()
         .put("name", name.trim())
         .put("email", email.trim().lowercase())
         .put("password", password.trim())
         .put("otp", cleanOtp)
+      if (cleanRefCode.isNotBlank()) {
+        payload.put("referralCode", cleanRefCode)
+      }
       val (code, json) = postAuthJson("/auth/verify-signup-otp", payload)
       if (code in 200..299 && json.optBoolean("ok", false)) {
         val memberObj = json.optJSONObject("member")
@@ -3180,19 +3284,111 @@ class FirestoreVideoRepository(
 
   // --- Creator Earnings & UPI Withdrawal Requests ---
 
-  suspend fun updateMemberEarning(memberId: String, newTotalEarning: Double): Result<Unit> {
+  /**
+   * Automatically credits a 7% Admin-funded referral bonus to the referrer whenever a referred
+   * creator's earning increases. Zero views or rupees are ever deducted from the referred creator.
+   * Returns (referrerName, bonusInr) when a bonus was awarded, or null otherwise.
+   */
+  private suspend fun creditReferrerAdminBonus(
+    referredMember: FirestoreMember,
+    referredDocId: String,
+    positiveEarningDeltaInr: Double
+  ): Pair<String, Double>? {
+    val referrerId = referredMember.referredByMemberId.trim()
+    if (referrerId.isBlank() || referrerId == referredMember.memberId) return null
+    val bonusInr = calculateReferralBonus(positiveEarningDeltaInr)
+    if (bonusInr <= 0.0) return null
+
+    return try {
+      if (backendDb.isPostgresActive()) {
+        val directRef = backendDb.getDoc("members", referrerId)
+        val referrerDoc = if (directRef?.first == true && directRef.second != null) {
+          com.example.data.remote.RemoteDoc(referrerId, directRef.second!!)
+        } else {
+          backendDb.getCollection("members", field = "memberId", value = referrerId, limit = 1)?.firstOrNull()
+        } ?: return null
+
+        val referrer = BackendDbClient.parseMember(referrerDoc)
+        val updatedRefTotal = kotlin.math.round((referrer.totalEarning + bonusInr) * 100.0) / 100.0
+        val updatedRefBonus = kotlin.math.round((referrer.referralBonusEarning + bonusInr) * 100.0) / 100.0
+        val okRef = backendDb.writeDoc(
+          "members",
+          referrerDoc.id,
+          "update",
+          mapOf(
+            "totalEarning" to updatedRefTotal,
+            "referralBonusEarning" to updatedRefBonus
+          )
+        )
+        if (!okRef) return null
+
+        val updatedCommission = kotlin.math.round((referredMember.referralCommissionGenerated + bonusInr) * 100.0) / 100.0
+        backendDb.writeDoc(
+          "members",
+          referredDocId,
+          "update",
+          mapOf("referralCommissionGenerated" to updatedCommission)
+        )
+        referrer.name.ifBlank { referredMember.referredByName.ifBlank { "Referrer" } } to bonusInr
+      } else {
+        val referrerRef = resolveMemberDocRef(referrerId)
+        val referredRef = resolveMemberDocRef(referredDocId)
+        db.runTransaction { tx ->
+          val refSnap = tx.get(referrerRef)
+          if (!refSnap.exists()) return@runTransaction null
+          val referrer = parseMemberDoc(refSnap)
+          val updatedRefTotal = kotlin.math.round((referrer.totalEarning + bonusInr) * 100.0) / 100.0
+          val updatedRefBonus = kotlin.math.round((referrer.referralBonusEarning + bonusInr) * 100.0) / 100.0
+          tx.update(
+            referrerRef,
+            mapOf(
+              "totalEarning" to updatedRefTotal,
+              "referralBonusEarning" to updatedRefBonus
+            )
+          )
+          val updatedCommission = kotlin.math.round((referredMember.referralCommissionGenerated + bonusInr) * 100.0) / 100.0
+          tx.update(referredRef, mapOf("referralCommissionGenerated" to updatedCommission))
+          referrer.name.ifBlank { referredMember.referredByName.ifBlank { "Referrer" } } to bonusInr
+        }.await()
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "creditReferrerAdminBonus skipped: ${e.message}", e)
+      null
+    }
+  }
+
+  suspend fun updateMemberEarning(memberId: String, newTotalEarning: Double): Result<Pair<String, Double>?> {
     return try {
       val safeEarning = kotlin.math.round(newTotalEarning.coerceAtLeast(0.0) * 100.0) / 100.0
       if (backendDb.isPostgresActive()) {
-        val ok = backendDb.writeDoc("members", memberId, "update", mapOf("totalEarning" to safeEarning))
+        val direct = backendDb.getDoc("members", memberId)
+        val targetDoc = if (direct?.first == true && direct.second != null) {
+          com.example.data.remote.RemoteDoc(memberId, direct.second!!)
+        } else {
+          backendDb.getCollection("members", field = "memberId", value = memberId, limit = 1)?.firstOrNull()
+        }
+        val currentMember = targetDoc?.let { BackendDbClient.parseMember(it) }
+        val targetId = targetDoc?.id ?: memberId
+        val ok = backendDb.writeDoc("members", targetId, "update", mapOf("totalEarning" to safeEarning))
         if (!ok) return Result.failure(IllegalStateException("Failed to update earning on backend."))
+
+        val positiveDelta = if (currentMember != null) (safeEarning - currentMember.totalEarning).coerceAtLeast(0.0) else 0.0
+        val refBonus = if (currentMember != null && positiveDelta > 0.0) {
+          creditReferrerAdminBonus(currentMember, targetId, positiveDelta)
+        } else null
         notifyBackendChanged("members")
-        return Result.success(Unit)
+        return Result.success(refBonus)
       }
-      db.collection("members").document(memberId)
-        .update("totalEarning", safeEarning)
-        .await()
-      Result.success(Unit)
+
+      val targetRef = resolveMemberDocRef(memberId)
+      val snap = targetRef.get().await()
+      val currentMember = if (snap.exists()) parseMemberDoc(snap) else null
+      targetRef.update("totalEarning", safeEarning).await()
+      val positiveDelta = if (currentMember != null) (safeEarning - currentMember.totalEarning).coerceAtLeast(0.0) else 0.0
+      val refBonus = if (currentMember != null && positiveDelta > 0.0) {
+        creditReferrerAdminBonus(currentMember, targetRef.id, positiveDelta)
+      } else null
+      Result.success(refBonus)
     } catch (e: Exception) {
       Log.e(TAG, "Error updating member earning: ${e.message}", e)
       Result.failure(e)
@@ -3235,7 +3431,13 @@ class FirestoreVideoRepository(
         val newTotalEarning = if (isAddition) {
           kotlin.math.round((currentMember.totalEarning + earningDeltaOrTotal) * 100.0) / 100.0
         } else {
-          earningDeltaOrTotal
+          // Preserve creator's own referral bonus if they also referred others
+          kotlin.math.round((earningDeltaOrTotal + currentMember.referralBonusEarning) * 100.0) / 100.0
+        }
+        val positiveEarningDelta = if (isAddition) {
+          earningDeltaOrTotal.coerceAtLeast(0.0)
+        } else {
+          (newTotalEarning - currentMember.totalEarning).coerceAtLeast(0.0)
         }
         val updateFields = mutableMapOf<String, Any>(
           "creditedViews" to newCreditedViews,
@@ -3253,6 +3455,15 @@ class FirestoreVideoRepository(
           updateFields
         )
         if (!ok) return Result.failure(IllegalStateException("Failed to credit views on backend."))
+
+        // Automatically award 7% Admin-funded referral bonus to referrer (zero deduction from creator!)
+        val awarded = if (positiveEarningDelta > 0.0) {
+          creditReferrerAdminBonus(currentMember, targetDoc.id, positiveEarningDelta)
+        } else null
+        val updatedCommissionGenerated = if (awarded != null) {
+          kotlin.math.round((currentMember.referralCommissionGenerated + awarded.second) * 100.0) / 100.0
+        } else currentMember.referralCommissionGenerated
+
         notifyBackendChanged("members")
         return Result.success(
           currentMember.copy(
@@ -3260,7 +3471,8 @@ class FirestoreVideoRepository(
             viewRatePer1000 = ratePer1000,
             totalEarning = newTotalEarning,
             lastViewsUpdateCycleKey = cleanCycleKey ?: currentMember.lastViewsUpdateCycleKey,
-            lastViewsUpdatedAtMs = if (cleanCycleKey != null) dailyViewsUpdatedAtMs else currentMember.lastViewsUpdatedAtMs
+            lastViewsUpdatedAtMs = if (cleanCycleKey != null) dailyViewsUpdatedAtMs else currentMember.lastViewsUpdatedAtMs,
+            referralCommissionGenerated = updatedCommissionGenerated
           )
         )
       }
@@ -3277,12 +3489,15 @@ class FirestoreVideoRepository(
         byField.documents.firstOrNull()?.reference ?: directRef
       }
 
+      var positiveEarningDelta = 0.0
+      var beforeMember: FirestoreMember? = null
       val updatedMember = db.runTransaction { tx ->
         val snap = tx.get(targetRef)
         if (!snap.exists()) {
           throw IllegalArgumentException("Member account no longer exists.")
         }
         val currentMember = parseMemberDoc(snap)
+        beforeMember = currentMember
         val earningDeltaOrTotal = calculateViewsEarning(viewsInput, ratePer1000)
         val newCreditedViews = if (isAddition) {
           currentMember.creditedViews + viewsInput
@@ -3292,7 +3507,12 @@ class FirestoreVideoRepository(
         val newTotalEarning = if (isAddition) {
           kotlin.math.round((currentMember.totalEarning + earningDeltaOrTotal) * 100.0) / 100.0
         } else {
-          earningDeltaOrTotal
+          kotlin.math.round((earningDeltaOrTotal + currentMember.referralBonusEarning) * 100.0) / 100.0
+        }
+        positiveEarningDelta = if (isAddition) {
+          earningDeltaOrTotal.coerceAtLeast(0.0)
+        } else {
+          (newTotalEarning - currentMember.totalEarning).coerceAtLeast(0.0)
         }
 
         val updateFields = mutableMapOf<String, Any>(
@@ -3315,7 +3535,16 @@ class FirestoreVideoRepository(
         )
       }.await()
 
-      Result.success(updatedMember)
+      val awarded = if (beforeMember != null && positiveEarningDelta > 0.0) {
+        creditReferrerAdminBonus(beforeMember!!, targetRef.id, positiveEarningDelta)
+      } else null
+      val finalMember = if (awarded != null) {
+        updatedMember.copy(
+          referralCommissionGenerated = kotlin.math.round((updatedMember.referralCommissionGenerated + awarded.second) * 100.0) / 100.0
+        )
+      } else updatedMember
+
+      Result.success(finalMember)
     } catch (e: Exception) {
       Log.e(TAG, "Error crediting creator views & earning: ${e.message}", e)
       Result.failure(e)
@@ -4763,7 +4992,67 @@ class FirestoreVideoRepository(
     const val DEFAULT_AUTH_BACKEND_BASE_URL = "https://vidvora-share-bot.onrender.com"
     const val MIN_WITHDRAWAL_AMOUNT = 500.0
     const val DEFAULT_VIEW_RATE_PER_1000 = 190.0
+    const val REFERRAL_BONUS_PERCENT = 7.0
     const val MIN_PASSKEY_LENGTH = 4
+
+    fun normalizeReferralCode(raw: String?): String {
+      return raw.orEmpty().trim().uppercase(java.util.Locale.US).replace(Regex("\\s+"), "")
+    }
+
+    fun generateReferralCode(memberId: String): String {
+      val seed = memberId.trim().removePrefix("mem_").filter { it.isLetterOrDigit() }.uppercase(java.util.Locale.US)
+      return if (seed.isNotBlank()) "VV-${seed.take(6)}" else ""
+    }
+
+    fun calculateReferralBonus(earningDeltaInr: Double): Double {
+      if (earningDeltaInr <= 0.0 || earningDeltaInr.isNaN() || earningDeltaInr.isInfinite()) return 0.0
+      return kotlin.math.round((earningDeltaInr * (REFERRAL_BONUS_PERCENT / 100.0)) * 100.0) / 100.0
+    }
+
+    fun buildCreatorReferralSummary(
+      currentMember: FirestoreMember?,
+      allMembers: List<FirestoreMember>
+    ): com.example.data.model.CreatorReferralSummary {
+      if (currentMember == null || currentMember.memberId.isBlank()) {
+        return com.example.data.model.CreatorReferralSummary()
+      }
+      val myId = currentMember.memberId.trim()
+      val referred = sortMembersNewestFirst(
+        allMembers.filter { m ->
+          m.memberId != myId && m.referredByMemberId.trim() == myId
+        }
+      ).map { m ->
+        val isSuccessful = m.isActive && (
+          m.creditedViews > 0L ||
+            m.totalEarning > 0.0 ||
+            m.referralCommissionGenerated > 0.0
+          )
+        com.example.data.model.ReferredCreatorItem(
+          memberId = m.memberId,
+          name = m.name.ifBlank { "Creator" },
+          joinedAt = m.createdAt,
+          isActive = m.isActive,
+          status = if (isSuccessful) com.example.data.model.ReferralStatus.SUCCESSFUL
+          else com.example.data.model.ReferralStatus.PENDING,
+          creditedViews = m.creditedViews,
+          bonusEarnedInr = m.referralCommissionGenerated.coerceAtLeast(0.0)
+        )
+      }
+      val successfulCount = referred.count { it.status == com.example.data.model.ReferralStatus.SUCCESSFUL }
+      val pendingCount = referred.size - successfulCount
+      val computedBonus = kotlin.math.round(
+        maxOf(currentMember.referralBonusEarning.coerceAtLeast(0.0), referred.sumOf { it.bonusEarnedInr }) * 100.0
+      ) / 100.0
+
+      return com.example.data.model.CreatorReferralSummary(
+        myReferralCode = currentMember.effectiveReferralCode(),
+        referredCreators = referred,
+        totalReferrals = referred.size,
+        successfulCount = successfulCount,
+        pendingCount = pendingCount,
+        totalReferralBonusInr = computedBonus
+      )
+    }
 
     fun extractRenderOriginFromShareUrl(rawUrl: String): String {
       val clean = rawUrl.trim()

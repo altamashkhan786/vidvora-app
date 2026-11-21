@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.data.model.AppInstallStats
 import com.example.data.model.AppUpdateConfig
 import com.example.data.model.CreatorEmailChangeResult
+import com.example.data.model.CreatorReferralSummary
 import com.example.data.model.EarningSummary
 import com.example.data.model.FirestoreAccessLink
 import com.example.data.model.FirestoreAppInstall
@@ -216,8 +217,17 @@ class AdminViewModel(
 
   val myEarningSummary: StateFlow<EarningSummary> =
     combine(liveCurrentMember, myWithdrawalRequests) { member, myRequests ->
-      computeEarningSummary(member?.totalEarning ?: 0.0, myRequests)
+      computeEarningSummary(
+        totalEarning = member?.totalEarning ?: 0.0,
+        requests = myRequests,
+        referralBonusEarning = member?.referralBonusEarning ?: 0.0
+      )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), EarningSummary())
+
+  val myReferralSummary: StateFlow<CreatorReferralSummary> =
+    combine(liveCurrentMember, currentMember, members) { live, auth, allMembers ->
+      FirestoreVideoRepository.buildCreatorReferralSummary(live ?: auth, allMembers)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), CreatorReferralSummary())
 
   val memberStatsList: StateFlow<List<MemberStats>> =
     combine(members, videos, allWithdrawalRequests) { memberList, videoList, requests ->
@@ -233,7 +243,11 @@ class AdminViewModel(
           videoCount = mVideos.size,
           totalViews = totalViews,
           videos = mVideos,
-          earningSummary = computeEarningSummary(m.totalEarning, mRequests),
+          earningSummary = computeEarningSummary(
+            totalEarning = m.totalEarning,
+            requests = mRequests,
+            referralBonusEarning = m.referralBonusEarning
+          ),
           viewsLast24Hours = viewsLast24h
         )
       }
@@ -421,9 +435,16 @@ class AdminViewModel(
     name: String,
     email: String,
     password: String,
-    confirmPassword: String
+    confirmPassword: String,
+    referralCode: String = ""
   ): Result<FirestoreMember> {
-    val result = firestoreVideoRepository.directSignupMember(name, email, password, confirmPassword)
+    val result = firestoreVideoRepository.directSignupMember(
+      name = name,
+      email = email,
+      password = password,
+      confirmPassword = confirmPassword,
+      referralCode = referralCode
+    )
     result.getOrNull()?.let { member ->
       adminAuthRepository.signInMemberDirectly(member)
     }
@@ -438,9 +459,16 @@ class AdminViewModel(
     name: String,
     email: String,
     password: String,
-    otp: String
+    otp: String,
+    referralCode: String = ""
   ): Result<FirestoreMember> {
-    val result = firestoreVideoRepository.verifySignupOtpAndCreateMember(name, email, password, otp)
+    val result = firestoreVideoRepository.verifySignupOtpAndCreateMember(
+      name = name,
+      email = email,
+      password = password,
+      otp = otp,
+      referralCode = referralCode
+    )
     result.getOrNull()?.let { member ->
       adminAuthRepository.signInMemberDirectly(member)
     }
@@ -800,6 +828,7 @@ class AdminViewModel(
     passkey: String,
     role: String = MemberRole.CREATOR,
     allowedOptions: List<String> = MemberOption.defaultKeysForRole(role),
+    referralCode: String = "",
     onResult: (Boolean, String?) -> Unit
   ) {
     if (!canPerform(MemberOption.MANAGE_MEMBERS)) {
@@ -812,7 +841,8 @@ class AdminViewModel(
         emailOrPhone = emailOrPhone,
         passkey = passkey,
         role = role,
-        allowedOptions = allowedOptions
+        allowedOptions = allowedOptions,
+        referralCode = referralCode
       )
       if (result.isSuccess) {
         val roleLabel = MemberRole.displayLabel(role)
@@ -1050,7 +1080,12 @@ class AdminViewModel(
     viewModelScope.launch {
       val result = firestoreVideoRepository.updateMemberEarning(memberId, newTotal)
       if (result.isSuccess) {
-        _toastMessage.value = "Creator earning updated!"
+        val refBonus = result.getOrNull()
+        _toastMessage.value = if (refBonus != null && refBonus.second > 0.0) {
+          "Creator earning updated! +${com.example.data.model.formatInr(refBonus.second)} (7% Admin bonus) → ${refBonus.first}"
+        } else {
+          "Creator earning updated!"
+        }
         onResult(true, null)
       } else {
         val err = result.exceptionOrNull()?.message ?: "Failed to update earning"
@@ -1079,6 +1114,7 @@ class AdminViewModel(
       onResult(false, "Rate per 1,000 views cannot be negative.")
       return
     }
+    val previousCommission = members.value.firstOrNull { it.memberId == memberId }?.referralCommissionGenerated ?: 0.0
     viewModelScope.launch {
       val result = firestoreVideoRepository.creditCreatorViewsAndEarning(
         memberId = memberId,
@@ -1092,10 +1128,14 @@ class AdminViewModel(
           adminAuthRepository.updateCurrentMember(updated)
         }
         val calculatedInr = FirestoreVideoRepository.calculateViewsEarning(views, ratePer1000)
+        val bonusAdded = (updated.referralCommissionGenerated - previousCommission).coerceAtLeast(0.0)
+        val refSuffix = if (bonusAdded > 0.0 && updated.referredByName.isNotBlank()) {
+          " • +${com.example.data.model.formatInr(bonusAdded)} (7% Admin bonus → ${updated.referredByName})"
+        } else ""
         _toastMessage.value = if (isAddition) {
-          "+$views views (+${com.example.data.model.formatInr(calculatedInr)}) credited!"
+          "+$views views (+${com.example.data.model.formatInr(calculatedInr)}) credited!$refSuffix"
         } else {
-          "Creator views set to $views (${com.example.data.model.formatInr(calculatedInr)})!"
+          "Creator views set to $views (${com.example.data.model.formatInr(calculatedInr)})!$refSuffix"
         }
         onResult(true, null)
       } else {
@@ -1128,6 +1168,7 @@ class AdminViewModel(
     }
     val resolvedCycleKey = cycleKey.trim().ifBlank { DailyViewsResetClock.currentCycleKeyIst() }
     val updatedAtMs = System.currentTimeMillis()
+    val previousCommission = members.value.firstOrNull { it.memberId == memberId }?.referralCommissionGenerated ?: 0.0
     viewModelScope.launch {
       val result = firestoreVideoRepository.creditCreatorViewsAndEarning(
         memberId = memberId,
@@ -1145,13 +1186,17 @@ class AdminViewModel(
         }
         val calculatedInr = FirestoreVideoRepository.calculateViewsEarning(views, ratePer1000)
         val displayName = updated.name.ifBlank { "Member" }
+        val bonusAdded = (updated.referralCommissionGenerated - previousCommission).coerceAtLeast(0.0)
+        val refSuffix = if (bonusAdded > 0.0 && updated.referredByName.isNotBlank()) {
+          " • +${com.example.data.model.formatInr(bonusAdded)} (7% Admin bonus → ${updated.referredByName})"
+        } else ""
         _toastMessage.value = when {
           isAddition && views == 0L ->
             "$displayName done mark ho gaya (11:50 PM IST par wapas show hoga)"
           isAddition ->
-            "$displayName: +$views views (+${com.example.data.model.formatInr(calculatedInr)}) updated! 11:50 PM IST par wapas show hoga."
+            "$displayName: +$views views (+${com.example.data.model.formatInr(calculatedInr)}) updated!$refSuffix"
           else ->
-            "$displayName: Views set to $views (${com.example.data.model.formatInr(calculatedInr)})! 11:50 PM IST par wapas show hoga."
+            "$displayName: Views set to $views (${com.example.data.model.formatInr(calculatedInr)})!$refSuffix"
         }
         onResult(true, null)
       } else {
@@ -1233,9 +1278,11 @@ class AdminViewModel(
 
   private fun computeEarningSummary(
     totalEarning: Double,
-    requests: List<FirestoreWithdrawalRequest>
+    requests: List<FirestoreWithdrawalRequest>,
+    referralBonusEarning: Double = 0.0
   ): EarningSummary {
     val safeTotal = totalEarning.coerceAtLeast(0.0)
+    val safeReferralBonus = referralBonusEarning.coerceAtLeast(0.0).coerceAtMost(safeTotal)
     val paid = requests
       .filter { it.status == WithdrawalStatus.DONE }
       .sumOf { it.amount }
@@ -1247,7 +1294,8 @@ class AdminViewModel(
       totalEarning = safeTotal,
       pendingOrProcessingAmount = pendingOrProcessing,
       paidAmount = paid,
-      availableBalance = available
+      availableBalance = available,
+      referralBonusEarning = safeReferralBonus
     )
   }
 

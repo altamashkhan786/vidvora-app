@@ -787,6 +787,16 @@ private fun DailyViewsPendingMemberCard(
               overflow = TextOverflow.Ellipsis
             )
           }
+          if (member.referredByName.isNotBlank()) {
+            Text(
+              text = "Referred by ${member.referredByName} • +7% Admin Bonus",
+              color = MasalaGold,
+              fontSize = 10.sp,
+              fontWeight = FontWeight.SemiBold,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis
+            )
+          }
         }
 
         Surface(
@@ -1031,6 +1041,14 @@ fun DailyUpdateViewsDialog(
                 fontSize = 11.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
+              )
+            }
+            if (member.referredByName.isNotBlank()) {
+              Text(
+                text = "Referred by ${member.referredByName} • +7% Admin Bonus auto-add hoga",
+                color = MasalaSuccess,
+                fontSize = 10.5.sp,
+                fontWeight = FontWeight.SemiBold
               )
             }
           }

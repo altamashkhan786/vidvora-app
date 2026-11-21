@@ -332,9 +332,16 @@ class HomeViewModel(
     name: String,
     email: String,
     password: String,
-    confirmPassword: String
+    confirmPassword: String,
+    referralCode: String = ""
   ): Result<com.example.data.model.FirestoreMember> {
-    val result = firestoreVideoRepository.directSignupMember(name, email, password, confirmPassword)
+    val result = firestoreVideoRepository.directSignupMember(
+      name = name,
+      email = email,
+      password = password,
+      confirmPassword = confirmPassword,
+      referralCode = referralCode
+    )
     result.getOrNull()?.let { member ->
       adminAuthRepository.signInMemberDirectly(member)
     }
@@ -349,9 +356,16 @@ class HomeViewModel(
     name: String,
     email: String,
     password: String,
-    otp: String
+    otp: String,
+    referralCode: String = ""
   ): Result<com.example.data.model.FirestoreMember> {
-    val result = firestoreVideoRepository.verifySignupOtpAndCreateMember(name, email, password, otp)
+    val result = firestoreVideoRepository.verifySignupOtpAndCreateMember(
+      name = name,
+      email = email,
+      password = password,
+      otp = otp,
+      referralCode = referralCode
+    )
     result.getOrNull()?.let { member ->
       adminAuthRepository.signInMemberDirectly(member)
     }

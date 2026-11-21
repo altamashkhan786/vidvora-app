@@ -277,3 +277,53 @@ test("direct creator signup works without OTP and enforces confirmPassword match
   });
   assert.equal(dup.statusCode, 409);
 });
+
+test("direct creator signup links valid referral code and rejects unknown referral code", async () => {
+  const db = createMemoryDb([
+    {
+      memberId: "mem_abc12345",
+      name: "Arjun Referrer",
+      emailOrPhone: "arjun@gmail.com",
+      passkey: "pass1234",
+      role: "member",
+      referralCode: "VV-ARJUN1",
+      allowedOptions: DEFAULT_CREATOR_ALLOWED_OPTIONS,
+      isActive: true,
+    },
+  ]);
+
+  // Unknown referral code rejected
+  const invalidRef = await handleDirectSignup({
+    body: {
+      name: "Neha New",
+      email: "neha@gmail.com",
+      password: "pass1234",
+      confirmPassword: "pass1234",
+      referralCode: "VV-NOPE99",
+    },
+    db,
+    nowMs: 6_000_000,
+  });
+  assert.equal(invalidRef.statusCode, 400);
+  assert.equal(db._members.size, 1);
+
+  // Valid referral code links referredByMemberId & referredByName and generates own referralCode
+  const validRef = await handleDirectSignup({
+    body: {
+      name: "Neha New",
+      email: "neha@gmail.com",
+      password: "pass1234",
+      confirmPassword: "pass1234",
+      referralCode: "vv-arjun1",
+    },
+    db,
+    nowMs: 6_005_000,
+  });
+  assert.equal(validRef.statusCode, 200);
+  assert.equal(validRef.payload.member.referredByMemberId, "mem_abc12345");
+  assert.equal(validRef.payload.member.referredByName, "Arjun Referrer");
+  assert.equal(validRef.payload.member.referralBonusEarning, 0);
+  assert.equal(validRef.payload.member.referralCommissionGenerated, 0);
+  assert.match(validRef.payload.member.referralCode, /^VV-[A-Z0-9]{6}$/);
+});
+

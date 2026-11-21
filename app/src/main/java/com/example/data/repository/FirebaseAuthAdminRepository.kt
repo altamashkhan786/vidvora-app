@@ -581,7 +581,12 @@ class FirebaseAuthAdminRepository(
         "viewRatePer1000" to member.viewRatePer1000.toString(),
         "allowedOptions" to optionsEncoded,
         "lastViewsUpdateCycleKey" to enc(member.lastViewsUpdateCycleKey),
-        "lastViewsUpdatedAtMs" to member.lastViewsUpdatedAtMs.toString()
+        "lastViewsUpdatedAtMs" to member.lastViewsUpdatedAtMs.toString(),
+        "referralCode" to enc(member.referralCode),
+        "referredByMemberId" to enc(member.referredByMemberId),
+        "referredByName" to enc(member.referredByName),
+        "referralBonusEarning" to member.referralBonusEarning.toString(),
+        "referralCommissionGenerated" to member.referralCommissionGenerated.toString()
       )
       return pairs.joinToString("\n") { (k, v) -> "$k=$v" }
     }
@@ -618,7 +623,12 @@ class FirebaseAuthAdminRepository(
           viewRatePer1000 = map["viewRatePer1000"]?.toDoubleOrNull() ?: 190.0,
           allowedOptions = parsedOptions,
           lastViewsUpdateCycleKey = dec(map["lastViewsUpdateCycleKey"].orEmpty()),
-          lastViewsUpdatedAtMs = map["lastViewsUpdatedAtMs"]?.toLongOrNull() ?: 0L
+          lastViewsUpdatedAtMs = map["lastViewsUpdatedAtMs"]?.toLongOrNull() ?: 0L,
+          referralCode = dec(map["referralCode"].orEmpty()),
+          referredByMemberId = dec(map["referredByMemberId"].orEmpty()),
+          referredByName = dec(map["referredByName"].orEmpty()),
+          referralBonusEarning = (map["referralBonusEarning"]?.toDoubleOrNull() ?: 0.0).coerceAtLeast(0.0),
+          referralCommissionGenerated = (map["referralCommissionGenerated"]?.toDoubleOrNull() ?: 0.0).coerceAtLeast(0.0)
         )
       } catch (_: Exception) {
         null

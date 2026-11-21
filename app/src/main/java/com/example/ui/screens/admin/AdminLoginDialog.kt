@@ -22,6 +22,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Login
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.CardGiftcard
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.MarkEmailRead
 import androidx.compose.material.icons.filled.Person
@@ -92,13 +93,13 @@ fun AdminLoginDialog(
   onDismiss: () -> Unit,
   onAuthenticatePasskey: suspend (email: String, passkey: String) -> Boolean,
   onSignInWithGoogle: suspend () -> Result<Unit> = { Result.failure(UnsupportedOperationException()) },
-  onDirectSignup: suspend (name: String, email: String, password: String, confirmPassword: String) -> Result<FirestoreMember> = { _, _, _, _ ->
+  onDirectSignup: suspend (name: String, email: String, password: String, confirmPassword: String, referralCode: String) -> Result<FirestoreMember> = { _, _, _, _, _ ->
     Result.failure(IllegalStateException("Signup unavailable"))
   },
   onSendSignupOtp: suspend (name: String, email: String, password: String) -> Result<String> = { _, _, _ ->
     Result.failure(IllegalStateException("Signup unavailable"))
   },
-  onVerifySignupOtp: suspend (name: String, email: String, password: String, otp: String) -> Result<FirestoreMember> = { _, _, _, _ ->
+  onVerifySignupOtp: suspend (name: String, email: String, password: String, otp: String, referralCode: String) -> Result<FirestoreMember> = { _, _, _, _, _ ->
     Result.failure(IllegalStateException("Signup unavailable"))
   },
   onSendResetOtp: suspend (email: String) -> Result<String> = {
@@ -129,6 +130,7 @@ fun AdminLoginDialog(
   var signupEmail by remember { mutableStateOf("") }
   var signupPassword by remember { mutableStateOf("") }
   var signupConfirmPassword by remember { mutableStateOf("") }
+  var signupReferralCode by remember { mutableStateOf("") }
   var isSignupPassVisible by remember { mutableStateOf(false) }
   var isSignupConfirmPassVisible by remember { mutableStateOf(false) }
 
@@ -207,6 +209,7 @@ fun AdminLoginDialog(
     val cleanEmail = signupEmail.trim()
     val cleanPass = signupPassword.trim()
     val cleanConfirm = signupConfirmPassword.trim()
+    val cleanReferralCode = FirestoreVideoRepository.normalizeReferralCode(signupReferralCode)
 
     val validationErr = FirestoreVideoRepository.validateMemberInput(cleanName, cleanEmail, cleanPass)
     if (validationErr != null) {
@@ -226,7 +229,7 @@ fun AdminLoginDialog(
       isBusy = true
       errorMessage = null
       statusMessage = null
-      val res = onDirectSignup(cleanName, cleanEmail, cleanPass, cleanConfirm)
+      val res = onDirectSignup(cleanName, cleanEmail, cleanPass, cleanConfirm, cleanReferralCode)
       isBusy = false
       res.onSuccess {
         onAuthenticatedNavigate()
@@ -747,9 +750,8 @@ fun AdminLoginDialog(
             isError = hasConfirmInput && !passwordsMatch,
             keyboardOptions = KeyboardOptions(
               keyboardType = KeyboardType.Password,
-              imeAction = ImeAction.Done
+              imeAction = ImeAction.Next
             ),
-            keyboardActions = KeyboardActions(onDone = { attemptDirectSignup() }),
             colors = authFieldColors(),
             singleLine = true,
             enabled = !isBusy,
@@ -770,10 +772,36 @@ fun AdminLoginDialog(
             )
           }
 
+          Spacer(modifier = Modifier.height(10.dp))
+
+          OutlinedTextField(
+            value = signupReferralCode,
+            onValueChange = { raw ->
+              signupReferralCode = raw.uppercase().filter { it.isLetterOrDigit() || it == '-' }.take(20)
+              errorMessage = null
+            },
+            label = { Text("Referral Code (Optional)") },
+            placeholder = { Text("e.g. VV-ABC123") },
+            leadingIcon = {
+              Icon(Icons.Default.CardGiftcard, contentDescription = null, tint = MasalaGold)
+            },
+            keyboardOptions = KeyboardOptions(
+              capitalization = KeyboardCapitalization.Characters,
+              imeAction = ImeAction.Done
+            ),
+            keyboardActions = KeyboardActions(onDone = { attemptDirectSignup() }),
+            colors = authFieldColors(),
+            singleLine = true,
+            enabled = !isBusy,
+            modifier = Modifier
+              .fillMaxWidth()
+              .testTag("signup_referral_code_input")
+          )
+
           Spacer(modifier = Modifier.height(8.dp))
 
           Text(
-            text = "Confirm Password daalte hi turant account ban jayega aur direct Creator Panel khul jayega.",
+            text = "Agar kisi Creator ne aapko invite kiya hai to unka Referral Code dalein (optional). Aapki earning se kuch nahi katega.",
             color = MasalaTextMuted,
             fontSize = 11.sp,
             lineHeight = 15.sp,

@@ -1,5 +1,10 @@
 const crypto = require("crypto");
-const nodemailer = require("nodemailer");
+let nodemailer = null;
+try {
+  nodemailer = require("nodemailer");
+} catch (_) {
+  nodemailer = null;
+}
 
 const ADMIN_EMAIL = "teamaltamash@gmail.com";
 const ADMIN_DEFAULT_MASTER_KEY = "7827128212";
@@ -267,6 +272,41 @@ async function sendOtpEmail({
   return { provider: "smtp" };
 }
 
+function generateReferralCode(memberId) {
+  const seed = String(memberId || "")
+    .trim()
+    .replace(/^mem_/i, "")
+    .replace(/[^a-zA-Z0-9]/g, "")
+    .toUpperCase();
+  return seed ? `VV-${seed.slice(0, 6)}` : "";
+}
+
+function normalizeReferralCode(raw) {
+  return String(raw || "").trim().toUpperCase().replace(/\s+/g, "");
+}
+
+async function findMemberByReferralCode(db, rawCode) {
+  const cleanCode = normalizeReferralCode(rawCode);
+  if (!cleanCode) return null;
+  const membersSnap = await db.collection("members").get();
+  for (const doc of membersSnap.docs) {
+    const data = doc.data() || {};
+    if (data.isActive === false) continue;
+    const docMemberId = String(data.memberId || doc.id || "").trim();
+    const storedCode = normalizeReferralCode(data.referralCode);
+    const derivedCode = generateReferralCode(docMemberId);
+    if (storedCode === cleanCode || derivedCode === cleanCode) {
+      return {
+        id: doc.id,
+        memberId: docMemberId,
+        name: String(data.name || "Creator").trim() || "Creator",
+        referralCode: storedCode || derivedCode,
+      };
+    }
+  }
+  return null;
+}
+
 async function findMemberByEmail(db, email) {
   const cleanEmail = normalizeEmail(email);
   if (!cleanEmail) return null;
@@ -307,8 +347,9 @@ function serializeMemberForClient(docData, fallbackId = "") {
   const allowed = Array.isArray(docData.allowedOptions) && docData.allowedOptions.length > 0
     ? docData.allowedOptions
     : [...DEFAULT_CREATOR_ALLOWED_OPTIONS];
+  const memberId = String(docData.memberId || fallbackId || "");
   return {
-    memberId: String(docData.memberId || fallbackId || ""),
+    memberId,
     name: String(docData.name || "Creator"),
     emailOrPhone: String(docData.emailOrPhone || ""),
     passkey: String(docData.passkey || ""),
@@ -318,6 +359,11 @@ function serializeMemberForClient(docData, fallbackId = "") {
     totalEarning: Number(docData.totalEarning || 0),
     creditedViews: Number(docData.creditedViews || 0),
     viewRatePer1000: Number(docData.viewRatePer1000 || 190),
+    referralCode: normalizeReferralCode(docData.referralCode) || generateReferralCode(memberId),
+    referredByMemberId: String(docData.referredByMemberId || ""),
+    referredByName: String(docData.referredByName || ""),
+    referralBonusEarning: Math.max(0, Number(docData.referralBonusEarning || 0)),
+    referralCommissionGenerated: Math.max(0, Number(docData.referralCommissionGenerated || 0)),
   };
 }
 
@@ -558,6 +604,21 @@ async function handleVerifySignupOtp({
     };
   }
 
+  const rawReferralCode = normalizeReferralCode(body.referralCode ?? body.referral_code);
+  let referrer = null;
+  if (rawReferralCode) {
+    referrer = await findMemberByReferralCode(db, rawReferralCode);
+    if (!referrer) {
+      return {
+        statusCode: 400,
+        payload: {
+          ok: false,
+          error: "Galat Referral Code hai. Sahi Referral Code dalein ya blank chhod dein.",
+        },
+      };
+    }
+  }
+
   const memberId = "mem_" + crypto.randomUUID().replace(/-/g, "").slice(0, 10);
   const newMemberData = {
     memberId,
@@ -571,6 +632,11 @@ async function handleVerifySignupOtp({
     totalEarning: 0,
     creditedViews: 0,
     viewRatePer1000: 190,
+    referralCode: generateReferralCode(memberId),
+    referredByMemberId: referrer ? referrer.memberId : "",
+    referredByName: referrer ? referrer.name : "",
+    referralBonusEarning: 0,
+    referralCommissionGenerated: 0,
   };
 
   const membersCol = db.collection("members");
@@ -629,6 +695,21 @@ async function handleDirectSignup({
     };
   }
 
+  const rawReferralCode = normalizeReferralCode(body.referralCode ?? body.referral_code);
+  let referrer = null;
+  if (rawReferralCode) {
+    referrer = await findMemberByReferralCode(db, rawReferralCode);
+    if (!referrer) {
+      return {
+        statusCode: 400,
+        payload: {
+          ok: false,
+          error: "Galat Referral Code hai. Sahi Referral Code dalein ya blank chhod dein.",
+        },
+      };
+    }
+  }
+
   const memberId = "mem_" + crypto.randomUUID().replace(/-/g, "").slice(0, 10);
   const newMemberData = {
     memberId,
@@ -642,6 +723,11 @@ async function handleDirectSignup({
     totalEarning: 0,
     creditedViews: 0,
     viewRatePer1000: 190,
+    referralCode: generateReferralCode(memberId),
+    referredByMemberId: referrer ? referrer.memberId : "",
+    referredByName: referrer ? referrer.name : "",
+    referralBonusEarning: 0,
+    referralCommissionGenerated: 0,
   };
 
   const membersCol = db.collection("members");

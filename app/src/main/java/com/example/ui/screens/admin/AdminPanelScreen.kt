@@ -215,6 +215,7 @@ fun AdminPanelScreen(
   val allWithdrawalRequests by viewModel.allWithdrawalRequests.collectAsState()
   val myWithdrawalRequests by viewModel.myWithdrawalRequests.collectAsState()
   val myEarningSummary by viewModel.myEarningSummary.collectAsState()
+  val myReferralSummary by viewModel.myReferralSummary.collectAsState()
   val pendingPayoutsCount by viewModel.pendingPayoutsCount.collectAsState()
   val notifications by viewModel.notifications.collectAsState()
   val creatorEvents by viewModel.creatorEvents.collectAsState()
@@ -233,6 +234,7 @@ fun AdminPanelScreen(
 
   var selectedTab by remember { mutableIntStateOf(0) }
   var selectedCreatorTab by remember { mutableIntStateOf(0) }
+  var referralListFilter by remember { mutableStateOf(ReferralListFilter.ALL) }
   var installStatusFilter by remember { mutableStateOf("ALL") }
   var showUploadDialog by remember { mutableStateOf(false) }
   var showAddMemberDialog by remember { mutableStateOf(false) }
@@ -507,16 +509,16 @@ fun AdminPanelScreen(
             showLoginDialogOnRestricted = false
           }
         },
-        onDirectSignup = { name, email, password, confirmPassword ->
-          viewModel.directSignupAndLogin(name, email, password, confirmPassword).onSuccess {
+        onDirectSignup = { name, email, password, confirmPassword, referralCode ->
+          viewModel.directSignupAndLogin(name, email, password, confirmPassword, referralCode).onSuccess {
             showLoginDialogOnRestricted = false
           }
         },
         onSendSignupOtp = { name, email, password ->
           viewModel.sendSignupOtp(name, email, password)
         },
-        onVerifySignupOtp = { name, email, password, otp ->
-          viewModel.verifySignupOtpAndLogin(name, email, password, otp).onSuccess {
+        onVerifySignupOtp = { name, email, password, otp, referralCode ->
+          viewModel.verifySignupOtpAndLogin(name, email, password, otp, referralCode).onSuccess {
             showLoginDialogOnRestricted = false
           }
         },
@@ -664,6 +666,7 @@ fun AdminPanelScreen(
       if (canViewEarnings || canRequestWithdrawal) {
         add(CreatorSectionTab.EARNINGS)
       }
+      add(CreatorSectionTab.REFERRALS)
       if (hasCreatorToolsTab) {
         add(CreatorSectionTab.TOOLS)
       }
@@ -911,6 +914,13 @@ fun AdminPanelScreen(
                     accentColor = MasalaSuccess,
                     testTag = "creator_tab_earnings"
                   )
+                  CreatorSectionTab.REFERRALS -> AdminNavPillItem(
+                    label = "Refer & Earn",
+                    icon = Icons.Default.Group,
+                    badge = if (myReferralSummary.totalReferrals > 0) "${myReferralSummary.totalReferrals}" else "7%",
+                    accentColor = MasalaGold,
+                    testTag = "creator_tab_referrals"
+                  )
                   CreatorSectionTab.TOOLS -> AdminNavPillItem(
                     label = "Bots & Settings",
                     icon = Icons.Default.Settings,
@@ -969,6 +979,25 @@ fun AdminPanelScreen(
                     )
                   )
                 }
+                add(
+                  AdminToolTile(
+                    title = "Refer & Earn 7%",
+                    subtitle = if (myReferralSummary.totalReferrals > 0) {
+                      "${myReferralSummary.successfulCount} Done • ${myReferralSummary.pendingCount} Wait"
+                    } else {
+                      "Admin pays 7% bonus"
+                    },
+                    icon = Icons.Default.Group,
+                    accentColor = MasalaGold,
+                    badge = if (myReferralSummary.totalReferralBonusInr > 0.0) {
+                      formatInr(myReferralSummary.totalReferralBonusInr)
+                    } else {
+                      "7%"
+                    },
+                    testTag = "creator_tile_referrals",
+                    onClick = { jumpToCreatorTab(CreatorSectionTab.REFERRALS) }
+                  )
+                )
                 if (canUploadVideos) {
                   add(
                     AdminToolTile(
@@ -1180,6 +1209,19 @@ fun AdminPanelScreen(
                   creditedViews = myCreditedViews
                 )
               }
+            }
+
+            CreatorSectionTab.REFERRALS -> {
+              creatorReferralTabContent(
+                summary = myReferralSummary,
+                creatorName = activeMember?.name.orEmpty(),
+                referredByName = activeMember?.referredByName.orEmpty(),
+                selectedFilter = referralListFilter,
+                onSelectFilter = { referralListFilter = it },
+                onOpenEarningsClick = if (canViewEarnings || canRequestWithdrawal) {
+                  { jumpToCreatorTab(CreatorSectionTab.EARNINGS) }
+                } else null
+              )
             }
 
             CreatorSectionTab.TOOLS -> {
@@ -2588,13 +2630,14 @@ fun AdminPanelScreen(
   if (showAddMemberDialog && canManageMembers) {
     AddMemberDialog(
       onDismiss = { showAddMemberDialog = false },
-      onAddMember = { name, emailOrPhone, passkey, role, allowedOptions, onDone ->
+      onAddMember = { name, emailOrPhone, passkey, role, allowedOptions, referralCode, onDone ->
         viewModel.addNewMember(
           name = name,
           emailOrPhone = emailOrPhone,
           passkey = passkey,
           role = role,
-          allowedOptions = allowedOptions
+          allowedOptions = allowedOptions,
+          referralCode = referralCode
         ) { success, err ->
           onDone(success, err)
           if (success) {
@@ -4177,6 +4220,7 @@ private enum class CreatorSectionTab {
   OVERVIEW,
   VIDEOS,
   EARNINGS,
+  REFERRALS,
   TOOLS
 }
 
@@ -4403,12 +4447,14 @@ private fun AddMemberDialog(
     passkey: String,
     role: String,
     allowedOptions: List<String>,
+    referralCode: String,
     onDone: (Boolean, String?) -> Unit
   ) -> Unit
 ) {
   var name by remember { mutableStateOf("") }
   var emailOrPhone by remember { mutableStateOf("") }
   var passkey by remember { mutableStateOf("") }
+  var referralCode by remember { mutableStateOf("") }
   var selectedRole by remember { mutableStateOf(MemberRole.CREATOR) }
   var selectedOptions by remember {
     mutableStateOf(MemberOption.defaultKeysForRole(MemberRole.CREATOR).toSet())
@@ -4483,6 +4529,24 @@ private fun AddMemberDialog(
           colors = defaultTextFieldColors()
         )
 
+        Spacer(modifier = Modifier.height(8.dp))
+
+        OutlinedTextField(
+          value = referralCode,
+          onValueChange = { raw ->
+            referralCode = raw.uppercase().filter { it.isLetterOrDigit() || it == '-' }.take(20)
+            errorMessage = null
+          },
+          label = { Text("Referral Code (Optional)") },
+          placeholder = { Text("e.g. VV-ABC123") },
+          singleLine = true,
+          enabled = !isSaving,
+          modifier = Modifier
+            .fillMaxWidth()
+            .testTag("add_member_referral_code_input"),
+          colors = defaultTextFieldColors()
+        )
+
         Spacer(modifier = Modifier.height(14.dp))
 
         MemberRoleAndOptionsSelector(
@@ -4548,7 +4612,8 @@ private fun AddMemberDialog(
                 emailOrPhone.trim(),
                 passkey.trim(),
                 selectedRole,
-                orderedOptions
+                orderedOptions,
+                FirestoreVideoRepository.normalizeReferralCode(referralCode)
               ) { success, err ->
                 isSaving = false
                 if (!success) {

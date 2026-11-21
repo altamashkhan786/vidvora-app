@@ -1163,14 +1163,14 @@ fun HomeScreen(
           }
         }
       },
-      onDirectSignup = { name, email, password, confirmPassword ->
-        viewModel.directSignupAndLogin(name, email, password, confirmPassword)
+      onDirectSignup = { name, email, password, confirmPassword, referralCode ->
+        viewModel.directSignupAndLogin(name, email, password, confirmPassword, referralCode)
       },
       onSendSignupOtp = { name, email, password ->
         viewModel.sendSignupOtp(name, email, password)
       },
-      onVerifySignupOtp = { name, email, password, otp ->
-        viewModel.verifySignupOtpAndLogin(name, email, password, otp)
+      onVerifySignupOtp = { name, email, password, otp, referralCode ->
+        viewModel.verifySignupOtpAndLogin(name, email, password, otp, referralCode)
       },
       onSendResetOtp = { email ->
         viewModel.sendResetPasswordOtp(email)

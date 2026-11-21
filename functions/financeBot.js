@@ -871,22 +871,32 @@ async function handleFinanceTelegramUpdate({ update, db }) {
       return { ok: true, action: "earnings_forbidden" };
     }
     const { summary } = snapshot;
+    const referralBonus = Math.max(0, Number(snapshot.member.referralBonusEarning) || 0);
+    const ownViewsEarning = Math.max(0, summary.totalEarning - referralBonus);
     const withdrawHint =
       summary.availableBalance >= MIN_WITHDRAWAL_INR
         ? "✅ Withdraw karne ke liye niche *💸 Withdraw UPI* button dabayein."
         : `ℹ️ Minimum withdrawal *${formatInr(MIN_WITHDRAWAL_INR)}* hai (${formatInr(MIN_WITHDRAWAL_INR - summary.availableBalance)} aur chahiye).`;
 
+    const balanceLines = [
+      `💰 *${escapeMarkdown(snapshot.member.name || "Creator")} — Earnings Summary*`,
+      "",
+      `💵 *Available Balance:* ${formatInr(summary.availableBalance)}`,
+      `🏆 *Total Earning:* ${formatInr(summary.totalEarning)}`,
+    ];
+    if (referralBonus > 0) {
+      balanceLines.push(`🎬 *Own Views Earning:* ${formatInr(ownViewsEarning)}`);
+      balanceLines.push(`🎁 *Referral Bonus (7% Admin):* ${formatInr(referralBonus)}`);
+    }
+    balanceLines.push(
+      `⏳ *Pending / Processing:* ${formatInr(summary.pendingOrProcessingAmount)}`,
+      `✅ *Total Paid:* ${formatInr(summary.paidAmount)}`,
+      "",
+      withdrawHint
+    );
+
     await replyText(
-      [
-        `💰 *${escapeMarkdown(snapshot.member.name || "Creator")} — Earnings Summary*`,
-        "",
-        `💵 *Available Balance:* ${formatInr(summary.availableBalance)}`,
-        `🏆 *Total Earning:* ${formatInr(summary.totalEarning)}`,
-        `⏳ *Pending / Processing:* ${formatInr(summary.pendingOrProcessingAmount)}`,
-        `✅ *Total Paid:* ${formatInr(summary.paidAmount)}`,
-        "",
-        withdrawHint,
-      ].join("\n"),
+      balanceLines.join("\n"),
       { parse_mode: "Markdown", reply_markup: CREATOR_REPLY_KEYBOARD }
     );
     return { ok: true, action: "balance" };

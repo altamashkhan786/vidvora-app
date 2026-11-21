@@ -190,7 +190,12 @@ data class FirestoreMember(
   val allowedOptions: List<String> = MemberOption.defaultKeysForRole(MemberRole.CREATOR),
   val hourlyViews: Map<String, Long> = emptyMap(),
   val lastViewsUpdateCycleKey: String = "",
-  val lastViewsUpdatedAtMs: Long = 0L
+  val lastViewsUpdatedAtMs: Long = 0L,
+  val referralCode: String = "",
+  val referredByMemberId: String = "",
+  val referredByName: String = "",
+  val referralBonusEarning: Double = 0.0,
+  val referralCommissionGenerated: Double = 0.0
 ) {
   fun isPasskeyMatch(inputKey: String): Boolean {
     return isActive && passkey.trim().equals(inputKey.trim(), ignoreCase = false)
@@ -203,7 +208,42 @@ data class FirestoreMember(
   fun hasOption(option: MemberOption): Boolean = option.key in allowedOptions
 
   fun hasOptionKey(key: String): Boolean = key in allowedOptions
+
+  fun effectiveReferralCode(): String {
+    val stored = referralCode.trim().uppercase(Locale.US)
+    if (stored.isNotBlank()) return stored
+    val seed = memberId.trim().removePrefix("mem_").filter { it.isLetterOrDigit() }.uppercase(Locale.US)
+    return if (seed.isNotBlank()) "VV-${seed.take(6)}" else ""
+  }
+
+  fun ownViewsEarning(): Double {
+    return (totalEarning - referralBonusEarning).coerceAtLeast(0.0)
+  }
 }
+
+object ReferralStatus {
+  const val PENDING = "PENDING"
+  const val SUCCESSFUL = "SUCCESSFUL"
+}
+
+data class ReferredCreatorItem(
+  val memberId: String,
+  val name: String,
+  val joinedAt: Timestamp,
+  val isActive: Boolean,
+  val status: String,
+  val creditedViews: Long,
+  val bonusEarnedInr: Double
+)
+
+data class CreatorReferralSummary(
+  val myReferralCode: String = "",
+  val referredCreators: List<ReferredCreatorItem> = emptyList(),
+  val totalReferrals: Int = 0,
+  val successfulCount: Int = 0,
+  val pendingCount: Int = 0,
+  val totalReferralBonusInr: Double = 0.0
+)
 
 object WithdrawalStatus {
   const val PENDING = "PENDING"
@@ -229,8 +269,12 @@ data class EarningSummary(
   val totalEarning: Double = 0.0,
   val pendingOrProcessingAmount: Double = 0.0,
   val paidAmount: Double = 0.0,
-  val availableBalance: Double = 0.0
-)
+  val availableBalance: Double = 0.0,
+  val referralBonusEarning: Double = 0.0
+) {
+  val ownViewsEarning: Double
+    get() = (totalEarning - referralBonusEarning).coerceAtLeast(0.0)
+}
 
 data class MemberStats(
   val member: FirestoreMember,
@@ -239,7 +283,8 @@ data class MemberStats(
   val videos: List<FirestoreVideo>,
   val earningSummary: EarningSummary = EarningSummary(
     totalEarning = member.totalEarning,
-    availableBalance = member.totalEarning
+    availableBalance = member.totalEarning,
+    referralBonusEarning = member.referralBonusEarning
   ),
   val viewsLast24Hours: Long = 0L
 )

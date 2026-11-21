@@ -14,10 +14,13 @@ jobs:
   build_and_publish:
     name: Build & Publish VidVora APK
     runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || !startsWith(github.event.head_commit.message, 'chore: publish release/vidvora.apk')
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -84,3 +87,19 @@ jobs:
             --latest \
             --title "VidVora APK (${RELEASE_TAG})" \
             --notes "$RELEASE_NOTES"
+
+      - name: Save APK into release/vidvora.apk on GitHub
+        run: |
+          mkdir -p release functions
+          cp VidVora.apk release/vidvora.apk
+          printf "run=%s\nsha256=%s\n" "${GITHUB_RUN_NUMBER}" "${{ steps.build_apk.outputs.sha256 }}" > functions/.apk-release-sync
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f release/vidvora.apk functions/.apk-release-sync
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: publish release/vidvora.apk (run ${GITHUB_RUN_NUMBER})"
+            git pull --rebase origin "${GITHUB_REF_NAME}" || true
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          else
+            echo "release/vidvora.apk already up to date."
+          fi
