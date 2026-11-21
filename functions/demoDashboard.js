@@ -1,60 +1,104 @@
-function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender.com" } = {}) {
+const fs = require("fs");
+const path = require("path");
+
+let cachedLogoDataUri = null;
+let cachedIconDataUri = null;
+
+function readAssetAsDataUri(fileName) {
+  try {
+    const filePath = path.join(__dirname, fileName);
+    const buf = fs.readFileSync(filePath);
+    return `data:image/png;base64,${buf.toString("base64")}`;
+  } catch (_) {
+    return "";
+  }
+}
+
+function getLogoSrc({ baseUrl, inlineAssets = false }) {
+  if (inlineAssets) {
+    if (!cachedLogoDataUri) cachedLogoDataUri = readAssetAsDataUri("vidvora-logo.png");
+    if (cachedLogoDataUri) return cachedLogoDataUri;
+  }
+  return `${baseUrl}/vidvora-logo.png`;
+}
+
+function getIconSrc({ baseUrl, inlineAssets = false }) {
+  if (inlineAssets) {
+    if (!cachedIconDataUri) cachedIconDataUri = readAssetAsDataUri("vidvora-icon.png");
+    if (cachedIconDataUri) return cachedIconDataUri;
+  }
+  return `${baseUrl}/vidvora-icon.png`;
+}
+
+function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender.com", inlineAssets = false } = {}) {
   const safeBase = String(baseUrl || "https://vidvora-share-bot.onrender.com").replace(/\/+$/, "");
+  const logoSrc = getLogoSrc({ baseUrl: safeBase, inlineAssets });
+  const iconSrc = getIconSrc({ baseUrl: safeBase, inlineAssets });
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>VidVora — Interactive Creator &amp; Admin Demo Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#070c18" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>VidVora</title>
+  <link rel="icon" type="image/png" href="${iconSrc}" />
+  <link rel="apple-touch-icon" href="${iconSrc}" />
   <style>
     :root {
-      --bg: #070b16;
-      --bg-panel: #0e1628;
-      --card: #131e36;
-      --card-2: #182542;
-      --border: #243456;
+      --bg: #070c18;
+      --bg-panel: #091020;
+      --card: #0e172a;
+      --card-2: #14213b;
+      --border: #1e2f4f;
       --cyan: #00e5ff;
-      --cyan-soft: rgba(0, 229, 255, 0.14);
+      --cyan-soft: rgba(0, 229, 255, 0.13);
       --gold: #ffc107;
-      --gold-soft: rgba(255, 193, 7, 0.14);
+      --gold-soft: rgba(255, 193, 7, 0.13);
       --green: #22c55e;
-      --green-soft: rgba(34, 197, 94, 0.14);
+      --green-soft: rgba(34, 197, 94, 0.13);
       --red: #ef4444;
-      --red-soft: rgba(239, 68, 68, 0.14);
+      --red-soft: rgba(239, 68, 68, 0.13);
       --purple: #a855f7;
       --purple-soft: rgba(168, 85, 247, 0.14);
       --text: #f8fafc;
       --muted: #94a3b8;
-      --radius: 14px;
+      --radius: 16px;
     }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
-      background: radial-gradient(circle at top right, rgba(0, 229, 255, 0.08), transparent 40%),
-                  radial-gradient(circle at bottom left, rgba(255, 193, 7, 0.06), transparent 40%),
-                  var(--bg);
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    html, body {
+      font-family: "Roboto", -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+      background: var(--bg);
       color: var(--text);
-      min-height: 100vh;
+      min-height: 100dvh;
       line-height: 1.45;
+      overflow-x: hidden;
+    }
+    body {
+      background: radial-gradient(circle at top right, rgba(0, 229, 255, 0.06), transparent 42%),
+                  radial-gradient(circle at bottom left, rgba(37, 99, 235, 0.05), transparent 42%),
+                  var(--bg);
     }
     button, input, select, textarea { font-family: inherit; }
 
-    /* Top Studio Bar */
-    .studio-bar {
+    /* Desktop Control Bar (auto-hidden completely on mobile Chrome) */
+    .desktop-bar {
       position: sticky;
       top: 0;
       z-index: 90;
-      background: rgba(9, 14, 28, 0.94);
+      background: rgba(7, 12, 24, 0.95);
       backdrop-filter: blur(14px);
       border-bottom: 1px solid var(--border);
       padding: 10px 18px;
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 9px;
     }
-    .studio-bar.hidden { display: none; }
-    .studio-row {
+    .desktop-bar.hidden { display: none; }
+    .desktop-row {
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -65,36 +109,18 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       display: flex;
       align-items: center;
       gap: 10px;
-      font-weight: 800;
-      font-size: 16px;
-      letter-spacing: 0.2px;
     }
-    .brand-logo {
-      width: 34px;
-      height: 34px;
-      border-radius: 10px;
-      background: linear-gradient(135deg, #00e5ff, #2563eb);
-      display: grid;
-      place-items: center;
-      color: #04101d;
-      font-weight: 900;
-      font-size: 16px;
-      box-shadow: 0 0 18px rgba(0, 229, 255, 0.35);
-    }
-    .demo-pill {
-      font-size: 11px;
-      font-weight: 700;
-      padding: 3px 9px;
-      border-radius: 999px;
-      background: var(--gold-soft);
-      color: var(--gold);
-      border: 1px solid rgba(255, 193, 7, 0.35);
+    .brand-logo-img {
+      height: 30px;
+      width: auto;
+      display: block;
+      object-fit: contain;
     }
     .seg-group {
       display: inline-flex;
       background: #0a1020;
       border: 1px solid var(--border);
-      border-radius: 11px;
+      border-radius: 12px;
       padding: 3px;
       gap: 4px;
     }
@@ -103,7 +129,7 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       background: transparent;
       color: var(--muted);
       padding: 7px 14px;
-      border-radius: 8px;
+      border-radius: 9px;
       font-size: 13px;
       font-weight: 700;
       cursor: pointer;
@@ -115,20 +141,19 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
     .seg-btn:hover { color: var(--text); }
     .seg-btn.active {
       background: linear-gradient(135deg, #00e5ff, #0ea5e9);
-      color: #04101d;
-      box-shadow: 0 4px 14px rgba(0, 229, 255, 0.28);
+      color: #031320;
+      box-shadow: 0 4px 14px rgba(0, 229, 255, 0.25);
     }
     .seg-btn.active-admin {
       background: linear-gradient(135deg, #ffc107, #f59e0b);
       color: #1c1200;
-      box-shadow: 0 4px 14px rgba(255, 193, 7, 0.28);
+      box-shadow: 0 4px 14px rgba(255, 193, 7, 0.25);
     }
     .seg-btn.active-tg {
       background: linear-gradient(135deg, #38bdf8, #2563eb);
       color: #ffffff;
     }
 
-    /* Quick Sim Strip */
     .sim-strip {
       display: flex;
       align-items: center;
@@ -149,39 +174,45 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       border: 1px solid var(--border);
       background: var(--card);
       color: var(--text);
-      padding: 7px 12px;
-      border-radius: 9px;
+      padding: 8px 13px;
+      border-radius: 10px;
       font-size: 12px;
       font-weight: 700;
       cursor: pointer;
       transition: transform 0.1s ease, background 0.15s ease, border-color 0.15s ease;
       display: inline-flex;
       align-items: center;
+      justify-content: center;
       gap: 5px;
+      min-height: 36px;
     }
-    .btn:hover { background: var(--card-2); border-color: #385185; }
+    .btn:hover { background: var(--card-2); border-color: #365080; }
     .btn:active { transform: scale(0.97); }
     .btn-cyan { background: linear-gradient(135deg, #00e5ff, #0284c7); color: #031320; border: 0; }
-    .btn-cyan:hover { filter: brightness(1.08); }
+    .btn-cyan:hover { filter: brightness(1.07); }
     .btn-gold { background: linear-gradient(135deg, #ffc107, #f59e0b); color: #1b1100; border: 0; }
-    .btn-gold:hover { filter: brightness(1.08); }
+    .btn-gold:hover { filter: brightness(1.07); }
     .btn-green { background: linear-gradient(135deg, #22c55e, #16a34a); color: #031c0b; border: 0; }
-    .btn-green:hover { filter: brightness(1.08); }
+    .btn-green:hover { filter: brightness(1.07); }
     .btn-purple { background: var(--purple-soft); color: #d8b4fe; border-color: rgba(168, 85, 247, 0.4); }
     .btn-red { background: var(--red-soft); color: #fca5a5; border-color: rgba(239, 68, 68, 0.4); }
     .btn-ghost { background: transparent; color: var(--muted); }
-    .btn-sm { padding: 5px 10px; font-size: 11px; border-radius: 7px; }
-    .btn-lg { padding: 11px 18px; font-size: 14px; border-radius: 11px; }
+    .btn-sm { padding: 6px 10px; font-size: 11px; border-radius: 8px; min-height: 32px; }
+    .btn-lg { padding: 12px 18px; font-size: 14px; border-radius: 12px; min-height: 44px; }
 
-    .floating-show-bar {
+    /* Discreet restore pill on desktop only when topbar is hidden */
+    .floating-restore-bar {
       position: fixed;
-      top: 12px;
-      right: 14px;
+      bottom: 16px;
+      right: 16px;
       z-index: 95;
       display: none;
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+      opacity: 0.35;
+      transition: opacity 0.2s ease;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
     }
-    .floating-show-bar.visible { display: inline-flex; }
+    .floating-restore-bar:hover { opacity: 1; }
+    .floating-restore-bar.visible { display: inline-flex; }
 
     /* Workspace Container */
     .stage {
@@ -195,13 +226,13 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       max-width: 1180px;
       background: var(--bg-panel);
       border: 1px solid var(--border);
-      border-radius: 20px;
+      border-radius: 22px;
       overflow: hidden;
       box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55);
       transition: max-width 0.25s ease, border-radius 0.25s ease;
     }
     .app-shell.phone-mode {
-      max-width: 430px;
+      max-width: 420px;
       border-radius: 36px;
       border: 8px solid #1e293b;
       box-shadow: 0 30px 90px rgba(0, 0, 0, 0.75), 0 0 0 2px #334155;
@@ -218,104 +249,229 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
     }
     .app-shell.phone-mode .phone-notch { display: flex; }
 
-    /* App Top Header */
+    /* Native Android-Style App TopAppBar */
     .app-header {
-      padding: 16px 20px;
-      background: linear-gradient(180deg, #101a31, #0e1628);
-      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 40;
+      padding: 13px 16px;
+      padding-top: calc(13px + env(safe-area-inset-top, 0px));
+      background: rgba(7, 12, 24, 0.96);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid rgba(30, 47, 79, 0.75);
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 12px;
-      flex-wrap: wrap;
+      gap: 10px;
     }
-    .app-title-block h1 { font-size: 19px; font-weight: 800; }
-    .app-title-block p { font-size: 12px; color: var(--cyan); font-weight: 600; margin-top: 2px; }
-    .role-badge {
+    .app-header-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+      flex: 1;
+    }
+    .app-logo-trigger {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      background: transparent;
+      border: 0;
+      color: inherit;
+      cursor: pointer;
+      padding: 2px 0;
+      text-align: left;
+      min-width: 0;
+    }
+    .app-icon-badge {
+      width: 38px;
+      height: 38px;
+      border-radius: 11px;
+      object-fit: cover;
+      border: 1px solid rgba(0, 229, 255, 0.35);
+      box-shadow: 0 4px 14px rgba(0, 229, 255, 0.16);
+      flex-shrink: 0;
+    }
+    .app-wordmark {
+      height: 24px;
+      width: auto;
+      display: block;
+      object-fit: contain;
+    }
+    .app-title-block { min-width: 0; }
+    .app-title-block h1 {
+      font-size: 18px;
+      font-weight: 800;
+      line-height: 1.2;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .app-title-block p {
+      font-size: 12px;
+      color: var(--cyan);
+      font-weight: 600;
+      margin-top: 2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .app-header-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    .icon-action-btn {
+      width: 40px;
+      height: 40px;
+      border-radius: 12px;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--cyan);
+      display: grid;
+      place-items: center;
+      cursor: pointer;
+      transition: background 0.15s ease;
+    }
+    .icon-action-btn:hover, .icon-action-btn:active {
+      background: rgba(0, 229, 255, 0.12);
+    }
+    .header-pill-btn {
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      padding: 6px 12px;
-      border-radius: 10px;
+      padding: 8px 13px;
+      border-radius: 11px;
       font-size: 12px;
-      font-weight: 700;
+      font-weight: 800;
+      background: rgba(14, 23, 42, 0.9);
+      color: var(--text);
+      border: 1px solid #263b63;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .header-pill-btn.cyan {
       background: var(--cyan-soft);
       color: var(--cyan);
-      border: 1px solid rgba(0, 229, 255, 0.3);
+      border-color: rgba(0, 229, 255, 0.35);
     }
-    .role-badge.admin {
+    .header-pill-btn.gold {
       background: var(--gold-soft);
       color: var(--gold);
       border-color: rgba(255, 193, 7, 0.35);
     }
 
-    /* Sub Tabs */
+    /* Native Status Strip (just like real AdminPanelScreen role strip) */
+    .role-strip {
+      margin: 12px 14px 2px;
+      padding: 10px 14px;
+      border-radius: 12px;
+      background: rgba(0, 229, 255, 0.06);
+      border: 1px solid rgba(0, 229, 255, 0.28);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--cyan);
+    }
+    .role-strip.gold {
+      background: rgba(255, 193, 7, 0.07);
+      border-color: rgba(255, 193, 7, 0.3);
+      color: var(--gold);
+    }
+
+    /* Native Android Horizontal Pill Tabs (matches real VidVora APK) */
     .tabs {
       display: flex;
-      gap: 8px;
-      padding: 12px 18px;
+      gap: 9px;
+      padding: 12px 14px;
       overflow-x: auto;
-      border-bottom: 1px solid var(--border);
-      background: #0b1222;
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+      background: transparent;
     }
+    .tabs::-webkit-scrollbar { display: none; }
     .tab-btn {
-      border: 1px solid var(--border);
-      background: var(--card);
-      color: var(--muted);
-      padding: 8px 14px;
+      border: 1px solid #223454;
+      background: #0b1426;
+      color: #cbd5e1;
+      padding: 9px 15px;
       border-radius: 999px;
-      font-size: 12px;
+      font-size: 13px;
       font-weight: 700;
       white-space: nowrap;
       cursor: pointer;
       display: inline-flex;
       align-items: center;
-      gap: 6px;
+      gap: 7px;
+      flex-shrink: 0;
+      transition: all 0.15s ease;
     }
     .tab-btn.active {
-      background: linear-gradient(135deg, #00e5ff, #0ea5e9);
-      color: #031320;
+      background: linear-gradient(135deg, #00e5ff, #06b6d4);
+      color: #041320;
       border-color: transparent;
+      box-shadow: 0 4px 16px rgba(0, 229, 255, 0.25);
     }
     .tab-btn.active-gold {
-      background: linear-gradient(135deg, #ffc107, #f59e0b);
-      color: #1c1200;
+      background: linear-gradient(135deg, #00e5ff, #06b6d4);
+      color: #041320;
       border-color: transparent;
+      box-shadow: 0 4px 16px rgba(0, 229, 255, 0.25);
     }
     .badge-count {
-      background: rgba(0, 0, 0, 0.25);
-      padding: 1px 7px;
+      background: rgba(0, 0, 0, 0.22);
+      padding: 2px 8px;
       border-radius: 999px;
       font-size: 11px;
       font-weight: 800;
     }
 
     /* Main Content Area */
-    .content { padding: 18px; display: flex; flex-direction: column; gap: 16px; }
-    .grid { display: grid; gap: 12px; }
+    .content {
+      padding: 4px 14px 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 13px;
+    }
+    .grid { display: grid; gap: 10px; }
     .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-    .app-shell.phone-mode .grid-4,
-    .app-shell.phone-mode .grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    @media (max-width: 760px) {
-      .grid-4, .grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    }
+    .app-shell.phone-mode .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
     .card {
       background: var(--card);
       border: 1px solid var(--border);
       border-radius: var(--radius);
-      padding: 15px;
+      padding: 14px;
     }
-    .card-glow-cyan { border-color: rgba(0, 229, 255, 0.35); background: linear-gradient(180deg, rgba(0, 229, 255, 0.08), var(--card)); }
-    .card-glow-gold { border-color: rgba(255, 193, 7, 0.38); background: linear-gradient(180deg, rgba(255, 193, 7, 0.08), var(--card)); }
-    .card-glow-green { border-color: rgba(34, 197, 94, 0.38); background: linear-gradient(180deg, rgba(34, 197, 94, 0.08), var(--card)); }
-    .card-glow-purple { border-color: rgba(168, 85, 247, 0.38); background: linear-gradient(180deg, rgba(168, 85, 247, 0.08), var(--card)); }
+    .card-glow-cyan { border-color: rgba(0, 229, 255, 0.34); background: linear-gradient(180deg, rgba(0, 229, 255, 0.07), var(--card)); }
+    .card-glow-gold { border-color: rgba(255, 193, 7, 0.34); background: linear-gradient(180deg, rgba(255, 193, 7, 0.07), var(--card)); }
+    .card-glow-green { border-color: rgba(34, 197, 94, 0.34); background: linear-gradient(180deg, rgba(34, 197, 94, 0.07), var(--card)); }
+    .card-glow-red { border-color: rgba(239, 68, 68, 0.34); background: linear-gradient(180deg, rgba(239, 68, 68, 0.07), var(--card)); }
+    .card-glow-purple { border-color: rgba(168, 85, 247, 0.34); background: linear-gradient(180deg, rgba(168, 85, 247, 0.07), var(--card)); }
 
-    .kpi-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: var(--muted); }
-    .kpi-val { font-size: 24px; font-weight: 900; margin-top: 4px; letter-spacing: -0.3px; }
-    .kpi-sub { font-size: 11px; color: var(--muted); margin-top: 3px; }
+    /* Real Android 3-column Install KPI tiles */
+    .kpi-tile-center {
+      text-align: center;
+      padding: 14px 8px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+    }
+    .kpi-tile-icon {
+      font-size: 18px;
+      line-height: 1;
+      margin-bottom: 2px;
+    }
+    .kpi-label { font-size: 10.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.55px; color: var(--muted); }
+    .kpi-val { font-size: 23px; font-weight: 900; margin-top: 2px; letter-spacing: -0.3px; }
+    .kpi-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
     .text-cyan { color: var(--cyan); }
     .text-gold { color: var(--gold); }
     .text-green { color: var(--green); }
@@ -329,7 +485,7 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       justify-content: space-between;
       gap: 10px;
       flex-wrap: wrap;
-      margin-bottom: 10px;
+      margin-bottom: 8px;
     }
     .section-title { font-size: 15px; font-weight: 800; display: flex; align-items: center; gap: 7px; }
 
@@ -337,37 +493,37 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
     .chart-bars {
       display: grid;
       grid-template-columns: repeat(7, 1fr);
-      gap: 8px;
+      gap: 6px;
       align-items: end;
       height: 120px;
       padding-top: 14px;
     }
-    .bar-col { display: flex; flex-direction: column; align-items: center; gap: 6px; height: 100%; justify-content: flex-end; }
+    .bar-col { display: flex; flex-direction: column; align-items: center; gap: 5px; height: 100%; justify-content: flex-end; }
     .bar-fill {
       width: 100%;
-      max-width: 42px;
+      max-width: 38px;
       border-radius: 7px 7px 3px 3px;
       background: linear-gradient(180deg, var(--cyan), #2563eb);
       transition: height 0.35s ease;
       min-height: 8px;
     }
-    .bar-day { font-size: 11px; color: var(--muted); font-weight: 600; }
-    .bar-amt { font-size: 10px; color: var(--cyan); font-weight: 700; }
+    .bar-day { font-size: 10.5px; color: var(--muted); font-weight: 600; }
+    .bar-amt { font-size: 9.5px; color: var(--cyan); font-weight: 700; }
 
     /* List Items */
     .list { display: flex; flex-direction: column; gap: 10px; }
     .item-row {
-      background: #0d1629;
+      background: #0c1426;
       border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 12px 14px;
+      border-radius: 14px;
+      padding: 13px 14px;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 12px;
+      gap: 10px;
       flex-wrap: wrap;
     }
-    .item-main { display: flex; flex-direction: column; gap: 3px; min-width: 180px; flex: 1; }
+    .item-main { display: flex; flex-direction: column; gap: 4px; min-width: 180px; flex: 1; }
     .item-title { font-weight: 800; font-size: 14px; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
     .item-meta { font-size: 12px; color: var(--muted); }
     .item-actions { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
@@ -378,7 +534,7 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       gap: 4px;
       padding: 3px 9px;
       border-radius: 999px;
-      font-size: 11px;
+      font-size: 10.5px;
       font-weight: 800;
     }
     .pill-green { background: var(--green-soft); color: var(--green); border: 1px solid rgba(34, 197, 94, 0.35); }
@@ -389,15 +545,15 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
 
     .progress-track {
       width: 100%;
-      height: 9px;
-      background: #091020;
+      height: 8px;
+      background: #081020;
       border-radius: 999px;
       overflow: hidden;
       margin-top: 8px;
     }
     .progress-fill { height: 100%; background: linear-gradient(90deg, #22c55e, #00e5ff); border-radius: 999px; }
 
-    /* Inputs & Modals */
+    /* Inputs & Modals / Bottom Sheets */
     .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 11px; }
     .field label { font-size: 12px; font-weight: 700; color: #cbd5e1; }
     .input {
@@ -405,9 +561,9 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       background: #080f1e;
       border: 1px solid var(--border);
       color: var(--text);
-      padding: 10px 12px;
-      border-radius: 10px;
-      font-size: 13px;
+      padding: 11px 12px;
+      border-radius: 11px;
+      font-size: 14px;
       outline: none;
     }
     .input:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(0, 229, 255, 0.14); }
@@ -428,9 +584,19 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       max-width: 460px;
       background: var(--bg-panel);
       border: 1px solid var(--border);
-      border-radius: 18px;
+      border-radius: 20px;
       padding: 20px;
-      box-shadow: 0 25px 80px rgba(0, 0, 0, 0.7);
+      box-shadow: 0 25px 80px rgba(0, 0, 0, 0.72);
+      max-height: 90dvh;
+      overflow-y: auto;
+    }
+    .sheet-handle {
+      width: 40px;
+      height: 4px;
+      border-radius: 999px;
+      background: #334155;
+      margin: 0 auto 14px;
+      display: none;
     }
     .modal-head {
       display: flex;
@@ -438,7 +604,7 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       justify-content: space-between;
       margin-bottom: 14px;
     }
-    .modal-head h3 { font-size: 17px; font-weight: 800; }
+    .modal-head h3 { font-size: 16px; font-weight: 800; }
 
     /* Telegram Bot Simulator */
     .tg-chat {
@@ -451,24 +617,38 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
     }
     .tg-top {
       background: #17212b;
-      padding: 12px 16px;
+      padding: 11px 14px;
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 10px;
       border-bottom: 1px solid #243242;
     }
+    .tg-bot-id {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .tg-avatar {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      object-fit: cover;
+      border: 1px solid rgba(0, 229, 255, 0.35);
+    }
     .tg-messages {
-      padding: 16px;
+      padding: 14px;
       display: flex;
       flex-direction: column;
-      gap: 12px;
-      max-height: 430px;
+      gap: 11px;
+      min-height: 300px;
+      max-height: 440px;
       overflow-y: auto;
       background: radial-gradient(circle at center, rgba(56, 189, 248, 0.05), transparent 65%);
     }
     .tg-bubble {
-      max-width: 86%;
-      padding: 11px 14px;
+      max-width: 88%;
+      padding: 11px 13px;
       border-radius: 14px;
       font-size: 13px;
       white-space: pre-wrap;
@@ -481,7 +661,7 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       background: rgba(56, 189, 248, 0.14);
       border: 1px solid rgba(56, 189, 248, 0.35);
       color: #e0f2fe;
-      padding: 7px 10px;
+      padding: 8px 10px;
       border-radius: 8px;
       font-size: 12px;
       font-weight: 700;
@@ -491,6 +671,7 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
     .tg-keyboard {
       background: #17212b;
       padding: 10px;
+      padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
       border-top: 1px solid #243242;
       display: grid;
       grid-template-columns: repeat(2, 1fr);
@@ -500,34 +681,39 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       background: #243242;
       color: #f8fafc;
       border: 1px solid #32465c;
-      padding: 10px;
-      border-radius: 9px;
+      padding: 11px 8px;
+      border-radius: 10px;
       font-size: 12px;
       font-weight: 700;
       cursor: pointer;
     }
-    .tg-key-btn:hover { background: #2e4054; }
+    .tg-key-btn:active { background: #2e4054; }
 
     /* Toast */
     .toast-wrap {
       position: fixed;
-      bottom: 18px;
-      right: 18px;
+      bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+      left: 50%;
+      transform: translateX(-50%);
       z-index: 300;
       display: flex;
       flex-direction: column;
+      align-items: center;
       gap: 8px;
+      width: calc(100% - 28px);
+      max-width: 380px;
+      pointer-events: none;
     }
     .toast {
       background: #0f1b33;
       border: 1px solid var(--cyan);
       color: var(--text);
       padding: 11px 15px;
-      border-radius: 12px;
-      font-size: 13px;
+      border-radius: 13px;
+      font-size: 12.5px;
       font-weight: 700;
-      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
-      max-width: 360px;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.65);
+      width: 100%;
       animation: slideIn 0.2s ease;
     }
     @keyframes slideIn {
@@ -535,10 +721,10 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       to { opacity: 1; transform: translateY(0); }
     }
     .banner-announce {
-      background: linear-gradient(90deg, rgba(0, 229, 255, 0.14), rgba(168, 85, 247, 0.14));
-      border: 1px solid rgba(0, 229, 255, 0.35);
-      border-radius: 12px;
-      padding: 10px 14px;
+      background: linear-gradient(90deg, rgba(0, 229, 255, 0.12), rgba(168, 85, 247, 0.12));
+      border: 1px solid rgba(0, 229, 255, 0.3);
+      border-radius: 13px;
+      padding: 10px 13px;
       font-size: 12px;
       display: flex;
       align-items: center;
@@ -556,19 +742,76 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       font-weight: 800;
       letter-spacing: 0.8px;
     }
+    .quick-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    /* =====================================================================
+       MOBILE CHROME FULL-APP MODE (<= 768px)
+       Hides ALL top controls / frames so it looks 100% like native Android app
+       ===================================================================== */
+    @media (max-width: 768px) {
+      .desktop-bar,
+      .floating-restore-bar,
+      .phone-notch {
+        display: none !important;
+      }
+      .stage {
+        padding: 0 !important;
+        display: block;
+      }
+      .app-shell,
+      .app-shell.phone-mode {
+        max-width: 100% !important;
+        width: 100% !important;
+        min-height: 100dvh;
+        border: 0 !important;
+        border-radius: 0 !important;
+        box-shadow: none !important;
+        background: var(--bg);
+      }
+      .grid-4 {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .content {
+        padding: 4px 13px calc(24px + env(safe-area-inset-bottom, 0px));
+      }
+      .kpi-val { font-size: 21px; }
+      .modal-backdrop {
+        padding: 0;
+        align-items: end;
+      }
+      .modal-card {
+        max-width: 100%;
+        border-radius: 22px 22px 0 0;
+        border-bottom: 0;
+        padding: 14px 16px calc(22px + env(safe-area-inset-bottom, 0px));
+      }
+      .sheet-handle { display: block; }
+      .tg-content-wrap {
+        padding: 0 !important;
+      }
+      .tg-chat {
+        border: 0;
+        border-radius: 0;
+        min-height: calc(100dvh - 67px);
+      }
+      .tg-messages {
+        flex: 1;
+        max-height: none;
+      }
+    }
   </style>
 </head>
 <body>
-  <button id="showStudioBtn" class="btn btn-gold floating-show-bar" onclick="toggleStudioBar(true)">🎛️ Show Demo Controls</button>
+  <button id="restoreBarBtn" class="btn btn-cyan floating-restore-bar" onclick="toggleDesktopBar(true)">⚙️ Controls</button>
 
-  <header id="studioBar" class="studio-bar">
-    <div class="studio-row">
+  <header id="desktopBar" class="desktop-bar">
+    <div class="desktop-row">
       <div class="brand">
-        <div class="brand-logo">V</div>
-        <div>
-          <span>VidVora</span>
-          <span class="demo-pill">DEMO STUDIO • SAFE SANDBOX</span>
-        </div>
+        <img src="${logoSrc}" alt="VidVora" class="brand-logo-img" />
       </div>
 
       <div class="seg-group">
@@ -578,21 +821,21 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       </div>
 
       <div style="display:flex; gap:7px; flex-wrap:wrap;">
-        <button id="layoutToggleBtn" class="btn" onclick="togglePhoneMode()">📱 Phone Frame View</button>
-        <button class="btn btn-red" onclick="resetDemoState()">🔄 Reset Demo</button>
-        <button class="btn btn-ghost" onclick="toggleStudioBar(false)">🙈 Hide Bar (Record)</button>
+        <button id="layoutToggleBtn" class="btn" onclick="togglePhoneMode()">📱 Mobile View</button>
+        <button class="btn btn-red" onclick="resetDemoState()">🔄 Reset</button>
+        <button class="btn btn-ghost" onclick="toggleDesktopBar(false)">🙈 Hide Top Bar</button>
       </div>
     </div>
 
     <div class="sim-strip">
-      <span class="sim-label">⚡ Live Demo Controls (Add Views / Earning):</span>
+      <span class="sim-label">⚡ Quick Add:</span>
       <button class="btn btn-cyan" onclick="addDemoViews(1000)">+1,000 Views (+₹30)</button>
       <button class="btn btn-cyan" onclick="addDemoViews(10000)">+10,000 Views (+₹300)</button>
       <button class="btn btn-gold" onclick="addDemoEarning(500)">+₹500 Earning</button>
       <button class="btn btn-gold" onclick="addDemoEarning(1000)">+₹1,000 Earning</button>
-      <button class="btn btn-purple" onclick="simulateReferredViews(5000)">🤝 Ref Creator +5K Views (+7% Bonus)</button>
-      <button class="btn" onclick="openCustomCreditModal()">⚙️ Custom Add (Views / ₹)</button>
-      <button class="btn btn-green" onclick="openWithdrawModal()">💸 Quick Demo Withdrawal</button>
+      <button class="btn btn-purple" onclick="simulateReferredViews(5000)">🤝 Ref +5K Views (+7%)</button>
+      <button class="btn" onclick="openCustomCreditModal()">⚙️ Custom Add</button>
+      <button class="btn btn-green" onclick="openWithdrawModal()">💸 Quick Withdrawal</button>
     </div>
   </header>
 
@@ -600,14 +843,13 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
     <div id="appShell" class="app-shell">
       <div class="phone-notch">
         <span>9:41</span>
-        <span>VidVora v1.9</span>
+        <span>VidVora</span>
         <span>5G 🔋 100%</span>
       </div>
       <div id="appRoot"></div>
     </div>
   </main>
 
-  <!-- Modal Backdrop -->
   <div id="modalBackdrop" class="modal-backdrop" onclick="if(event.target===this) closeModal()">
     <div id="modalCard" class="modal-card"></div>
   </div>
@@ -616,7 +858,9 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
 
   <script>
     const SHARE_BASE = ${JSON.stringify(safeBase + "/share?link=")};
-    const STORAGE_KEY = "vidvora_demo_studio_v1";
+    const LOGO_SRC = ${JSON.stringify(logoSrc)};
+    const ICON_SRC = ${JSON.stringify(iconSrc)};
+    const STORAGE_KEY = "vidvora_panel_state_v2";
     const CPM_PER_1000 = 30; // ₹30 per 1,000 views
     const REFERRAL_RATE = 0.07; // 7% Admin-funded bonus
 
@@ -628,10 +872,10 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
         phoneMode: false,
         inactivityDays: 14,
         refFilter: "all",
-        announcement: "🎉 New! Refer & Earn 7% Live — Har referred creator ki views/earning par Admin ke taraf se 7% extra bonus!",
+        announcement: "🎉 Refer & Earn 7% Live — Har referred creator ki views/earning par Admin ke taraf se 7% extra bonus!",
         creator: {
           memberId: "creator_rohan",
-          name: "Rohan Sharma (Demo Creator)",
+          name: "Rohan Sharma",
           email: "rohan.creator@gmail.com",
           referralCode: "VV-ROHAN07",
           views: 18500,
@@ -713,7 +957,7 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
         payouts: [
           {
             id: "PAY-9021",
-            creatorName: "Rohan Sharma (Demo Creator)",
+            creatorName: "Rohan Sharma",
             upiId: "rohan@ybl",
             amount: 400,
             status: "PAID",
@@ -807,13 +1051,13 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       el.className = "toast";
       el.textContent = msg;
       wrap.appendChild(el);
-      setTimeout(() => { el.style.opacity = "0"; el.style.transition = "opacity 0.25s"; }, 3100);
-      setTimeout(() => el.remove(), 3400);
+      setTimeout(() => { el.style.opacity = "0"; el.style.transition = "opacity 0.25s"; }, 2900);
+      setTimeout(() => el.remove(), 3200);
     }
 
-    function toggleStudioBar(show) {
-      const bar = document.getElementById("studioBar");
-      const btn = document.getElementById("showStudioBtn");
+    function toggleDesktopBar(show) {
+      const bar = document.getElementById("desktopBar");
+      const btn = document.getElementById("restoreBarBtn");
       bar.classList.toggle("hidden", !show);
       btn.classList.toggle("visible", !show);
     }
@@ -853,11 +1097,12 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
     function resetDemoState() {
       state = makeInitialState();
       saveState();
-      showToast("🔄 Demo fresh reset ho gaya!");
+      closeModal();
+      showToast("🔄 Data fresh reset ho gaya!");
       render();
     }
 
-    // ==================== LIVE DEMO SIMULATOR ACTIONS ====================
+    // ==================== LIVE ACTIONS ====================
     function addDemoViews(viewsCount, videoIndex = 0) {
       const v = Math.max(1, Math.floor(Number(viewsCount) || 0));
       const earned = Math.round((v / 1000) * CPM_PER_1000 * 100) / 100;
@@ -873,7 +1118,7 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
         todayBar.amt = Math.round((todayBar.amt + earned) * 100) / 100;
       }
       saveState();
-      showToast("👁️ +" + fmtNum(v) + " Views added → +" + fmtInr(earned) + " Creator Wallet me jud gaya!");
+      showToast("👁️ +" + fmtNum(v) + " Views added → +" + fmtInr(earned) + " Wallet me credit!");
       render();
     }
 
@@ -886,7 +1131,7 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
         todayBar.amt = Math.round((todayBar.amt + amt) * 100) / 100;
       }
       saveState();
-      showToast("💰 +" + fmtInr(amt) + " Earning credit ho gayi! Ab Withdrawal dikha sakte hain.");
+      showToast("💰 +" + fmtInr(amt) + " Wallet balance me credit ho gaya!");
       render();
     }
 
@@ -907,7 +1152,7 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       state.creator.referralEarning = Math.round((state.creator.referralEarning + bonus7) * 100) / 100;
       saveState();
       showToast(
-        "🤝 " + target.name + " ko +" + fmtNum(v) + " views (" + fmtInr(refCreatorEarned) + ") mile — Admin ke taraf se 7% (+" + fmtInr(bonus7) + ") aapke Referral Bonus me add!"
+        "🤝 " + target.name + " +" + fmtNum(v) + " views → Admin se 7% (+" + fmtInr(bonus7) + ") Referral Bonus add!"
       );
       render();
     }
@@ -917,7 +1162,7 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       if (!r) return;
       r.status = "SUCCESSFUL";
       saveState();
-      showToast("✅ " + r.name + " ka account Approved → Referrer ko ab Successful status dikhega!");
+      showToast("✅ " + r.name + " Approved → Ab Referral status Successful dikhega!");
       render();
     }
 
@@ -928,7 +1173,7 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       p.utr = "UTR" + Math.floor(100000000000 + Math.random() * 899999999999);
       p.paidAt = "Just now";
       saveState();
-      showToast("✅ Payout " + fmtInr(p.amount) + " PAID! UTR: " + p.utr + " (Creator Panel me status green ho gaya!)");
+      showToast("✅ Payout " + fmtInr(p.amount) + " PAID! UTR: " + p.utr);
       render();
     }
 
@@ -938,7 +1183,7 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       p.status = "REJECTED";
       p.utr = "Refunded to wallet";
       saveState();
-      showToast("❌ Payout reject kiya — " + fmtInr(p.amount) + " creator ke Available Balance me wapas refund ho gaya!");
+      showToast("❌ Payout rejected — " + fmtInr(p.amount) + " wallet me wapas refund ho gaya!");
       render();
     }
 
@@ -949,23 +1194,54 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       showToast("📋 " + label + " copied: " + txt);
     }
 
-    // ==================== MODALS ====================
+    // ==================== MODALS & MOBILE BOTTOM SHEET ====================
     function openModal(html) {
-      document.getElementById("modalCard").innerHTML = html;
+      document.getElementById("modalCard").innerHTML = '<div class="sheet-handle"></div>' + html;
       document.getElementById("modalBackdrop").classList.add("open");
     }
     function closeModal() {
       document.getElementById("modalBackdrop").classList.remove("open");
     }
 
+    function openQuickControlsSheet() {
+      openModal(
+        '<div class="modal-head">' +
+          '<div style="display:flex; align-items:center; gap:9px;">' +
+            '<img src="' + ICON_SRC + '" alt="VidVora" style="width:28px; height:28px; border-radius:8px;" />' +
+            '<h3>Quick Switch &amp; Add Balance</h3>' +
+          '</div>' +
+          '<button class="btn btn-sm" onclick="closeModal()">✕</button>' +
+        '</div>' +
+        '<div class="kpi-label" style="margin-bottom:7px;">Switch View</div>' +
+        '<div style="display:grid; grid-template-columns:repeat(3,1fr); gap:7px; margin-bottom:14px;">' +
+          '<button class="btn ' + (state.mode === "creator" ? "btn-cyan" : "") + '" onclick="setMode(\\'creator\\'); closeModal();">🎬 Creator</button>' +
+          '<button class="btn ' + (state.mode === "admin" ? "btn-gold" : "") + '" onclick="setMode(\\'admin\\'); closeModal();">🛡️ Admin</button>' +
+          '<button class="btn ' + (state.mode === "telegram" ? "btn-cyan" : "") + '" onclick="setMode(\\'telegram\\'); closeModal();">🤖 Bot</button>' +
+        '</div>' +
+        '<div class="kpi-label" style="margin-bottom:7px;">Add Views &amp; Earnings</div>' +
+        '<div class="quick-grid" style="margin-bottom:12px;">' +
+          '<button class="btn btn-cyan" onclick="addDemoViews(1000); closeModal();">+1,000 Views (+₹30)</button>' +
+          '<button class="btn btn-cyan" onclick="addDemoViews(10000); closeModal();">+10,000 Views (+₹300)</button>' +
+          '<button class="btn btn-gold" onclick="addDemoEarning(500); closeModal();">+₹500 Earning</button>' +
+          '<button class="btn btn-gold" onclick="addDemoEarning(1000); closeModal();">+₹1,000 Earning</button>' +
+          '<button class="btn btn-purple" onclick="simulateReferredViews(5000); closeModal();">🤝 Ref +5K (+7%)</button>' +
+          '<button class="btn" onclick="openCustomCreditModal()">⚙️ Custom Add</button>' +
+        '</div>' +
+        '<div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">' +
+          '<button class="btn btn-green" onclick="openWithdrawModal()">💸 Withdraw UPI</button>' +
+          '<button class="btn btn-red" onclick="resetDemoState()">🔄 Reset Data</button>' +
+        '</div>'
+      );
+    }
+
     function openCustomCreditModal() {
       openModal(
-        '<div class="modal-head"><h3>⚙️ Custom Views / Earning Add Karein</h3><button class="btn btn-sm" onclick="closeModal()">✕</button></div>' +
+        '<div class="modal-head"><h3>⚙️ Custom Views / Earning Add</h3><button class="btn btn-sm" onclick="closeModal()">✕</button></div>' +
         '<div class="field"><label>Add Views (₹30 / 1,000 views auto-calculate)</label><input id="customViewsInp" class="input" type="number" placeholder="e.g. 25000" value="5000" /></div>' +
-        '<div class="field"><label>Ya Direct Bonus Earning Add Karein (₹)</label><input id="customInrInp" class="input" type="number" placeholder="e.g. 1500" value="0" /></div>' +
+        '<div class="field"><label>Ya Direct Earning Add Karein (₹)</label><input id="customInrInp" class="input" type="number" placeholder="e.g. 1500" value="0" /></div>' +
         '<div style="display:flex; gap:8px; justify-content:flex-end; margin-top:14px;">' +
           '<button class="btn" onclick="closeModal()">Cancel</button>' +
-          '<button class="btn btn-cyan" onclick="submitCustomCredit()">✅ Add to Creator Wallet</button>' +
+          '<button class="btn btn-cyan" onclick="submitCustomCredit()">✅ Add to Wallet</button>' +
         '</div>'
       );
     }
@@ -996,7 +1272,7 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
         '</div>' +
         '<div style="display:flex; gap:8px; justify-content:flex-end;">' +
           '<button class="btn" onclick="closeModal()">Cancel</button>' +
-          '<button class="btn btn-green" onclick="submitWithdrawal()">🚀 Submit Withdrawal Request</button>' +
+          '<button class="btn btn-green" onclick="submitWithdrawal()">🚀 Submit Request</button>' +
         '</div>'
       );
     }
@@ -1007,7 +1283,7 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       const amt = Math.round((Number(document.getElementById("wdAmt").value) || 0) * 100) / 100;
       if (!upi.includes("@")) { showToast("⚠️ Sahi UPI ID dalein (e.g. rohan@ybl)"); return; }
       if (amt < 100) { showToast("⚠️ Minimum withdrawal ₹100 hai!"); return; }
-      if (amt > s.available) { showToast("⚠️ Balance kam hai! Upar Demo Controls se pehle Earning add kar lo."); return; }
+      if (amt > s.available) { showToast("⚠️ Balance kam hai — pehle Views ya Earning add karein."); return; }
       state.creator.upiId = upi;
       const id = "PAY-" + Math.floor(1000 + Math.random() * 8999);
       state.payouts.unshift({
@@ -1023,18 +1299,18 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       state.creatorTab = "withdrawals";
       saveState();
       closeModal();
-      showToast("✅ Withdrawal " + fmtInr(amt) + " submitted! Ab Admin Panel → Payouts me jaakar Approve karein.");
+      showToast("✅ Withdrawal " + fmtInr(amt) + " submitted! Admin Panel me approve karein.");
       render();
     }
 
     function openUploadModal() {
       openModal(
-        '<div class="modal-head"><h3>📤 Upload Video / Generate Share Link</h3><button class="btn btn-sm" onclick="closeModal()">✕</button></div>' +
+        '<div class="modal-head"><h3>📤 Upload Video / Share Link</h3><button class="btn btn-sm" onclick="closeModal()">✕</button></div>' +
         '<div class="field"><label>Video Title</label><input id="upTitle" class="input" placeholder="e.g. New Full Movie 2026 HD" value="New Action Movie 1080p HD" /></div>' +
         '<div class="field"><label>File Size / Format (Supports up to 4 GB+)</label><input id="upSize" class="input" value="1.8 GB • MP4" /></div>' +
         '<div style="display:flex; gap:8px; justify-content:flex-end; margin-top:14px;">' +
           '<button class="btn" onclick="closeModal()">Cancel</button>' +
-          '<button class="btn btn-cyan" onclick="submitDemoUpload()">🚀 Publish &amp; Get Share Link</button>' +
+          '<button class="btn btn-cyan" onclick="submitDemoUpload()">🚀 Publish &amp; Get Link</button>' +
         '</div>'
       );
     }
@@ -1062,13 +1338,13 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
 
     function openAddCreatorModal() {
       openModal(
-        '<div class="modal-head"><h3>➕ Add New Creator (Admin)</h3><button class="btn btn-sm" onclick="closeModal()">✕</button></div>' +
+        '<div class="modal-head"><h3>➕ Add New Creator</h3><button class="btn btn-sm" onclick="closeModal()">✕</button></div>' +
         '<div class="field"><label>Creator Name</label><input id="newCrName" class="input" placeholder="e.g. Rahul Yadav" value="Rahul Yadav" /></div>' +
         '<div class="field"><label>Email</label><input id="newCrEmail" class="input" placeholder="rahul@gmail.com" value="rahul@gmail.com" /></div>' +
         '<div class="field"><label>Referral Code (Optional)</label><input id="newCrRef" class="input" value="' + esc(state.creator.referralCode) + '" /></div>' +
         '<div style="display:flex; gap:8px; justify-content:flex-end; margin-top:14px;">' +
           '<button class="btn" onclick="closeModal()">Cancel</button>' +
-          '<button class="btn btn-gold" onclick="submitNewCreator()">✅ Create Creator Account</button>' +
+          '<button class="btn btn-gold" onclick="submitNewCreator()">✅ Create Account</button>' +
         '</div>'
       );
     }
@@ -1087,7 +1363,7 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       });
       saveState();
       closeModal();
-      showToast("✅ " + name + " add ho gaya aur Referral list me Successful show ho raha hai!");
+      showToast("✅ " + name + " add ho gaya!");
       render();
     }
 
@@ -1095,22 +1371,25 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       const v = state.videos.find((x) => x.id === videoId);
       if (!v) return;
       openModal(
-        '<div class="modal-head"><h3>▶️ VidVora Fast Player Preview</h3><button class="btn btn-sm" onclick="closeModal()">✕</button></div>' +
-        '<div style="background:#000; border-radius:12px; padding:34px 16px; text-align:center; border:1px solid #1e293b; margin-bottom:12px;">' +
-          '<div style="font-size:38px;">🎬</div>' +
-          '<div style="font-weight:800; margin-top:8px;">' + esc(v.title) + '</div>' +
-          '<div style="font-size:12px; color:#00e5ff; margin-top:4px;">HTTP 206 Byte-Range Streaming • Auto HD • 0 Buffer</div>' +
+        '<div class="modal-head">' +
+          '<div style="display:flex; align-items:center; gap:8px;"><img src="' + ICON_SRC + '" alt="VidVora" style="width:24px; height:24px; border-radius:6px;" /><h3>VidVora Fast Player</h3></div>' +
+          '<button class="btn btn-sm" onclick="closeModal()">✕</button>' +
+        '</div>' +
+        '<div style="background:#000; border-radius:14px; padding:32px 16px; text-align:center; border:1px solid #1e293b; margin-bottom:12px;">' +
+          '<img src="' + LOGO_SRC + '" alt="VidVora" style="height:26px; margin-bottom:10px;" />' +
+          '<div style="font-weight:800; font-size:14px;">' + esc(v.title) + '</div>' +
+          '<div style="font-size:11.5px; color:#00e5ff; margin-top:4px;">Auto HD • Instant Seek • Zero Buffer</div>' +
           '<div class="progress-track" style="margin-top:14px;"><div class="progress-fill" style="width:42%;"></div></div>' +
           '<div style="display:flex; justify-content:space-between; font-size:11px; color:#94a3b8; margin-top:6px;"><span>14:22</span><span>HQ • 1.0x • Fullscreen</span><span>34:10</span></div>' +
         '</div>' +
         '<div style="display:flex; justify-content:space-between; gap:8px;">' +
-          '<button class="btn btn-cyan" onclick="addDemoViews(1000, ' + state.videos.indexOf(v) + '); closeModal();">+1,000 Views Simulate</button>' +
+          '<button class="btn btn-cyan" onclick="addDemoViews(1000, ' + state.videos.indexOf(v) + '); closeModal();">+1,000 Views</button>' +
           '<button class="btn" onclick="closeModal()">Close</button>' +
         '</div>'
       );
     }
 
-    // ==================== TELEGRAM BOT DEMO ====================
+    // ==================== TELEGRAM BOT ====================
     function buildTgPreviewCaption() {
       const h = state.telegram.customHeader;
       const f = state.telegram.customFooter;
@@ -1118,7 +1397,7 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       if (h !== "__NONE__") {
         lines.push(h || "🎬 VidVora — Watch Video", "");
       }
-      lines.push("🔗 Watch Full Video:", SHARE_BASE + (state.videos[0]?.code || "GM-DEMO9999"));
+      lines.push("🔗 Watch Full Video:", SHARE_BASE + (state.videos[0]?.code || "GM-ACTN2026"));
       if (f !== "__NONE__") {
         lines.push("", f || "वीडियो कैसे देखे / How to play video\\n👇👇👇👇\\nhttps://t.me/VideoKaiseDekhe_ar");
       }
@@ -1226,7 +1505,7 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       if (!txt) return;
       state.supportMessages.push({ sender: role, text: txt, time: "Just now" });
       saveState();
-      showToast(role === "ADMIN" ? "💬 Admin reply sent to Creator!" : "💬 Message sent to Admin Support!");
+      showToast(role === "ADMIN" ? "💬 Reply sent to Creator!" : "💬 Message sent to Support!");
       render();
     }
 
@@ -1237,9 +1516,12 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       if (!txt) return;
       state.announcement = txt;
       saveState();
-      showToast("📢 Announcement live ho gaya! Creator Panel me turant dikhega.");
+      showToast("📢 Announcement published live!");
       render();
     }
+
+    // Key icon SVG matching real VidVora Android TopAppBar
+    const KEY_SVG = '<svg width="21" height="21" viewBox="0 0 24 24" fill="currentColor"><path d="M12.65 10A5.99 5.99 0 0 0 7 6c-3.31 0-6 2.69-6 6s2.69 6 6 6a5.99 5.99 0 0 0 5.65-4H17v4h4v-4h2v-4H12.65zM7 14c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z"/></svg>';
 
     // ==================== RENDERERS ====================
     function renderCreatorPanel() {
@@ -1248,23 +1530,31 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
 
       let html =
         '<div class="app-header">' +
-          '<div class="app-title-block">' +
-            '<h1>🎬 Creator Studio</h1>' +
-            '<p>' + esc(state.creator.name) + ' • Code: ' + esc(state.creator.referralCode) + '</p>' +
+          '<div class="app-header-left">' +
+            '<button class="app-logo-trigger" onclick="openQuickControlsSheet()" title="Switch Panel / Quick Actions">' +
+              '<img src="' + ICON_SRC + '" alt="VidVora" class="app-icon-badge" />' +
+              '<div class="app-title-block">' +
+                '<img src="' + LOGO_SRC + '" alt="VidVora" class="app-wordmark" />' +
+                '<p>' + esc(state.creator.name) + ' • ' + esc(state.creator.referralCode) + '</p>' +
+              '</div>' +
+            '</button>' +
           '</div>' +
-          '<div class="role-badge">💰 Balance: ' + fmtInr(s.available) + '</div>' +
+          '<div class="app-header-right">' +
+            '<button class="icon-action-btn" onclick="openQuickControlsSheet()" aria-label="Quick Actions">' + KEY_SVG + '</button>' +
+            '<button class="header-pill-btn cyan" onclick="openWithdrawModal()">' + fmtInr(s.available) + '</button>' +
+          '</div>' +
         '</div>' +
         '<div class="tabs">' +
-          '<button class="tab-btn ' + (state.creatorTab === "wallet" ? "active" : "") + '" onclick="setCreatorTab(\\'wallet\\')">💰 Wallet &amp; Earnings</button>' +
-          '<button class="tab-btn ' + (state.creatorTab === "videos" ? "active" : "") + '" onclick="setCreatorTab(\\'videos\\')">🎞️ My Videos <span class="badge-count">' + state.videos.length + '</span></button>' +
-          '<button class="tab-btn ' + (state.creatorTab === "refer" ? "active" : "") + '" onclick="setCreatorTab(\\'refer\\')">🤝 Refer &amp; Earn 7% <span class="badge-count">' + state.referrals.length + '</span></button>' +
-          '<button class="tab-btn ' + (state.creatorTab === "withdrawals" ? "active" : "") + '" onclick="setCreatorTab(\\'withdrawals\\')">💸 Withdrawals ' + (pendingPayoutsCount ? '<span class="badge-count">' + pendingPayoutsCount + '</span>' : '') + '</button>' +
-          '<button class="tab-btn ' + (state.creatorTab === "extras" ? "active" : "") + '" onclick="setCreatorTab(\\'extras\\')">🎁 Events &amp; Support</button>' +
+          '<button class="tab-btn ' + (state.creatorTab === "wallet" ? "active" : "") + '" onclick="setCreatorTab(\\'wallet\\')">💰 Wallet</button>' +
+          '<button class="tab-btn ' + (state.creatorTab === "videos" ? "active" : "") + '" onclick="setCreatorTab(\\'videos\\')">🎞️ Videos <span class="badge-count">' + state.videos.length + '</span></button>' +
+          '<button class="tab-btn ' + (state.creatorTab === "refer" ? "active" : "") + '" onclick="setCreatorTab(\\'refer\\')">🤝 Refer 7% <span class="badge-count">' + state.referrals.length + '</span></button>' +
+          '<button class="tab-btn ' + (state.creatorTab === "withdrawals" ? "active" : "") + '" onclick="setCreatorTab(\\'withdrawals\\')">💸 Payouts ' + (pendingPayoutsCount ? '<span class="badge-count">' + pendingPayoutsCount + '</span>' : '') + '</button>' +
+          '<button class="tab-btn ' + (state.creatorTab === "extras" ? "active" : "") + '" onclick="setCreatorTab(\\'extras\\')">🎁 Support</button>' +
         '</div>' +
         '<div class="content">';
 
       if (state.announcement) {
-        html += '<div class="banner-announce"><span>📢 ' + esc(state.announcement) + '</span><span class="pill pill-cyan">LIVE</span></div>';
+        html += '<div class="banner-announce"><span>📢 ' + esc(state.announcement) + '</span><span class="pill pill-cyan">NEW</span></div>';
       }
 
       if (state.creatorTab === "wallet") {
@@ -1272,23 +1562,20 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
         html +=
           '<div class="card card-glow-green" style="display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap;">' +
             '<div>' +
-              '<div class="kpi-label text-green">Available Balance (Ready for UPI Withdrawal)</div>' +
+              '<div class="kpi-label text-green">Available Balance</div>' +
               '<div class="kpi-val text-green" style="font-size:32px;">' + fmtInr(s.available) + '</div>' +
-              '<div class="kpi-sub">Total Earning (' + fmtInr(s.total) + ') = Own Views (' + fmtInr(s.own) + ') + 7% Referral Bonus (' + fmtInr(s.ref) + ') • Paid: ' + fmtInr(s.paidAmt) + (s.pendingAmt > 0 ? ' • Pending: ' + fmtInr(s.pendingAmt) : '') + '</div>' +
+              '<div class="kpi-sub">Own Views (' + fmtInr(s.own) + ') + 7% Referral (' + fmtInr(s.ref) + ') • Paid: ' + fmtInr(s.paidAmt) + (s.pendingAmt > 0 ? ' • Pending: ' + fmtInr(s.pendingAmt) : '') + '</div>' +
             '</div>' +
-            '<div style="display:flex; gap:8px; flex-wrap:wrap;">' +
-              '<button class="btn btn-green btn-lg" onclick="openWithdrawModal()">💸 Withdraw via UPI</button>' +
-              '<button class="btn btn-cyan" onclick="addDemoViews(5000)">⚡ +5K Demo Views</button>' +
-            '</div>' +
+            '<button class="btn btn-green btn-lg" style="flex-shrink:0;" onclick="openWithdrawModal()">💸 Withdraw via UPI</button>' +
           '</div>' +
           '<div class="grid grid-4">' +
-            '<div class="card card-glow-cyan"><div class="kpi-label">Total Views</div><div class="kpi-val text-cyan">' + fmtNum(state.creator.views) + '</div><div class="kpi-sub">Rate: ₹' + CPM_PER_1000 + ' / 1,000 views</div></div>' +
-            '<div class="card"><div class="kpi-label">Own Views Earning</div><div class="kpi-val">' + fmtInr(s.own) + '</div><div class="kpi-sub">100% creator share</div></div>' +
-            '<div class="card card-glow-purple"><div class="kpi-label">Referral Bonus (7%)</div><div class="kpi-val text-purple">' + fmtInr(s.ref) + '</div><div class="kpi-sub">Admin-funded • 0% cut</div></div>' +
-            '<div class="card card-glow-gold"><div class="kpi-label">Total Earning</div><div class="kpi-val text-gold">' + fmtInr(s.total) + '</div><div class="kpi-sub">Unified single wallet</div></div>' +
+            '<div class="card card-glow-cyan"><div class="kpi-label">Total Views</div><div class="kpi-val text-cyan">' + fmtNum(state.creator.views) + '</div><div class="kpi-sub">₹' + CPM_PER_1000 + ' / 1K views</div></div>' +
+            '<div class="card"><div class="kpi-label">Own Earning</div><div class="kpi-val">' + fmtInr(s.own) + '</div><div class="kpi-sub">100% creator share</div></div>' +
+            '<div class="card card-glow-purple"><div class="kpi-label">Referral (7%)</div><div class="kpi-val text-purple">' + fmtInr(s.ref) + '</div><div class="kpi-sub">Admin-funded bonus</div></div>' +
+            '<div class="card card-glow-gold"><div class="kpi-label">Total Earned</div><div class="kpi-val text-gold">' + fmtInr(s.total) + '</div><div class="kpi-sub">Unified wallet</div></div>' +
           '</div>' +
           '<div class="card">' +
-            '<div class="section-head"><div class="section-title">📈 Last 7 Days Earnings Performance</div><span class="pill pill-cyan">Live Updates</span></div>' +
+            '<div class="section-head"><div class="section-title">📈 Last 7 Days Earnings</div><span class="pill pill-cyan">Live</span></div>' +
             '<div class="chart-bars">' +
               state.creator.dailyBars.map((b) => {
                 const hPct = Math.max(10, Math.round((b.amt / maxAmt) * 100));
@@ -1301,20 +1588,19 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       if (state.creatorTab === "videos") {
         html +=
           '<div class="section-head">' +
-            '<div class="section-title">🎞️ Uploaded Videos &amp; Share Links</div>' +
-            '<button class="btn btn-cyan" onclick="openUploadModal()">+ Upload Video / Get Link</button>' +
+            '<div class="section-title">🎞️ My Videos &amp; Share Links</div>' +
+            '<button class="btn btn-cyan" onclick="openUploadModal()">+ Upload Video</button>' +
           '</div>' +
           '<div class="list">' +
             state.videos.map((v, idx) =>
               '<div class="item-row">' +
                 '<div class="item-main">' +
                   '<div class="item-title">🎬 ' + esc(v.title) + ' <span class="pill pill-cyan">' + esc(v.code) + '</span></div>' +
-                  '<div class="item-meta">' + esc(v.sizeLabel) + ' • 👁️ <b>' + fmtNum(v.views) + ' views</b> • 💰 <b class="text-green">' + fmtInr(v.earning) + '</b> • ' + esc(v.createdAt) + '</div>' +
+                  '<div class="item-meta">' + esc(v.sizeLabel) + ' • 👁️ <b>' + fmtNum(v.views) + '</b> • 💰 <b class="text-green">' + fmtInr(v.earning) + '</b> • ' + esc(v.createdAt) + '</div>' +
                 '</div>' +
                 '<div class="item-actions">' +
                   '<button class="btn btn-sm" onclick="openPlayerPreview(\\'' + esc(v.id) + '\\')">▶️ Play</button>' +
-                  '<button class="btn btn-sm btn-cyan" onclick="addDemoViews(1000, ' + idx + ')">+1K Views</button>' +
-                  '<button class="btn btn-sm btn-gold" onclick="copyText(\\'' + esc(SHARE_BASE + v.code) + '\\', \\'Share Link\\')">📋 Copy Link</button>' +
+                  '<button class="btn btn-sm btn-gold" onclick="copyText(\\'' + esc(SHARE_BASE + v.code) + '\\', \\'Share Link\\')">📋 Share</button>' +
                 '</div>' +
               '</div>'
             ).join("") +
@@ -1333,22 +1619,22 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
         html +=
           '<div class="card card-glow-purple">' +
             '<div class="section-head">' +
-              '<div><div class="section-title">🤝 Refer &amp; Earn 7% Lifetime Bonus</div><div class="kpi-sub">Admin ke taraf se 7% extra bonus milta hai — referred creator ki earning ya views se ₹1 bhi nahi katta!</div></div>' +
-              '<span class="pill pill-purple">ADMIN-FUNDED 7%</span>' +
+              '<div><div class="section-title">🤝 Refer &amp; Earn 7% Lifetime</div><div class="kpi-sub">Admin ke taraf se 7% extra bonus — referred creator ki earning se ₹1 nahi katta!</div></div>' +
+              '<span class="pill pill-purple">7% BONUS</span>' +
             '</div>' +
             '<div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-top:10px;">' +
               '<div class="code-box">' + esc(state.creator.referralCode) + '</div>' +
               '<div style="display:flex; gap:8px; flex-wrap:wrap;">' +
-                '<button class="btn btn-cyan" onclick="copyText(\\'' + esc(state.creator.referralCode) + '\\', \\'Referral Code\\')">📋 Copy Code</button>' +
-                '<button class="btn btn-gold" onclick="copyText(\\'Join VidVora Creator using my code ' + esc(state.creator.referralCode) + '\\', \\'Invite Message\\')">📤 Share Invite</button>' +
+                '<button class="btn btn-cyan" onclick="copyText(\\'' + esc(state.creator.referralCode) + '\\', \\'Referral Code\\')">📋 Copy</button>' +
+                '<button class="btn btn-gold" onclick="copyText(\\'Join VidVora Creator using code ' + esc(state.creator.referralCode) + '\\', \\'Invite\\')">📤 Invite</button>' +
               '</div>' +
             '</div>' +
           '</div>' +
           '<div class="grid grid-4">' +
-            '<div class="card"><div class="kpi-label">Total Referred</div><div class="kpi-val">' + state.referrals.length + '</div></div>' +
+            '<div class="card"><div class="kpi-label">Referred</div><div class="kpi-val">' + state.referrals.length + '</div></div>' +
             '<div class="card card-glow-green"><div class="kpi-label">Successful</div><div class="kpi-val text-green">' + successCount + '</div></div>' +
             '<div class="card card-glow-gold"><div class="kpi-label">Pending</div><div class="kpi-val text-gold">' + pendingCount + '</div></div>' +
-            '<div class="card card-glow-purple"><div class="kpi-label">7% Bonus Earned</div><div class="kpi-val text-purple">' + fmtInr(s.ref) + '</div></div>' +
+            '<div class="card card-glow-purple"><div class="kpi-label">7% Bonus</div><div class="kpi-val text-purple">' + fmtInr(s.ref) + '</div></div>' +
           '</div>' +
           '<div style="display:flex; gap:7px; flex-wrap:wrap;">' +
             '<button class="btn btn-sm ' + (state.refFilter === "all" ? "btn-cyan" : "") + '" onclick="setRefFilter(\\'all\\')">All (' + state.referrals.length + ')</button>' +
@@ -1360,10 +1646,7 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
               '<div class="item-row">' +
                 '<div class="item-main">' +
                   '<div class="item-title">👤 ' + esc(r.name) + ' ' + (r.status === "SUCCESSFUL" ? '<span class="pill pill-green">✅ Successful</span>' : '<span class="pill pill-gold">⏳ Pending</span>') + '</div>' +
-                  '<div class="item-meta">Views: <b>' + fmtNum(r.views) + '</b> • Unki Earning: <b>' + fmtInr(r.ownEarning) + '</b> (0% cut) • Aapka 7% Bonus: <b class="text-purple">+' + fmtInr(r.bonusToReferrer) + '</b></div>' +
-                '</div>' +
-                '<div class="item-actions">' +
-                  '<button class="btn btn-sm btn-purple" onclick="simulateReferredViews(5000, \\'' + esc(r.id) + '\\')">⚡ +5K Views (+7% Bonus)</button>' +
+                  '<div class="item-meta">Views: <b>' + fmtNum(r.views) + '</b> • Earning: <b>' + fmtInr(r.ownEarning) + '</b> • 7% Bonus: <b class="text-purple">+' + fmtInr(r.bonusToReferrer) + '</b></div>' +
                 '</div>' +
               '</div>'
             ).join("") +
@@ -1373,8 +1656,8 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       if (state.creatorTab === "withdrawals") {
         html +=
           '<div class="section-head">' +
-            '<div class="section-title">💸 Withdrawal &amp; Payout History</div>' +
-            '<button class="btn btn-green" onclick="openWithdrawModal()">+ New UPI Withdrawal</button>' +
+            '<div class="section-title">💸 Withdrawal History</div>' +
+            '<button class="btn btn-green" onclick="openWithdrawModal()">+ Withdraw UPI</button>' +
           '</div>' +
           '<div class="list">' +
             state.payouts.map((p) => {
@@ -1385,7 +1668,6 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
                   '<div class="item-title">' + fmtInr(p.amount) + ' → ' + esc(p.upiId) + ' <span class="pill ' + pillCls + '">' + pillLbl + '</span></div>' +
                   '<div class="item-meta">ID: ' + esc(p.id) + ' • ' + esc(p.createdAt) + ' • UTR: <b>' + esc(p.utr) + '</b></div>' +
                 '</div>' +
-                (p.status === "PENDING" ? '<div class="item-actions"><button class="btn btn-sm btn-gold" onclick="setMode(\\'admin\\'); setAdminTab(\\'payouts\\');">🛡️ Approve in Admin Panel →</button></div>' : '') +
               '</div>';
             }).join("") +
           '</div>';
@@ -1393,7 +1675,7 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
 
       if (state.creatorTab === "extras") {
         html +=
-          '<div class="section-title">🎁 Active Creator Events &amp; Milestone Gifts</div>' +
+          '<div class="section-title">🎁 Active Creator Events</div>' +
           '<div class="grid grid-2">' +
             state.events.map((e) =>
               '<div class="card card-glow-gold">' +
@@ -1404,7 +1686,7 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
             ).join("") +
           '</div>' +
           '<div class="card">' +
-            '<div class="section-title" style="margin-bottom:10px;">💬 Live Admin Support Chat</div>' +
+            '<div class="section-title" style="margin-bottom:10px;">💬 Live Admin Support</div>' +
             '<div class="list" style="margin-bottom:10px;">' +
               state.supportMessages.map((m) =>
                 '<div class="item-row" style="border-color:' + (m.sender === "ADMIN" ? "rgba(0,229,255,0.35)" : "var(--border)") + ';">' +
@@ -1429,25 +1711,33 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
 
       let html =
         '<div class="app-header">' +
-          '<div class="app-title-block">' +
-            '<h1>🛡️ Administrator Panel</h1>' +
-            '<p style="color:var(--gold);">Superadmin Full Management Mode</p>' +
+          '<div class="app-header-left">' +
+            '<button class="app-logo-trigger" onclick="openQuickControlsSheet()" title="Switch Panel / Quick Actions">' +
+              '<img src="' + ICON_SRC + '" alt="VidVora" class="app-icon-badge" />' +
+              '<div class="app-title-block">' +
+                '<h1>Administrator Panel</h1>' +
+                '<p>Superadmin Full Access</p>' +
+              '</div>' +
+            '</button>' +
           '</div>' +
-          '<div class="role-badge admin">👑 Role: Superadmin</div>' +
+          '<div class="app-header-right">' +
+            '<button class="icon-action-btn" onclick="openQuickControlsSheet()" aria-label="Quick Actions">' + KEY_SVG + '</button>' +
+            '<button class="header-pill-btn" onclick="setMode(\\'creator\\')">Logout</button>' +
+          '</div>' +
         '</div>' +
+        '<div class="role-strip"><span>🛡️ Role: admin • Superadmin Full Management Mode</span></div>' +
         '<div class="tabs">' +
-          '<button class="tab-btn ' + (state.adminTab === "payouts" ? "active-gold" : "") + '" onclick="setAdminTab(\\'payouts\\')">💳 Payout Queue <span class="badge-count">' + pendingPayouts.length + '</span></button>' +
-          '<button class="tab-btn ' + (state.adminTab === "creators" ? "active-gold" : "") + '" onclick="setAdminTab(\\'creators\\')">👥 Creators &amp; Credit <span class="badge-count">' + (state.referrals.length + 1) + '</span></button>' +
+          '<button class="tab-btn ' + (state.adminTab === "payouts" ? "active-gold" : "") + '" onclick="setAdminTab(\\'payouts\\')">💳 Payouts <span class="badge-count">' + pendingPayouts.length + '</span></button>' +
+          '<button class="tab-btn ' + (state.adminTab === "creators" ? "active-gold" : "") + '" onclick="setAdminTab(\\'creators\\')">👥 Creators <span class="badge-count">' + (state.referrals.length + 1) + '</span></button>' +
           '<button class="tab-btn ' + (state.adminTab === "installs" ? "active-gold" : "") + '" onclick="setAdminTab(\\'installs\\')">📱 Installs <span class="badge-count">' + state.installs.downloaded + '</span></button>' +
-          '<button class="tab-btn ' + (state.adminTab === "broadcast" ? "active-gold" : "") + '" onclick="setAdminTab(\\'broadcast\\')">📢 Broadcast &amp; Support</button>' +
+          '<button class="tab-btn ' + (state.adminTab === "broadcast" ? "active-gold" : "") + '" onclick="setAdminTab(\\'broadcast\\')">🔔 Notify</button>' +
         '</div>' +
         '<div class="content">';
 
       if (state.adminTab === "payouts") {
         html +=
           '<div class="section-head">' +
-            '<div class="section-title">💳 Creator UPI Withdrawal Queue</div>' +
-            '<button class="btn btn-cyan btn-sm" onclick="setMode(\\'creator\\'); setCreatorTab(\\'withdrawals\\');">← Switch to Creator Panel</button>' +
+            '<div class="section-title">💳 UPI Withdrawal Queue</div>' +
           '</div>' +
           '<div class="list">' +
             state.payouts.map((p) => {
@@ -1460,8 +1750,8 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
                 '</div>' +
                 (isPend
                   ? '<div class="item-actions">' +
-                      '<button class="btn btn-sm btn-green" onclick="approvePayout(\\'' + esc(p.id) + '\\')">✅ Approve &amp; Mark Paid</button>' +
-                      '<button class="btn btn-sm btn-red" onclick="rejectPayout(\\'' + esc(p.id) + '\\')">❌ Reject &amp; Refund</button>' +
+                      '<button class="btn btn-sm btn-green" onclick="approvePayout(\\'' + esc(p.id) + '\\')">✅ Approve &amp; Pay</button>' +
+                      '<button class="btn btn-sm btn-red" onclick="rejectPayout(\\'' + esc(p.id) + '\\')">❌ Reject</button>' +
                     '</div>'
                   : '') +
               '</div>';
@@ -1473,29 +1763,29 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
         const s = getCreatorSummary();
         html +=
           '<div class="section-head">' +
-            '<div class="section-title">👥 Manage Creators &amp; Direct Views/Earning Credit</div>' +
-            '<button class="btn btn-gold" onclick="openAddCreatorModal()">+ Add New Creator</button>' +
+            '<div class="section-title">👥 Creators &amp; Direct Credit</div>' +
+            '<button class="btn btn-cyan" onclick="openAddCreatorModal()">+ Add Creator</button>' +
           '</div>' +
           '<div class="list">' +
             '<div class="item-row" style="border-color:rgba(0,229,255,0.4);">' +
               '<div class="item-main">' +
-                '<div class="item-title">⭐ ' + esc(state.creator.name) + ' <span class="pill pill-cyan">Main Demo Creator</span></div>' +
-                '<div class="item-meta">Views: <b>' + fmtNum(state.creator.views) + '</b> • Own: <b>' + fmtInr(s.own) + '</b> • 7% Ref Bonus: <b class="text-purple">' + fmtInr(s.ref) + '</b> • Available: <b class="text-green">' + fmtInr(s.available) + '</b></div>' +
+                '<div class="item-title">⭐ ' + esc(state.creator.name) + ' <span class="pill pill-cyan">Active Creator</span></div>' +
+                '<div class="item-meta">Views: <b>' + fmtNum(state.creator.views) + '</b> • Own: <b>' + fmtInr(s.own) + '</b> • 7% Ref: <b class="text-purple">' + fmtInr(s.ref) + '</b> • Avl: <b class="text-green">' + fmtInr(s.available) + '</b></div>' +
               '</div>' +
               '<div class="item-actions">' +
                 '<button class="btn btn-sm btn-cyan" onclick="addDemoViews(5000)">+5K Views</button>' +
-                '<button class="btn btn-sm btn-gold" onclick="addDemoEarning(500)">+₹500 Credit</button>' +
+                '<button class="btn btn-sm btn-gold" onclick="addDemoEarning(500)">+₹500</button>' +
               '</div>' +
             '</div>' +
             state.referrals.map((r) =>
               '<div class="item-row">' +
                 '<div class="item-main">' +
-                  '<div class="item-title">👤 ' + esc(r.name) + ' <span class="pill ' + (r.status === "SUCCESSFUL" ? "pill-green" : "pill-gold") + '">' + esc(r.status) + '</span> <span class="pill pill-purple">Referred by Rohan</span></div>' +
-                  '<div class="item-meta">Views: <b>' + fmtNum(r.views) + '</b> • Earning: <b>' + fmtInr(r.ownEarning) + '</b> • Auto 7% Bonus Paid by Admin: <b class="text-purple">' + fmtInr(r.bonusToReferrer) + '</b></div>' +
+                  '<div class="item-title">👤 ' + esc(r.name) + ' <span class="pill ' + (r.status === "SUCCESSFUL" ? "pill-green" : "pill-gold") + '">' + esc(r.status) + '</span> <span class="pill pill-purple">Ref: Rohan</span></div>' +
+                  '<div class="item-meta">Views: <b>' + fmtNum(r.views) + '</b> • Earning: <b>' + fmtInr(r.ownEarning) + '</b> • 7% Bonus: <b class="text-purple">' + fmtInr(r.bonusToReferrer) + '</b></div>' +
                 '</div>' +
                 '<div class="item-actions">' +
-                  (r.status === "PENDING" ? '<button class="btn btn-sm btn-green" onclick="approveReferredCreator(\\'' + esc(r.id) + '\\')">✅ Approve Creator</button>' : '') +
-                  '<button class="btn btn-sm btn-purple" onclick="simulateReferredViews(5000, \\'' + esc(r.id) + '\\')">⚡ Add +5K Views (+7% Auto)</button>' +
+                  (r.status === "PENDING" ? '<button class="btn btn-sm btn-green" onclick="approveReferredCreator(\\'' + esc(r.id) + '\\')">✅ Approve</button>' : '') +
+                  '<button class="btn btn-sm btn-purple" onclick="simulateReferredViews(5000, \\'' + esc(r.id) + '\\')">+5K Views (+7%)</button>' +
                 '</div>' +
               '</div>'
             ).join("") +
@@ -1505,26 +1795,27 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       if (state.adminTab === "installs") {
         html +=
           '<div class="grid grid-3">' +
-            '<div class="card card-glow-cyan"><div class="kpi-label">Downloaded (All-Time)</div><div class="kpi-val text-cyan">' + fmtNum(state.installs.downloaded) + '</div><div class="kpi-sub">1 Device = 1 Install</div></div>' +
-            '<div class="card card-glow-green"><div class="kpi-label">Installed (Active)</div><div class="kpi-val text-green">' + fmtNum(state.installs.installed) + '</div><div class="kpi-sub">Real Android devices</div></div>' +
-            '<div class="card"><div class="kpi-label">Uninstalled</div><div class="kpi-val text-red">' + fmtNum(state.installs.uninstalled) + '</div><div class="kpi-sub">Inactive &gt;' + state.inactivityDays + 'd</div></div>' +
+            '<div class="card card-glow-cyan kpi-tile-center"><div class="kpi-tile-icon text-cyan">⬇️</div><div class="kpi-val text-cyan">' + fmtNum(state.installs.downloaded) + '</div><div class="kpi-label">DOWNLOADED</div><div class="kpi-sub">Total Installs</div></div>' +
+            '<div class="card card-glow-green kpi-tile-center"><div class="kpi-tile-icon text-green">✅</div><div class="kpi-val text-green">' + fmtNum(state.installs.installed) + '</div><div class="kpi-label">INSTALLED</div><div class="kpi-sub">Active Devices</div></div>' +
+            '<div class="card card-glow-red kpi-tile-center"><div class="kpi-tile-icon text-red">✖️</div><div class="kpi-val text-red">' + fmtNum(state.installs.uninstalled) + '</div><div class="kpi-label">UNINSTALLED</div><div class="kpi-sub">Inactive &gt;' + state.inactivityDays + 'd</div></div>' +
           '</div>' +
           '<div class="card">' +
-            '<div class="section-head"><div class="section-title">Active Retention Rate</div><div class="text-green" style="font-weight:900; font-size:17px;">' + retPct + '%</div></div>' +
+            '<div class="section-head"><div class="section-title">Active Retention Rate</div><div class="text-green" style="font-weight:900; font-size:16px;">' + retPct + '%</div></div>' +
             '<div class="progress-track"><div class="progress-fill" style="width:' + retPct + '%;"></div></div>' +
             '<div class="grid grid-2" style="margin-top:12px;">' +
-              '<div class="card card-glow-gold"><div class="kpi-label text-gold">NEW TODAY (24H)</div><div class="kpi-val">' + fmtNum(state.installs.new24h) + '</div></div>' +
+              '<div class="card card-glow-cyan"><div class="kpi-label text-cyan">NEW TODAY (24H)</div><div class="kpi-val">' + fmtNum(state.installs.new24h) + '</div></div>' +
               '<div class="card card-glow-green"><div class="kpi-label text-green">ACTIVE TODAY (24H)</div><div class="kpi-val">' + fmtNum(state.installs.active24h) + '</div></div>' +
             '</div>' +
-            '<div style="display:flex; gap:8px; margin-top:12px;">' +
-              [7, 14, 30].map((d) => '<button class="btn ' + (state.inactivityDays === d ? "btn-gold" : "") + '" onclick="setInactivityDays(' + d + ')">' + d + ' Days Window</button>').join("") +
+            '<div class="kpi-label" style="margin-top:12px; margin-bottom:8px;">Uninstall Detection Window</div>' +
+            '<div style="display:grid; grid-template-columns:repeat(3,1fr); gap:8px;">' +
+              [7, 14, 30].map((d) => '<button class="btn ' + (state.inactivityDays === d ? "btn-cyan" : "") + '" onclick="setInactivityDays(' + d + ')">' + d + ' Days</button>').join("") +
             '</div>' +
           '</div>' +
           '<div class="list">' +
             state.installs.devices.map((d) =>
               '<div class="item-row">' +
                 '<div class="item-main"><div class="item-title">📱 ' + esc(d.name) + ' <span class="pill ' + (d.active ? "pill-green" : "pill-red") + '">' + (d.active ? "Installed" : "Uninstalled") + '</span></div>' +
-                '<div class="item-meta">' + esc(d.android) + ' • ' + esc(d.ver) + ' • Sessions: ' + d.sessions + ' • Last active: ' + esc(d.lastSeen) + '</div></div>' +
+                '<div class="item-meta">' + esc(d.android) + ' • ' + esc(d.ver) + ' • Sessions: ' + d.sessions + ' • ' + esc(d.lastSeen) + '</div></div>' +
               '</div>'
             ).join("") +
           '</div>';
@@ -1533,22 +1824,22 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
       if (state.adminTab === "broadcast") {
         html +=
           '<div class="card">' +
-            '<div class="section-title" style="margin-bottom:10px;">📢 Publish Live Creator Announcement</div>' +
+            '<div class="section-title" style="margin-bottom:10px;">📢 Publish Creator Announcement</div>' +
             '<div style="display:flex; gap:8px; flex-wrap:wrap;">' +
               '<input id="adminBroadcastInp" class="input" style="flex:1; min-width:200px;" value="' + esc(state.announcement) + '" />' +
-              '<button class="btn btn-gold" onclick="updateBroadcast()">📣 Push to All Creators</button>' +
+              '<button class="btn btn-cyan" onclick="updateBroadcast()">📣 Push Live</button>' +
             '</div>' +
           '</div>' +
           '<div class="card">' +
-            '<div class="section-title" style="margin-bottom:10px;">💬 Reply to Creator Support Chat</div>' +
+            '<div class="section-title" style="margin-bottom:10px;">💬 Support Chat Replies</div>' +
             '<div class="list" style="margin-bottom:10px;">' +
               state.supportMessages.map((m) =>
-                '<div class="item-row"><div class="item-main"><div class="item-title">' + (m.sender === "ADMIN" ? "🛡️ You (Admin)" : "👤 " + esc(state.creator.name)) + ' <span class="item-meta">' + esc(m.time) + '</span></div><div>' + esc(m.text) + '</div></div></div>'
+                '<div class="item-row"><div class="item-main"><div class="item-title">' + (m.sender === "ADMIN" ? "🛡️ Admin" : "👤 " + esc(state.creator.name)) + ' <span class="item-meta">' + esc(m.time) + '</span></div><div>' + esc(m.text) + '</div></div></div>'
               ).join("") +
             '</div>' +
             '<div style="display:flex; gap:8px;">' +
-              '<input id="adminSupportInp" class="input" placeholder="Admin reply likhein..." onkeydown="if(event.key===\\'Enter\\') sendSupportMsg(\\'ADMIN\\')" />' +
-              '<button class="btn btn-gold" onclick="sendSupportMsg(\\'ADMIN\\')">Reply</button>' +
+              '<input id="adminSupportInp" class="input" placeholder="Reply likhein..." onkeydown="if(event.key===\\'Enter\\') sendSupportMsg(\\'ADMIN\\')" />' +
+              '<button class="btn btn-cyan" onclick="sendSupportMsg(\\'ADMIN\\')">Reply</button>' +
             '</div>' +
           '</div>';
       }
@@ -1560,25 +1851,29 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
     function renderTelegramDemo() {
       const pendingHint =
         state.telegram.pendingAction === "header"
-          ? "Apna Header text ya channel link type karein..."
+          ? "Apna Header text ya channel link likhein..."
           : state.telegram.pendingAction === "footer"
-            ? "Apna Footer text ya channel link type karein..."
-            : "Message likhein ya neeche permanent buttons dabayein...";
+            ? "Apna Footer text ya channel link likhein..."
+            : "Message...";
 
       return (
         '<div class="app-header">' +
-          '<div class="app-title-block">' +
-            '<h1>🤖 VidVora Telegram Creator Bot</h1>' +
-            '<p>Zero Commands Needed • Bottom Persistent Buttons &amp; Custom Header/Footer</p>' +
+          '<div class="app-header-left">' +
+            '<button class="app-logo-trigger" onclick="openQuickControlsSheet()" title="Switch Panel">' +
+              '<img src="' + ICON_SRC + '" alt="VidVoraAllinOnebot" class="tg-avatar" />' +
+              '<div class="app-title-block">' +
+                '<h1>VidVoraAllinOnebot</h1>' +
+                '<p>bot • Creator Auto-Upload</p>' +
+              '</div>' +
+            '</button>' +
           '</div>' +
-          '<button class="btn btn-cyan" onclick="tgPressButton(\\'📤 Send Sample Video\\')">📤 Send Sample Video</button>' +
+          '<div class="app-header-right">' +
+            '<button class="icon-action-btn" onclick="openQuickControlsSheet()" aria-label="Quick Actions">' + KEY_SVG + '</button>' +
+            '<button class="header-pill-btn cyan" onclick="tgPressButton(\\'📤 Send Sample Video\\')">📤 Video</button>' +
+          '</div>' +
         '</div>' +
-        '<div class="content">' +
+        '<div class="content tg-content-wrap">' +
           '<div class="tg-chat">' +
-            '<div class="tg-top">' +
-              '<div><b>VidVoraAllinOnebot</b> <span style="font-size:11px; color:#38bdf8;">bot • online</span></div>' +
-              '<span class="pill pill-cyan">Supports 2 GB – 4 GB+ Videos</span>' +
-            '</div>' +
             '<div id="tgMessages" class="tg-messages">' +
               state.telegram.messages.map((m) =>
                 '<div class="tg-bubble ' + (m.from === "user" ? "tg-user" : "tg-bot") + '">' +
@@ -1611,14 +1906,17 @@ function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender
     function render() {
       const shell = document.getElementById("appShell");
       shell.classList.toggle("phone-mode", Boolean(state.phoneMode));
-      document.getElementById("layoutToggleBtn").textContent = state.phoneMode ? "💻 Laptop Wide View" : "📱 Phone Frame View";
+      const layoutBtn = document.getElementById("layoutToggleBtn");
+      if (layoutBtn) {
+        layoutBtn.textContent = state.phoneMode ? "💻 Wide View" : "📱 Mobile View";
+      }
 
       const mCr = document.getElementById("modeCreatorBtn");
       const mAd = document.getElementById("modeAdminBtn");
       const mTg = document.getElementById("modeTgBtn");
-      mCr.className = "seg-btn" + (state.mode === "creator" ? " active" : "");
-      mAd.className = "seg-btn" + (state.mode === "admin" ? " active-admin" : "");
-      mTg.className = "seg-btn" + (state.mode === "telegram" ? " active-tg" : "");
+      if (mCr) mCr.className = "seg-btn" + (state.mode === "creator" ? " active" : "");
+      if (mAd) mAd.className = "seg-btn" + (state.mode === "admin" ? " active-admin" : "");
+      if (mTg) mTg.className = "seg-btn" + (state.mode === "telegram" ? " active-tg" : "");
 
       const root = document.getElementById("appRoot");
       if (state.mode === "admin") {
