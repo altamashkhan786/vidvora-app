@@ -2,15 +2,14 @@
 
 - **App Name:** VidVora
 - **Package ID:** `com.aistudio.vidvora.vstr`
-- **Version:** `1.8` (`versionCode = 9`)
+- **Version:** `1.9` (`versionCode = 10`)
 - **APK File:** `release/vidvora.apk` (~34 MB)
-- **SHA-256:** `ea30d7d6f0cb66690e1bddb4b147b9ef880f22e6a94bd767a341bf9a2240908a`
-- **What's New in v1.8:**
-  - Improved AdMob Show Rate, Match Rate & eCPM (smarter deep-link interstitial timing, zero wasted background App Open / hidden Banner & Native requests, 50-min ad freshness)
-  - Fast Instant Video Start via Direct HTTP Range Streaming + Tuned ExoPlayer Buffers
-  - 1-Device-1-Install Deduplication + Automatic Emulator Exclusion
-  - Official VidVora APK Download Website (`/download` & `/download-apk`) with automatic release fallback
-  - Chrome Analytics Dashboard with Team Viewer Access & 512 MB RAM optimizations
+- **SHA-256:** `16e93c21f540372a2caa3f60e575db765c4b967c2ca6d24606fd6ec163b20a9b`
+- **What's New in v1.9:**
+  - Creator Referral Program ("Refer & Earn 7%") inside Creator Panel with unique Referral Code, Copy & Share Invite, Referred Creators list, Pending/Successful status filters, and 7% Admin-funded bonus (zero deduction from referred creators)
+  - Separate Own Views Earning vs Referral Bonus (7%) breakdown with unified Total Earning & Available Balance wallet for UPI withdrawal
+  - Optional Referral Code input during Creator Sign Up and Admin Add Member
+  - Includes all v1.8 improvements (AdMob eCPM/Show Rate optimization, Fast Instant Video Start, 1-Device-1-Install Tracking, Official APK Download Website)
 
 ## How to Use `release/vidvora.apk`
 

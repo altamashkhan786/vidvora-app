@@ -2,8 +2,8 @@ const fs = require("fs");
 const path = require("path");
 const { DEFAULT_APK_URL } = require("./sharePreview");
 
-const DEFAULT_APP_VERSION_NAME = "1.8";
-const DEFAULT_APP_VERSION_CODE = 9;
+const DEFAULT_APP_VERSION_NAME = "1.9";
+const DEFAULT_APP_VERSION_CODE = 10;
 const APP_UPDATE_DOC_ID = "appUpdate";
 const REMOTE_APK_PROBE_TTL_MS = 5 * 60 * 1000;
 const remoteApkProbeCache = new Map();
