@@ -1,6 +1,6 @@
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 const GEO_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours per IP
-const MAX_IP_GEO_CACHE = 10_000;
+const MAX_IP_GEO_CACHE = 2_500;
 const PROVIDER_COOLDOWN_MS = 5 * 60 * 1000; // 5 min cooldown if a provider rate-limits
 const MAX_DAILY_RETENTION_DAYS = 30;
 const MAX_STORED_COUNTRIES = 150;
@@ -636,6 +636,9 @@ function createViewGeoTracker({
     recordViewGeo,
     flushPending,
     getMergedGeoDoc,
+    clearIpCache() {
+      ipGeoCache.clear();
+    },
   };
 }
 

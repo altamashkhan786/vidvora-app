@@ -2309,7 +2309,7 @@ async function handleTelegramUpdate({
       const oldestKey = videoDocCache.keys().next().value;
       if (oldestKey) videoDocCache.delete(oldestKey);
     }
-    videoDocCache.set(videoId, { data: videoDocPayload, cachedAt: Date.now() });
+    videoDocCache.set(videoId, { data: compactVideoDocForStreamCache(videoDocPayload), cachedAt: Date.now() });
     cacheResolvedSourceVideo(db, rawToken, {
       found: true,
       isActive: true,
@@ -2501,7 +2501,7 @@ async function handleTelegramUpdate({
       }
       if (Object.keys(patch).length === 0) return;
       Object.assign(videoDocPayload, patch);
-      videoDocCache.set(videoId, { data: videoDocPayload, cachedAt: Date.now() });
+      videoDocCache.set(videoId, { data: compactVideoDocForStreamCache(videoDocPayload), cachedAt: Date.now() });
       cacheResolvedSourceVideo(db, rawToken, {
         found: true,
         isActive: true,
@@ -2613,15 +2613,27 @@ async function handleTelegramUpdate({
 }
 
 const STREAM_CACHE_DIR = path.join(os.tmpdir(), "vidvora-stream-cache");
-const MAX_STREAM_CACHE_FILES = 4;
-const MAX_STREAM_CACHE_BYTES = 45 * 1024 * 1024;
+const MAX_STREAM_CACHE_FILES = 3;
+const MAX_STREAM_CACHE_BYTES = 35 * 1024 * 1024;
 const VIDEO_DOC_CACHE_TTL_MS = 10 * 60 * 1000;
-const MAX_VIDEO_DOC_CACHE = 1000;
+const MAX_VIDEO_DOC_CACHE = 200;
 const videoDocCache = new Map();
 const inflightTelegramDownloads = new Map();
 const TELEGRAM_FILE_URL_CACHE_TTL_MS = 40 * 60 * 1000;
-const MAX_TELEGRAM_FILE_URL_CACHE = 500;
+const MAX_TELEGRAM_FILE_URL_CACHE = 200;
 const telegramFileUrlCache = new Map();
+
+function compactVideoDocForStreamCache(raw) {
+  if (!raw || typeof raw !== "object") return {};
+  // Strip heavy base64 thumbnailPath & large text blobs not needed for video streaming
+  const { thumbnailPath: _dropThumb, description: _dropDesc, ...rest } = raw;
+  return rest;
+}
+
+function clearTelegramRuntimeCaches() {
+  videoDocCache.clear();
+  telegramFileUrlCache.clear();
+}
 
 function parseHttpByteRange(rangeHeader, fileSize) {
   if (!rangeHeader || !Number.isFinite(fileSize) || fileSize <= 0) return null;
@@ -3241,7 +3253,7 @@ async function handleStreamPublicVideo({
       res.end("Forbidden: This video is deactivated or unavailable.");
       return;
     }
-    videoData = videoDoc.data() || {};
+    videoData = compactVideoDocForStreamCache(videoDoc.data() || {});
     if (videoDocCache.size >= MAX_VIDEO_DOC_CACHE) {
       const oldestKey = videoDocCache.keys().next().value;
       if (oldestKey) videoDocCache.delete(oldestKey);
@@ -3408,4 +3420,5 @@ module.exports = {
   handleTelegramUpdate,
   streamTelegramMtprotoWithRange,
   handleStreamPublicVideo,
+  clearTelegramRuntimeCaches,
 };

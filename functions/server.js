@@ -15,6 +15,7 @@ const {
   extractVidVoraShareTarget,
   isAllowedTelegramVideoMessage,
   telegramApiJson,
+  clearTelegramRuntimeCaches,
 } = require("./telegramBot");
 const {
   resolveFinanceBotRuntimeConfig,
@@ -23,6 +24,7 @@ const {
 const {
   handleSharePageRequest,
   handleShareThumbnailRequest,
+  clearThumbBufferCache,
 } = require("./sharePreview");
 const {
   isEmailTransportConfigured,
@@ -266,13 +268,24 @@ function sendJson(res, statusCode, payload, req = null) {
 }
 
 // Pre-serialized HTTP response buffer cache for GET /api/collection/:name
-// Prevents repeated 20-40MB JSON.stringify + object cloning on Render's 0.1 vCPU / 512MB RAM.
+// Tightly bounded (12 MB max) to prevent off-heap Buffer RSS spikes on Render 512 MB instances.
 const apiCollectionResponseCache = new Map(); // cacheKey -> { buf, bytes, structureVer, fullVer, builtAt }
 const apiCollectionInflight = new Map(); // cacheKey -> Promise<Buffer>
 let apiCollectionCacheTotalBytes = 0;
-const MAX_API_COLLECTION_CACHE_ENTRIES = 12;
-const MAX_API_COLLECTION_CACHE_BYTES = 48 * 1024 * 1024;
+const MAX_API_COLLECTION_CACHE_ENTRIES = 6;
+const MAX_API_COLLECTION_CACHE_BYTES = 12 * 1024 * 1024;
 const VIEW_COUNTER_SOFT_TTL_MS = 15_000;
+
+// Short-lived (20s) computed analytics cache + inflight dedupe so multiple Chrome tabs
+// never trigger redundant full-collection scans or V8 heap cloning spikes.
+const DASHBOARD_STATS_CACHE_TTL_MS = 20_000;
+const dashboardStatsCache = new Map(); // daysKey -> { stats, builtAt }
+const dashboardStatsInflight = new Map(); // daysKey -> Promise<stats>
+
+function clearApiCollectionBufferCache() {
+  apiCollectionResponseCache.clear();
+  apiCollectionCacheTotalBytes = 0;
+}
 
 function setApiCollectionBufferCache(cacheKey, buf, ver) {
   const prev = apiCollectionResponseCache.get(cacheKey);
@@ -676,10 +689,16 @@ const server = http.createServer(async (req, res) => {
 
     // 1. Lightweight backend status check
     if (req.method === "GET" && pathname === "/api/status") {
+      const mem = process.memoryUsage();
       sendJson(res, 200, {
         ok: true,
         databaseBackend: activeDbBackend,
         postgresActive: Boolean(pgDb),
+        memoryMb: {
+          rss: Math.round(mem.rss / (1024 * 1024)),
+          heapUsed: Math.round(mem.heapUsed / (1024 * 1024)),
+          external: Math.round(mem.external / (1024 * 1024)),
+        },
         cacheStats: pgDb && typeof pgDb.getCacheStats === "function" ? pgDb.getCacheStats() : null,
       }, req);
       return;
@@ -816,31 +835,63 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       try {
-        const daysParam = parseInt(urlObj.searchParams.get("days") || "14", 10);
-        const [installsSnap, videosSnap, membersSnap, withdrawalsSnap, geoStats] = await Promise.all([
-          db.collection("appInstalls").get(),
-          db.collection("videos").get(),
-          db.collection("members").get(),
-          db.collection("withdrawalRequests").get(),
-          viewGeoTracker.getMergedGeoDoc(db),
-        ]);
+        const rawDays = parseInt(urlObj.searchParams.get("days") || "14", 10);
+        const safeDays = [7, 14, 30].includes(rawDays) ? rawDays : 14;
+        const cacheKey = String(safeDays);
+        const nowMs = Date.now();
+        const cachedEntry = dashboardStatsCache.get(cacheKey);
 
-        const installs = installsSnap.docs.map((d) => ({ _id: d.id, ...(d.data() || {}) }));
-        const videos = videosSnap.docs.map((d) => ({ _id: d.id, ...(d.data() || {}) }));
-        const members = membersSnap.docs.map((d) => ({ _id: d.id, ...(d.data() || {}) }));
-        const withdrawals = withdrawalsSnap.docs.map((d) => ({ _id: d.id, ...(d.data() || {}) }));
+        let baseStats = null;
+        if (cachedEntry && nowMs - cachedEntry.builtAt < DASHBOARD_STATS_CACHE_TTL_MS) {
+          baseStats = cachedEntry.stats;
+        } else if (dashboardStatsInflight.has(cacheKey)) {
+          baseStats = await dashboardStatsInflight.get(cacheKey);
+        } else {
+          const computePromise = (async () => {
+            const readColFast = async (colName) => {
+              if (db && typeof db.getRawCollectionEntries === "function") {
+                const entries = await db.getRawCollectionEntries(colName);
+                // Pass lightweight shallow objects without deep-cloning base64 thumbnails
+                return entries.map((e) => {
+                  const r = e.raw || {};
+                  if (colName === "videos" && r.thumbnailPath) {
+                    const { thumbnailPath: _drop, ...slim } = r;
+                    return { _id: e.id, ...slim };
+                  }
+                  return { _id: e.id, ...r };
+                });
+              }
+              const snap = await db.collection(colName).get();
+              return snap.docs.map((d) => ({ _id: d.id, ...(d.data() || {}) }));
+            };
 
-        const stats = buildAdminDashboardStats({
-          installs,
-          videos,
-          members,
-          withdrawals,
-          geoStats,
-          days: daysParam,
-        });
-        stats.viewer = { role: session.role, label: session.label };
+            const [installs, videos, members, withdrawals, geoStats] = await Promise.all([
+              readColFast("appInstalls"),
+              readColFast("videos"),
+              readColFast("members"),
+              readColFast("withdrawalRequests"),
+              viewGeoTracker.getMergedGeoDoc(db),
+            ]);
+
+            const built = buildAdminDashboardStats({
+              installs,
+              videos,
+              members,
+              withdrawals,
+              geoStats,
+              days: safeDays,
+            });
+            dashboardStatsCache.set(cacheKey, { stats: built, builtAt: Date.now() });
+            return built;
+          })().finally(() => {
+            dashboardStatsInflight.delete(cacheKey);
+          });
+          dashboardStatsInflight.set(cacheKey, computePromise);
+          baseStats = await computePromise;
+        }
+
         res.setHeader("Cache-Control", "no-store");
-        sendJson(res, 200, stats, req);
+        sendJson(res, 200, { ...baseStats, viewer: { role: session.role, label: session.label } }, req);
       } catch (statsErr) {
         console.error("Admin dashboard stats error:", statsErr);
         sendJson(res, 500, { ok: false, error: statsErr?.message || "Failed to build analytics" });
@@ -1747,7 +1798,33 @@ server.listen(PORT, () => {
   startWordPressAutoPosterScheduler({ db, publicBaseUrl: bootPublicBase });
 });
 
+const MEMORY_SOFT_TRIM_RSS_BYTES = 340 * 1024 * 1024; // Trim soft caches at 340 MB (well below Render 512 MB limit)
+const memoryWatchTimer = setInterval(() => {
+  try {
+    const rss = process.memoryUsage().rss;
+    if (rss >= MEMORY_SOFT_TRIM_RSS_BYTES) {
+      const rssMb = Math.round(rss / (1024 * 1024));
+      clearApiCollectionBufferCache();
+      dashboardStatsCache.clear();
+      clearThumbBufferCache();
+      clearTelegramRuntimeCaches();
+      if (viewGeoTracker && typeof viewGeoTracker.clearIpCache === "function") {
+        viewGeoTracker.clearIpCache();
+      }
+      legacyStreamViewCache.clear();
+      if (pgDb && typeof pgDb.trimSoftCaches === "function") {
+        pgDb.trimSoftCaches();
+      }
+      console.warn(`Memory pressure guard triggered at ${rssMb} MB RSS — soft caches trimmed.`);
+    }
+  } catch (_) {}
+}, 45_000);
+if (typeof memoryWatchTimer.unref === "function") {
+  memoryWatchTimer.unref();
+}
+
 process.on("SIGTERM", () => {
+  clearInterval(memoryWatchTimer);
   viewGeoTracker
     .flushPending(db)
     .catch(() => {})

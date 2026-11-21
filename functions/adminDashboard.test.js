@@ -33,10 +33,15 @@ test("dashboard auth token signs, verifies, rejects tampering and expiry", () =>
 });
 
 test("emulator detection matches Android rules", () => {
+  const { toEpochMs } = require("./adminDashboard");
   assert.equal(isEmulatorDeviceLabel("Google sdk_gphone64_x86_64"), true);
   assert.equal(isEmulatorDeviceLabel("AOSP on IA Emulator"), true);
   assert.equal(isEmulatorDeviceLabel("Samsung SM-S918B"), false);
   assert.equal(isEmulatorDeviceLabel("Xiaomi Redmi Note 13"), false);
+  assert.equal(
+    toEpochMs({ __vidvora_ts__: "2026-11-20T12:00:00.000Z" }),
+    Date.UTC(2026, 10, 20, 12, 0, 0)
+  );
 });
 
 test("buildAdminDashboardStats computes installs, 24h views, daily series, and strips sensitive/heavy fields", () => {

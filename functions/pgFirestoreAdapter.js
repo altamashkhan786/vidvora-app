@@ -228,9 +228,9 @@ const DEFAULT_QUERY_CACHE_TTL_MS = Math.max(
   15_000,
   parseInt(process.env.PG_QUERY_CACHE_TTL_MS || String(3 * 60 * 1000), 10) || 3 * 60 * 1000
 );
-const MAX_FULL_CACHE_DOCS = 4000;
-const MAX_DOC_CACHE_ENTRIES = 2500;
-const MAX_QUERY_CACHE_ENTRIES = 400;
+const MAX_FULL_CACHE_DOCS = 2500;
+const MAX_DOC_CACHE_ENTRIES = 600;
+const MAX_QUERY_CACHE_ENTRIES = 100;
 
 function isFullCacheCollection(collectionName) {
   if (FULL_CACHE_COLLECTIONS.has(collectionName)) return true;
@@ -353,7 +353,6 @@ function createPgFirestoreDb({
   ) {
     bumpCollectionVersion(collectionName, isMinorCounterOnly);
     if (!enableCache) return;
-    setDocCacheEntry(collectionName, docId, true, nextData);
     const colEntry = collectionCache.get(collectionName);
     if (colEntry) {
       colEntry.docs.set(docId, nextData);
@@ -362,6 +361,10 @@ function createPgFirestoreDb({
       if (Number.isFinite(returnedUpdatedMs) && returnedUpdatedMs > 0) {
         colEntry.lastMaxUpdatedMs = Math.max(colEntry.lastMaxUpdatedMs || 0, returnedUpdatedMs);
       }
+      // Avoid duplicating full-cached collection docs into docCache (saves RAM)
+      docCache.delete(getDocCacheKey(collectionName, docId));
+    } else {
+      setDocCacheEntry(collectionName, docId, true, nextData);
     }
     invalidateQueryCacheForCollection(collectionName);
   }
@@ -369,12 +372,14 @@ function createPgFirestoreDb({
   function updateCachesAfterDelete(collectionName, docId) {
     bumpCollectionVersion(collectionName, false);
     if (!enableCache) return;
-    setDocCacheEntry(collectionName, docId, false, null);
     const colEntry = collectionCache.get(collectionName);
     if (colEntry) {
       colEntry.docs.delete(docId);
       colEntry.lastRowCount = colEntry.docs.size;
       colEntry.verifiedAt = Date.now();
+      docCache.delete(getDocCacheKey(collectionName, docId));
+    } else {
+      setDocCacheEntry(collectionName, docId, false, null);
     }
     invalidateQueryCacheForCollection(collectionName);
   }
@@ -907,6 +912,31 @@ function createPgFirestoreDb({
     getCollectionVersion(collectionName) {
       const v = collectionVersions.get(String(collectionName || "").trim());
       return v ? { structure: v.structure, full: v.full } : { structure: 0, full: 0 };
+    },
+    async getRawCollectionEntries(collectionName) {
+      const cleanName = String(collectionName || "").trim();
+      await ensureInitialized();
+      if (enableCache && isFullCacheCollection(cleanName)) {
+        const cachedCol = await ensureCollectionCached(cleanName);
+        if (cachedCol) {
+          stats.cacheHits += 1;
+          const entries = [];
+          for (const [id, raw] of cachedCol.docs.entries()) {
+            entries.push({ id, raw: raw || {} });
+          }
+          return entries;
+        }
+      }
+      stats.dbReads += 1;
+      const res = await pool.query(
+        `SELECT doc_id, data FROM vidvora_docs WHERE collection = $1`,
+        [cleanName]
+      );
+      return (res.rows || []).map((row) => ({ id: row.doc_id, raw: row.data || {} }));
+    },
+    trimSoftCaches() {
+      docCache.clear();
+      queryCache.clear();
     },
     clearCache() {
       collectionCache.clear();

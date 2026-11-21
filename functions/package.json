@@ -7,7 +7,7 @@
   },
   "main": "index.js",
   "scripts": {
-    "start": "node --max-old-space-size=256 server.js",
+    "start": "node --max-old-space-size=200 server.js",
     "test": "node --test telegramBot.test.js financeBot.test.js emailOtp.test.js pgFirestoreAdapter.test.js wpAutoPoster.test.js"
   },
   "dependencies": {

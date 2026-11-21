@@ -447,9 +447,16 @@ async function sendFallbackBanner(res, fallbackImagePath = DEFAULT_FALLBACK_BANN
   });
 }
 
-const TG_THUMB_CACHE_MAX = 200;
+const TG_THUMB_CACHE_MAX = 60;
+const TG_THUMB_CACHE_MAX_BYTES = 6 * 1024 * 1024; // 6 MB cap on off-heap thumbnail Buffers
 const TG_THUMB_CACHE_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
 const tgThumbBufferCache = new Map(); // fileId -> { buffer, contentType, cachedAt }
+let tgThumbCacheTotalBytes = 0;
+
+function clearThumbBufferCache() {
+  tgThumbBufferCache.clear();
+  tgThumbCacheTotalBytes = 0;
+}
 
 async function fetchTelegramThumbBuffer({ tgThumbFileId, resolveBotConfig }) {
   const cleanId = String(tgThumbFileId || "").trim();
@@ -458,6 +465,10 @@ async function fetchTelegramThumbBuffer({ tgThumbFileId, resolveBotConfig }) {
   const cached = tgThumbBufferCache.get(cleanId);
   if (cached && Date.now() - cached.cachedAt < TG_THUMB_CACHE_TTL_MS) {
     return { buffer: cached.buffer, contentType: cached.contentType };
+  }
+  if (cached) {
+    tgThumbCacheTotalBytes = Math.max(0, tgThumbCacheTotalBytes - (cached.buffer?.length || 0));
+    tgThumbBufferCache.delete(cleanId);
   }
 
   let botToken = String(process.env.TELEGRAM_BOT_TOKEN || "").trim();
@@ -494,11 +505,20 @@ async function fetchTelegramThumbBuffer({ tgThumbFileId, resolveBotConfig }) {
     const buffer = Buffer.from(await imgRes.arrayBuffer());
     if (buffer.length === 0) return null;
 
-    if (tgThumbBufferCache.size >= TG_THUMB_CACHE_MAX) {
-      const oldestKey = tgThumbBufferCache.keys().next().value;
-      if (oldestKey !== undefined) tgThumbBufferCache.delete(oldestKey);
+    if (buffer.length <= 512 * 1024) {
+      while (
+        tgThumbBufferCache.size >= TG_THUMB_CACHE_MAX ||
+        tgThumbCacheTotalBytes + buffer.length > TG_THUMB_CACHE_MAX_BYTES
+      ) {
+        const oldestKey = tgThumbBufferCache.keys().next().value;
+        if (oldestKey === undefined) break;
+        const oldest = tgThumbBufferCache.get(oldestKey);
+        tgThumbBufferCache.delete(oldestKey);
+        tgThumbCacheTotalBytes = Math.max(0, tgThumbCacheTotalBytes - (oldest?.buffer?.length || 0));
+      }
+      tgThumbBufferCache.set(cleanId, { buffer, contentType, cachedAt: Date.now() });
+      tgThumbCacheTotalBytes += buffer.length;
     }
-    tgThumbBufferCache.set(cleanId, { buffer, contentType, cachedAt: Date.now() });
     return { buffer, contentType };
   } catch (err) {
     console.warn("fetchTelegramThumbBuffer warning:", err?.message || err);
@@ -1113,4 +1133,5 @@ module.exports = {
   handleShareThumbnailRequest,
   handleSharePageRequest,
   buildShareHtml,
+  clearThumbBufferCache,
 };

@@ -54,6 +54,10 @@ function toEpochMs(value) {
       const ms = value.toMillis();
       return Number.isFinite(ms) ? ms : 0;
     }
+    if (typeof value.__vidvora_ts__ === "string") {
+      const parsed = Date.parse(value.__vidvora_ts__);
+      return Number.isFinite(parsed) ? parsed : 0;
+    }
     if (typeof value.__vidvora_ts_ms__ === "number" && Number.isFinite(value.__vidvora_ts_ms__)) {
       return value.__vidvora_ts_ms__;
     }
