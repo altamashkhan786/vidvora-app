@@ -1249,6 +1249,18 @@ const server = http.createServer(async (req, res) => {
           }
 
           const decodedData = decodeRestWritePayload(body.data || {}, useFirestoreSentinels);
+          if (colName === "appInstalls" && !subpath && (action === "merge" || action === "set")) {
+            if (!decodedData.firstInstalledAt) {
+              const existingSnap = await docRef.get().catch(() => null);
+              const existingData = existingSnap && existingSnap.exists ? existingSnap.data() || {} : null;
+              if (!existingData || !existingData.firstInstalledAt) {
+                decodedData.firstInstalledAt =
+                  existingData?.lastSeenAt ||
+                  decodedData.lastSeenAt ||
+                  (useFirestoreSentinels ? FieldValue.serverTimestamp() : new Date());
+              }
+            }
+          }
           if (action === "merge") {
             await docRef.set(decodedData, { merge: true });
           } else if (action === "update") {
@@ -1952,13 +1964,39 @@ server.timeout = 0;
 server.headersTimeout = 60_000;
 server.keepAliveTimeout = 65_000;
 
+async function backfillMissingAppInstallTimestamps() {
+  try {
+    const snap = await db.collection("appInstalls").get();
+    if (!snap || !Array.isArray(snap.docs) || snap.docs.length === 0) return;
+    let fixedCount = 0;
+    for (const doc of snap.docs) {
+      const data = doc.data() || {};
+      if (!data.firstInstalledAt && data.lastSeenAt) {
+        await db.collection("appInstalls").doc(doc.id).set({ firstInstalledAt: data.lastSeenAt }, { merge: true });
+        fixedCount += 1;
+      }
+    }
+    if (fixedCount > 0) {
+      clearApiCollectionBufferCache("appInstalls");
+      console.log(`Backfilled missing firstInstalledAt on ${fixedCount} appInstalls records.`);
+    }
+  } catch (err) {
+    console.warn("appInstalls firstInstalledAt backfill skipped:", err?.message || err);
+  }
+}
+
 server.listen(PORT, () => {
   console.log(`VidVora server listening on port ${PORT} (databaseBackend=${activeDbBackend})`);
   if (pgDb) {
     pgDb
       .ensureInitialized()
-      .then(() => console.log("PostgreSQL vidvora_docs schema ready."))
+      .then(() => {
+        console.log("PostgreSQL vidvora_docs schema ready.");
+        return backfillMissingAppInstallTimestamps();
+      })
       .catch((err) => console.error("PostgreSQL schema init warning:", err?.message || err));
+  } else {
+    backfillMissingAppInstallTimestamps();
   }
   autoRegisterTelegramWebhook();
   const bootPublicBase = (process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "")

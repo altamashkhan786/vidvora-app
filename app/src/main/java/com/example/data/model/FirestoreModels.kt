@@ -503,7 +503,10 @@ fun computeAppInstallStats(
   val uninstalledCount = realInstalls.count { isEstimatedUninstalled(it, safeDays, nowMs) }
   val currentlyInstalledCount = (totalDownloads - uninstalledCount).coerceAtLeast(0)
   val downloadsToday = realInstalls.count {
-    val age = nowMs - it.firstInstalledAt.toDate().time
+    val firstMs = it.firstInstalledAt.toDate().time
+    val lastMs = it.lastSeenAt.toDate().time
+    val effectiveFirstMs = minOf(firstMs, lastMs)
+    val age = nowMs - effectiveFirstMs
     age in 0L..dayMs
   }
   val activeLast24hCount = realInstalls.count {

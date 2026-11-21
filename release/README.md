@@ -4,7 +4,7 @@
 - **Package ID:** `com.aistudio.vidvora.vstr`
 - **Version:** `1.9` (`versionCode = 10`)
 - **APK File:** `release/vidvora.apk` (~34 MB)
-- **SHA-256:** `1e806d801063079243ad72d2108bbc04a21749e64c9e5bfde00fd52306b2acc7`
+- **SHA-256:** `72131b536722c721c099fb54c2a07478ab77d290ac18b1ac9b8e53656f458126`
 - **What's New in v1.9:**
   - Creator Referral Program ("Refer & Earn 7%") inside Creator Panel with unique Referral Code, Copy & Share Invite, Referred Creators list, Pending/Successful status filters, and 7% Admin-funded bonus (zero deduction from referred creators)
   - Separate Own Views Earning vs Referral Bonus (7%) breakdown with unified Total Earning & Available Balance wallet for UPI withdrawal

@@ -511,8 +511,8 @@ function buildAdminDashboardStats({
       continue;
     }
 
-    const firstInstalledAtMs = toEpochMs(raw.firstInstalledAt);
-    const lastSeenAtMs = toEpochMs(raw.lastSeenAt) || firstInstalledAtMs;
+    const lastSeenAtMs = toEpochMs(raw.lastSeenAt) || toEpochMs(raw.firstInstalledAt);
+    const firstInstalledAtMs = toEpochMs(raw.firstInstalledAt) || lastSeenAtMs;
     const isMarkedUninstalled = raw.isMarkedUninstalled === true;
     const isUninstalled =
       isMarkedUninstalled || (lastSeenAtMs > 0 && nowMs - lastSeenAtMs > UNINSTALLED_INACTIVITY_MS);

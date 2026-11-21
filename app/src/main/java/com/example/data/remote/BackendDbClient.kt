@@ -551,10 +551,12 @@ class BackendDbClient(
 
     fun parseAppInstall(doc: RemoteDoc): FirestoreAppInstall {
       val d = doc.data
+      val lastSeenAt = optTimestamp(d, "lastSeenAt", fallbackNow = true)
+      val firstInstalledAt = optNullableTimestamp(d, "firstInstalledAt") ?: lastSeenAt
       return FirestoreAppInstall(
         installId = optStringClean(d, "installId", doc.id).ifBlank { doc.id },
-        firstInstalledAt = optTimestamp(d, "firstInstalledAt", fallbackNow = true),
-        lastSeenAt = optTimestamp(d, "lastSeenAt", fallbackNow = true),
+        firstInstalledAt = firstInstalledAt,
+        lastSeenAt = lastSeenAt,
         appVersion = optStringClean(d, "appVersion", "1.0").ifBlank { "1.0" },
         deviceLabel = optStringClean(d, "deviceLabel", "Android Device").ifBlank { "Android Device" },
         androidVersion = optStringClean(d, "androidVersion", "Android").ifBlank { "Android" },

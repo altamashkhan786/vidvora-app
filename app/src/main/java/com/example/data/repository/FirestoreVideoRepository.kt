@@ -4363,11 +4363,19 @@ class FirestoreVideoRepository(
         // When syncing for the first time after an app reinstall/clear-data on the same phone,
         // check if this deterministic device record already exists so we preserve firstInstalledAt
         // and update the single device record instead of duplicating.
+        val existingDoc = if (!isServerSynced) {
+          backendDb.getDoc("appInstalls", installId)
+        } else {
+          null
+        }
         val existingOnServer = if (!isServerSynced) {
-          backendDb.getDoc("appInstalls", installId) != null
+          existingDoc?.first == true && existingDoc.second != null
         } else {
           true
         }
+        val missingFirstInstalled = existingOnServer && existingDoc?.second?.let { d ->
+          !d.has("firstInstalledAt") || d.isNull("firstInstalledAt")
+        } == true
         val pgPayload = mutableMapOf<String, Any?>(
           "installId" to installId,
           "lastSeenAt" to BackendDbClient.serverTimestampMarker(),
@@ -4380,6 +4388,9 @@ class FirestoreVideoRepository(
           pgPayload["firstInstalledAt"] = BackendDbClient.serverTimestampMarker()
           pgPayload["sessionCount"] = 1L
         } else {
+          if (missingFirstInstalled) {
+            pgPayload["firstInstalledAt"] = BackendDbClient.serverTimestampMarker()
+          }
           pgPayload["sessionCount"] = BackendDbClient.incrementMarker(1L)
         }
         val ok = backendDb.writeDoc("appInstalls", installId, "merge", pgPayload)
