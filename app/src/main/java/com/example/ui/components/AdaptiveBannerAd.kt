@@ -49,13 +49,15 @@ import com.google.android.gms.ads.LoadAdError
 import kotlinx.coroutines.delay
 
 private const val BANNER_TAG = "AdaptiveBannerAd"
-private const val MAX_BANNER_FAST_RETRIES = 4
+private const val MAX_BANNER_RETRIES = 1
 
 @Composable
 fun AdaptiveBannerAd(
   isAdFree: Boolean,
-  modifier: Modifier = Modifier
+  modifier: Modifier = Modifier,
+  enabled: Boolean = true
 ) {
+  if (!enabled) return
   val context = LocalContext.current
   val bannerAdUnitId = remember(context) { AdMobConfig.getBannerAdUnitId(context) }
   val isProductionUnit = remember(bannerAdUnitId) {
@@ -67,9 +69,8 @@ fun AdaptiveBannerAd(
   var retryAttempt by remember { mutableIntStateOf(0) }
 
   LaunchedEffect(adFailedToLoad, isSdkReady, retryAttempt) {
-    if (isSdkReady && adFailedToLoad) {
-      val delayMs = if (retryAttempt < MAX_BANNER_FAST_RETRIES) 6_000L else 35_000L
-      delay(delayMs)
+    if (isSdkReady && adFailedToLoad && retryAttempt < MAX_BANNER_RETRIES) {
+      delay(45_000L)
       isAdLoaded = false
       adFailedToLoad = false
       retryAttempt++

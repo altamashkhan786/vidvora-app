@@ -48,10 +48,14 @@ class AdManager(private val context: Context) {
   private var isInterstitialLoading = false
   private var isRewardedLoading = false
 
-  // Frequency capping counters for Interstitial Ads
+  // Frequency capping & request-hygiene counters
   private var navigationActionCount = 0
   private var lastInterstitialTimeMs = 0L
   private var lastFullscreenAdTimeMs = 0L
+  private var interstitialLoadedAtMs = 0L
+  private var rewardedLoadedAtMs = 0L
+  private var lastInterstitialFailMs = 0L
+  private var lastRewardedFailMs = 0L
   private var interstitialRetryAttempt = 0
   private var rewardedRetryAttempt = 0
 
@@ -91,13 +95,13 @@ class AdManager(private val context: Context) {
       if (!active) {
         adFreeUntilMs = 0L
         preloadInterstitial()
-        preloadRewarded()
-        if (AdMobConfig.isAppOpenConfigEnabled(appContext)) {
-          appOpenAdManager.loadAd()
-        }
       }
     }
     return active
+  }
+
+  private fun isAdStillFresh(loadedAtMs: Long, nowMs: Long = System.currentTimeMillis()): Boolean {
+    return loadedAtMs > 0L && (nowMs - loadedAtMs) < AD_FRESHNESS_MAX_MS
   }
 
   fun isFullScreenCooldownElapsed(nowMs: Long = System.currentTimeMillis()): Boolean {
@@ -106,6 +110,10 @@ class AdManager(private val context: Context) {
   }
 
   companion object {
+    private const val AD_FRESHNESS_MAX_MS = 50 * 60_000L // Discard unused ads before 60-min expiry
+    private const val FAILED_LOAD_COOLDOWN_MS = 45_000L // Prevent no-fill retry spam that hurts Match Rate
+    private const val MAX_AUTO_RETRIES = 1
+
     private val isMobileAdsInitialized = AtomicBoolean(false)
     private val isMobileAdsSdkReady = AtomicBoolean(false)
     private val _isSdkReadyFlow = MutableStateFlow(false)
@@ -146,10 +154,12 @@ class AdManager(private val context: Context) {
             Log.i(TAG, "Google Mobile Ads SDK initialized (production ads only).")
             mainHandler.post {
               preloadInterstitial()
-              preloadRewarded()
-              if (AdMobConfig.isAppOpenConfigEnabled(appContext)) {
+              // Only preload App Open Ad on normal launches (never on deep links where Pre-Play Ad runs)
+              if (AdMobConfig.isAppOpenConfigEnabled(appContext) && !appOpenAdManager.isColdLaunchSuppressed()) {
                 appOpenAdManager.loadAd()
               }
+              // Preload Rewarded slightly later on normal launches so Interstitial gets priority without request bursts
+              mainHandler.postDelayed({ preloadRewarded() }, 2_500L)
               onInitialized()
             }
           }
@@ -162,8 +172,7 @@ class AdManager(private val context: Context) {
     } else if (isMobileAdsSdkReady.get()) {
       mainHandler.post {
         preloadInterstitial()
-        preloadRewarded()
-        if (AdMobConfig.isAppOpenConfigEnabled(appContext)) {
+        if (AdMobConfig.isAppOpenConfigEnabled(appContext) && !appOpenAdManager.isColdLaunchSuppressed()) {
           appOpenAdManager.loadAd()
         }
         onInitialized()
@@ -173,9 +182,17 @@ class AdManager(private val context: Context) {
     }
   }
 
-  fun preloadInterstitial() {
+  fun preloadInterstitial(forceBypassCooldown: Boolean = false) {
     refreshAdFreeStatus()
+    val nowMs = System.currentTimeMillis()
+    if (interstitialAd != null && !isAdStillFresh(interstitialLoadedAtMs, nowMs)) {
+      interstitialAd = null
+      interstitialLoadedAtMs = 0L
+    }
     if (interstitialAd != null || isInterstitialLoading || _isAdFreeSessionActive.value) return
+    if (!forceBypassCooldown && lastInterstitialFailMs > 0L && (nowMs - lastInterstitialFailMs) < FAILED_LOAD_COOLDOWN_MS) {
+      return
+    }
     val adUnitId = AdMobConfig.getInterstitialAdUnitId(appContext)
     if (!AdMobConfig.isValidProductionAdUnitId(adUnitId)) {
       Log.d(TAG, "Interstitial ad skipped: no production Interstitial Ad Unit ID configured.")
@@ -193,19 +210,22 @@ class AdManager(private val context: Context) {
         object : InterstitialAdLoadCallback() {
           override fun onAdLoaded(ad: InterstitialAd) {
             interstitialAd = ad
+            interstitialLoadedAtMs = System.currentTimeMillis()
             isInterstitialLoading = false
             interstitialRetryAttempt = 0
+            lastInterstitialFailMs = 0L
             Log.d(TAG, "Interstitial ad loaded successfully")
           }
 
           override fun onAdFailedToLoad(loadAdError: LoadAdError) {
             interstitialAd = null
+            interstitialLoadedAtMs = 0L
             isInterstitialLoading = false
+            lastInterstitialFailMs = System.currentTimeMillis()
             Log.w(TAG, "Interstitial failed to load: ${loadAdError.message}")
-            if (interstitialRetryAttempt < 4) {
-              val delayMs = (8_000L * (1 shl interstitialRetryAttempt)).coerceAtMost(45_000L)
+            if (interstitialRetryAttempt < MAX_AUTO_RETRIES) {
               interstitialRetryAttempt++
-              mainHandler.postDelayed({ preloadInterstitial() }, delayMs)
+              mainHandler.postDelayed({ preloadInterstitial(forceBypassCooldown = true) }, 30_000L)
             }
           }
         }
@@ -252,15 +272,17 @@ class AdManager(private val context: Context) {
       return
     }
 
-    val ad = interstitialAd
+    val ad = interstitialAd?.takeIf { isAdStillFresh(interstitialLoadedAtMs, nowMs) }
     if (ad != null) {
       interstitialAd = null
+      interstitialLoadedAtMs = 0L
       navigationActionCount = 0
       lastInterstitialTimeMs = nowMs
       lastFullscreenAdTimeMs = nowMs
       showLoadedInterstitial(activity, ad, onAdFinished)
     } else {
-      // Ad unavailable: Resume normal navigation immediately and queue reload
+      interstitialAd = null
+      // Ad unavailable: Resume normal navigation immediately and queue reload if cooldown passed
       preloadInterstitial()
       onAdFinished()
     }
@@ -288,14 +310,16 @@ class AdManager(private val context: Context) {
       return
     }
 
-    val ad = interstitialAd
+    val ad = interstitialAd?.takeIf { isAdStillFresh(interstitialLoadedAtMs, nowMs) }
     if (ad != null) {
       interstitialAd = null
+      interstitialLoadedAtMs = 0L
       navigationActionCount = 0
       lastInterstitialTimeMs = nowMs
       lastFullscreenAdTimeMs = nowMs
       showLoadedInterstitial(activity, ad, onAdFinished)
     } else {
+      interstitialAd = null
       preloadInterstitial()
       onAdFinished()
     }
@@ -412,15 +436,16 @@ class AdManager(private val context: Context) {
         onAdFinished()
         return true
       }
-      val readyRewarded = rewardedAd
+      val nowMs = System.currentTimeMillis()
+      val readyRewarded = rewardedAd?.takeIf { isAdStillFresh(rewardedLoadedAtMs, nowMs) }
       if (readyRewarded != null) {
         showLoadedRewardedForPrePlay(activity, readyRewarded, onAdFinished)
         return true
       }
-      val readyInterstitial = interstitialAd
+      val readyInterstitial = interstitialAd?.takeIf { isAdStillFresh(interstitialLoadedAtMs, nowMs) }
       if (readyInterstitial != null) {
         interstitialAd = null
-        val nowMs = System.currentTimeMillis()
+        interstitialLoadedAtMs = 0L
         lastInterstitialTimeMs = nowMs
         lastFullscreenAdTimeMs = nowMs
         showLoadedInterstitial(activity, readyInterstitial, onAdFinished)
@@ -431,10 +456,9 @@ class AdManager(private val context: Context) {
 
     if (tryShowReadyAd()) return
 
-    // Ensure SDK and ads are loading, then wait briefly before falling back to video
+    // Ensure SDK and single fast Interstitial load are active (avoid firing duplicate Rewarded+Interstitial simultaneously)
     initialize()
-    preloadRewarded()
-    preloadInterstitial()
+    preloadInterstitial(forceBypassCooldown = true)
 
     val startTimeMs = System.currentTimeMillis()
     val pollRunnable = object : Runnable {
@@ -445,16 +469,25 @@ class AdManager(private val context: Context) {
           Log.d(TAG, "Pre-play ad wait timed out after ${elapsed}ms; proceeding to video playback.")
           onAdFinished()
         } else {
-          mainHandler.postDelayed(this, 150L)
+          mainHandler.postDelayed(this, 120L)
         }
       }
     }
-    mainHandler.postDelayed(pollRunnable, 150L)
+    mainHandler.postDelayed(pollRunnable, 120L)
   }
 
-  fun preloadRewarded(useSecondaryFallback: Boolean = false) {
+  fun preloadRewarded(useSecondaryFallback: Boolean = false, forceBypassCooldown: Boolean = false) {
     refreshAdFreeStatus()
+    val nowMs = System.currentTimeMillis()
+    if (rewardedAd != null && !isAdStillFresh(rewardedLoadedAtMs, nowMs)) {
+      rewardedAd = null
+      rewardedLoadedAtMs = 0L
+      _isRewardedReadyFlow.value = false
+    }
     if (rewardedAd != null || (isRewardedLoading && !useSecondaryFallback)) return
+    if (!forceBypassCooldown && !useSecondaryFallback && lastRewardedFailMs > 0L && (nowMs - lastRewardedFailMs) < FAILED_LOAD_COOLDOWN_MS) {
+      return
+    }
 
     val adUnitId = if (useSecondaryFallback) {
       AdMobConfig.getSecondaryRewardedAdUnitId(appContext)
@@ -478,24 +511,28 @@ class AdManager(private val context: Context) {
         object : RewardedAdLoadCallback() {
           override fun onAdLoaded(ad: RewardedAd) {
             rewardedAd = ad
+            rewardedLoadedAtMs = System.currentTimeMillis()
             isRewardedLoading = false
             rewardedRetryAttempt = 0
+            lastRewardedFailMs = 0L
             _isRewardedReadyFlow.value = true
             Log.i(TAG, "Rewarded ad loaded successfully ($adUnitId)")
           }
 
           override fun onAdFailedToLoad(loadAdError: LoadAdError) {
             rewardedAd = null
+            rewardedLoadedAtMs = 0L
             _isRewardedReadyFlow.value = false
             Log.w(TAG, "Rewarded ad failed to load ($adUnitId) [code=${loadAdError.code}]: ${loadAdError.message}")
-            if (!useSecondaryFallback && AdMobConfig.getSecondaryRewardedAdUnitId(appContext) != null) {
-              preloadRewarded(useSecondaryFallback = true)
+            // Only try secondary fallback once if primary returned no-fill (code 3), never on format/config errors
+            if (!useSecondaryFallback && loadAdError.code == 3 && AdMobConfig.getSecondaryRewardedAdUnitId(appContext) != null) {
+              preloadRewarded(useSecondaryFallback = true, forceBypassCooldown = true)
             } else {
               isRewardedLoading = false
-              if (rewardedRetryAttempt < 4) {
-                val delayMs = (8_000L * (1 shl rewardedRetryAttempt)).coerceAtMost(45_000L)
+              lastRewardedFailMs = System.currentTimeMillis()
+              if (rewardedRetryAttempt < MAX_AUTO_RETRIES) {
                 rewardedRetryAttempt++
-                mainHandler.postDelayed({ preloadRewarded() }, delayMs)
+                mainHandler.postDelayed({ preloadRewarded(forceBypassCooldown = true) }, 45_000L)
               }
             }
           }

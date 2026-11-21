@@ -319,7 +319,7 @@ fun VidVoraApp(
       ) { video ->
         if (activeDeepLinkRequestId != requestId) return@validateAndPlay
         if (adManager != null && hostActivity != null) {
-          adManager.showPrePlayAd(hostActivity, maxWaitMs = 150L) {
+          adManager.showPrePlayAd(hostActivity, maxWaitMs = 2400L) {
             if (activeDeepLinkRequestId == requestId) {
               returnScreenAfterPlayer = AppScreen.Home
               currentScreen = AppScreen.Player(video)

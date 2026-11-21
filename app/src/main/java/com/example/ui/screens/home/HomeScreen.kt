@@ -267,7 +267,10 @@ fun HomeScreen(
           .navigationBarsPadding()
           .padding(horizontal = 6.dp, vertical = 4.dp)
       ) {
-        AdaptiveBannerAd(isAdFree = isAdFreeSession)
+        AdaptiveBannerAd(
+          isAdFree = isAdFreeSession,
+          enabled = !isAutoOpeningDeepLink
+        )
       }
     }
   ) { paddingValues ->
@@ -704,9 +707,12 @@ fun HomeScreen(
           }
         }
 
-        // Native Ad Card (Hidden cleanly during VIP ad-free sessions or if unavailable)
+        // Native Ad Card (Hidden during VIP ad-free sessions or deep-link redirect overlay)
         item {
-          NativeAdCard(isAdFree = isAdFreeSession)
+          NativeAdCard(
+            isAdFree = isAdFreeSession,
+            enabled = !isAutoOpeningDeepLink
+          )
         }
 
         // Optional Rewarded Ad Card: Watch a short video ad to unlock Ad-Free session
@@ -1132,12 +1138,7 @@ fun HomeScreen(
           Spacer(modifier = Modifier.height(14.dp))
         }
 
-        // Secondary Native Ad Card in lower feed for higher impressions
-        item(key = "secondary_native_ad") {
-          NativeAdCard(
-            isAdFree = isAdFreeSession,
-            slotTag = "native_ad_card_secondary"
-          )
+        item(key = "bottom_feed_spacer") {
           Spacer(modifier = Modifier.height(78.dp))
         }
       }

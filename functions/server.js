@@ -66,6 +66,10 @@ const {
   createViewGeoTracker,
   extractClientIp,
 } = require("./geoTracker");
+const {
+  resolveAppDownloadMetadata,
+  renderApkDownloadWebsiteHtml,
+} = require("./downloadSite");
 
 const dashboardLoginAttempts = new Map();
 const DASHBOARD_LOGIN_WINDOW_MS = 5 * 60 * 1000;
@@ -610,9 +614,16 @@ const server = http.createServer(async (req, res) => {
     urlObj.searchParams.has("video") ||
     urlObj.searchParams.has("token");
 
+  const wantsHtmlHome =
+    req.method === "GET" &&
+    pathname === "/" &&
+    !hasWatchParam &&
+    urlObj.searchParams.get("check") !== "1" &&
+    String(req.headers.accept || "").toLowerCase().includes("text/html");
+
   if (
     (req.method === "GET" || req.method === "HEAD") &&
-    (pathname === "/health" || (pathname === "/" && !hasWatchParam))
+    (pathname === "/health" || (pathname === "/" && !hasWatchParam && !wantsHtmlHome))
   ) {
     if (req.method === "HEAD") {
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
@@ -1272,6 +1283,64 @@ const server = http.createServer(async (req, res) => {
       : [];
     res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "public, max-age=3600" });
     res.end(JSON.stringify(body));
+    return;
+  }
+
+  if ((req.method === "GET" || req.method === "HEAD") && (pathname === "/download-apk" || pathname === "/download-apk/")) {
+    try {
+      const meta = await resolveAppDownloadMetadata(db);
+      res.writeHead(302, {
+        Location: meta.apkUrl,
+        "Cache-Control": "no-store, max-age=0",
+        "X-Content-Type-Options": "nosniff",
+      });
+      res.end();
+    } catch (err) {
+      console.error("APK redirect error:", err);
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "text/plain" });
+        res.end("APK download unavailable");
+      }
+    }
+    return;
+  }
+
+  if (
+    (req.method === "GET" || req.method === "HEAD") &&
+    (wantsHtmlHome ||
+      pathname === "/download" ||
+      pathname === "/download/" ||
+      pathname === "/apk" ||
+      pathname === "/apk/" ||
+      pathname === "/app" ||
+      pathname === "/app/")
+  ) {
+    try {
+      const meta = await resolveAppDownloadMetadata(db);
+      const html = renderApkDownloadWebsiteHtml({
+        baseUrl: resolvePublicHostBaseUrl(req),
+        versionName: meta.versionName,
+        versionCode: meta.versionCode,
+        apkUrl: meta.apkUrl,
+        releaseNotes: meta.releaseNotes,
+      });
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "public, max-age=120",
+        "X-Content-Type-Options": "nosniff",
+      });
+      if (req.method === "HEAD") {
+        res.end();
+      } else {
+        res.end(html);
+      }
+    } catch (err) {
+      console.error("APK download site error:", err);
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "text/plain" });
+        res.end("Download page error");
+      }
+    }
     return;
   }
 

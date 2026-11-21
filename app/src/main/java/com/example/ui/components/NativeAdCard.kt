@@ -48,9 +48,10 @@ private const val NATIVE_TAG = "NativeAdCard"
 fun NativeAdCard(
   isAdFree: Boolean,
   modifier: Modifier = Modifier,
-  slotTag: String = "native_ad_card"
+  slotTag: String = "native_ad_card",
+  enabled: Boolean = true
 ) {
-  if (isAdFree) return
+  if (isAdFree || !enabled) return
 
   val context = LocalContext.current
   val isSdkReady by AdManager.isSdkReadyFlow.collectAsState()
@@ -59,9 +60,8 @@ fun NativeAdCard(
   var retryAttempt by remember(slotTag) { mutableIntStateOf(0) }
 
   LaunchedEffect(hasFailed, isSdkReady, retryAttempt, slotTag) {
-    if (isSdkReady && hasFailed && nativeAd == null && retryAttempt < 4) {
-      val delayMs = if (retryAttempt < 2) 10_000L else 25_000L
-      delay(delayMs)
+    if (isSdkReady && hasFailed && nativeAd == null && retryAttempt < 1) {
+      delay(45_000L)
       hasFailed = false
       retryAttempt++
     }

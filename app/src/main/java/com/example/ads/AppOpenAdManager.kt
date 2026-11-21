@@ -34,6 +34,7 @@ class AppOpenAdManager(
   private var isShowingAd = false
   private var loadTime: Long = 0L
   private var lastAdShownMs: Long = 0L
+  private var lastFailedLoadMs: Long = 0L
 
   private var currentActivity: Activity? = null
   private var isForeground = false
@@ -41,6 +42,10 @@ class AppOpenAdManager(
   private var attachedAtMs: Long = 0L
   private var hasAttemptedColdLaunchAd = false
   private var suppressColdLaunchAd = false
+
+  companion object {
+    private const val FAILED_LOAD_COOLDOWN_MS = 60_000L
+  }
 
   fun attachActivity(activity: Activity) {
     this.currentActivity = activity
@@ -71,6 +76,8 @@ class AppOpenAdManager(
     hasAttemptedColdLaunchAd = true
   }
 
+  fun isColdLaunchSuppressed(): Boolean = suppressColdLaunchAd
+
   override fun onStart(owner: LifecycleOwner) {
     super.onStart(owner)
     isForeground = true
@@ -91,10 +98,7 @@ class AppOpenAdManager(
     super.onStop(owner)
     isForeground = false
     isAppInBackground = true
-    Log.d(TAG, "App moved to background. Preloading App Open Ad so it is ready on return to foreground.")
-    if (!isAdAvailable()) {
-      loadAd()
-    }
+    // Do NOT fire a new App Open Ad request on app exit — unused ads tank AdMob Show Rate & eCPM.
   }
 
   /**
@@ -108,6 +112,10 @@ class AppOpenAdManager(
     }
 
     if (isLoadingAd || isAdAvailable()) {
+      return
+    }
+
+    if (lastFailedLoadMs > 0L && (System.currentTimeMillis() - lastFailedLoadMs) < FAILED_LOAD_COOLDOWN_MS) {
       return
     }
 
@@ -156,6 +164,7 @@ class AppOpenAdManager(
           override fun onAdFailedToLoad(loadAdError: LoadAdError) {
             isLoadingAd = false
             appOpenAd = null
+            lastFailedLoadMs = System.currentTimeMillis()
             Log.w(TAG, "App Open Ad failed to load: ${loadAdError.message}")
           }
         }
@@ -227,7 +236,6 @@ class AppOpenAdManager(
         lastAdShownMs = System.currentTimeMillis()
         onAdShownOrDismissed(lastAdShownMs)
         Log.d(TAG, "App Open Ad dismissed.")
-        loadAd()
         onAdDismissed?.invoke()
       }
 
@@ -235,7 +243,6 @@ class AppOpenAdManager(
         appOpenAd = null
         isShowingAd = false
         Log.w(TAG, "App Open Ad failed to show: ${adError.message}")
-        loadAd()
         onAdDismissed?.invoke()
       }
 
