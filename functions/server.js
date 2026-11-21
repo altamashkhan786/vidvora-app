@@ -69,9 +69,13 @@ const {
 const {
   resolveAppDownloadMetadata,
   renderApkDownloadWebsiteHtml,
+  renderApkTemporarilyUnavailableHtml,
+  normalizeDirectApkUrl,
+  resolveGitHubReleaseApkUrl,
   resolveLocalReleaseApkPath,
   isRemoteApkReachable,
 } = require("./downloadSite");
+const { DEFAULT_APK_URL } = require("./sharePreview");
 
 const dashboardLoginAttempts = new Map();
 const DASHBOARD_LOGIN_WINDOW_MS = 5 * 60 * 1000;
@@ -1291,9 +1295,40 @@ const server = http.createServer(async (req, res) => {
   if ((req.method === "GET" || req.method === "HEAD") && (pathname === "/download-apk" || pathname === "/download-apk/")) {
     try {
       const meta = await resolveAppDownloadMetadata(db);
+      const primaryUrl = normalizeDirectApkUrl(meta.apkUrl);
+      const isCustomPrimaryUrl = primaryUrl !== DEFAULT_APK_URL;
       const localApk = resolveLocalReleaseApkPath();
-      const remoteOk = localApk ? await isRemoteApkReachable(meta.apkUrl) : true;
-      if (!remoteOk && localApk) {
+      const githubApkUrl = resolveGitHubReleaseApkUrl();
+
+      const primaryOk = await isRemoteApkReachable(primaryUrl);
+      const githubOk = !primaryOk && !localApk && githubApkUrl ? await isRemoteApkReachable(githubApkUrl) : false;
+
+      if (urlObj.searchParams.get("check") === "1") {
+        sendJson(res, 200, {
+          ok: Boolean(primaryOk || isCustomPrimaryUrl || localApk || githubOk),
+          versionName: meta.versionName,
+          versionCode: meta.versionCode,
+          primaryReachable: primaryOk,
+          isCustomPrimaryUrl,
+          localApkFound: Boolean(localApk),
+          localApkBytes: localApk ? localApk.size : 0,
+          githubReleaseConfigured: Boolean(githubApkUrl),
+          githubReachable: githubOk,
+        });
+        return;
+      }
+
+      if (primaryOk || isCustomPrimaryUrl) {
+        res.writeHead(302, {
+          Location: primaryUrl,
+          "Cache-Control": "no-store, max-age=0",
+          "X-Content-Type-Options": "nosniff",
+        });
+        res.end();
+        return;
+      }
+
+      if (localApk) {
         const safeFileVer = String(meta.versionName || "1.8").replace(/[^a-zA-Z0-9._-]/g, "");
         const fileName = safeFileVer ? `VidVora-v${safeFileVer}.apk` : "VidVora.apk";
         res.writeHead(200, {
@@ -1322,14 +1357,29 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      res.writeHead(302, {
-        Location: meta.apkUrl,
+      if (githubOk && githubApkUrl) {
+        res.writeHead(302, {
+          Location: githubApkUrl,
+          "Cache-Control": "no-store, max-age=0",
+          "X-Content-Type-Options": "nosniff",
+        });
+        res.end();
+        return;
+      }
+
+      const unavailableHtml = renderApkTemporarilyUnavailableHtml({ versionName: meta.versionName });
+      res.writeHead(503, {
+        "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-store, max-age=0",
         "X-Content-Type-Options": "nosniff",
       });
-      res.end();
+      if (req.method === "HEAD") {
+        res.end();
+      } else {
+        res.end(unavailableHtml);
+      }
     } catch (err) {
-      console.error("APK redirect error:", err);
+      console.error("APK download route error:", err);
       if (!res.headersSent) {
         res.writeHead(500, { "Content-Type": "text/plain" });
         res.end("APK download unavailable");

@@ -13,6 +13,7 @@ function resolveLocalReleaseApkPath() {
     path.join(__dirname, "..", "release", "vidvora.apk"),
     path.join(__dirname, "..", "release", "VidVora.apk"),
     path.join(__dirname, "release", "vidvora.apk"),
+    path.join(__dirname, "assets", "vidvora.apk"),
   ];
   for (const candidate of candidates) {
     try {
@@ -25,6 +26,47 @@ function resolveLocalReleaseApkPath() {
     }
   }
   return null;
+}
+
+function normalizeDirectApkUrl(rawUrl, fallback = DEFAULT_APK_URL) {
+  const clean = sanitizeHttpUrl(rawUrl, "");
+  if (!clean) return fallback;
+  try {
+    const parsed = new URL(clean);
+    const host = parsed.hostname.toLowerCase();
+    // Auto-convert standard Google Drive share links to direct APK download URLs
+    if (host === "drive.google.com") {
+      const fileMatch = parsed.pathname.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+      const id = (fileMatch && fileMatch[1]) || parsed.searchParams.get("id") || "";
+      if (id) {
+        return `https://drive.usercontent.google.com/download?id=${encodeURIComponent(id)}&export=download&confirm=t`;
+      }
+    }
+    // Auto-convert Dropbox preview links (?dl=0) to direct download (?dl=1)
+    if (host === "www.dropbox.com" || host === "dropbox.com") {
+      parsed.searchParams.set("dl", "1");
+      return parsed.toString();
+    }
+    return parsed.toString();
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function resolveGitHubReleaseApkUrl(env = process.env) {
+  const explicit = sanitizeHttpUrl(env?.GITHUB_APK_URL || "", "");
+  if (explicit) return explicit;
+  const repoRaw = String(env?.RENDER_GIT_REPO_URL || env?.GITHUB_REPO_URL || "").trim();
+  if (!repoRaw) return "";
+  try {
+    const parsed = new URL(repoRaw.replace(/\.git$/i, "").replace(/\/+$/, ""));
+    if (parsed.hostname.toLowerCase() !== "github.com") return "";
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    if (parts.length < 2) return "";
+    return `https://github.com/${parts[0]}/${parts[1]}/releases/latest/download/VidVora.apk`;
+  } catch (_) {
+    return "";
+  }
 }
 
 async function isRemoteApkReachable(apkUrl, fetchImpl = typeof fetch === "function" ? fetch : null) {
@@ -42,7 +84,7 @@ async function isRemoteApkReachable(apkUrl, fetchImpl = typeof fetch === "functi
     const resp = await fetchImpl(cleanUrl, {
       method: "HEAD",
       redirect: "follow",
-      signal: typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(3500) : undefined,
+      signal: typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(4500) : undefined,
     });
     const contentType = String(resp.headers?.get?.("content-type") || "").toLowerCase();
     ok = Boolean(resp && resp.ok && !contentType.includes("xml") && !contentType.includes("text/html"));
@@ -93,7 +135,7 @@ async function resolveAppDownloadMetadata(db) {
         const data = snap.data() || {};
         const dbVerName = String(data.latestVersionName || "").trim();
         const dbVerCode = Number(data.latestVersionCode);
-        const dbApkUrl = sanitizeHttpUrl(data.apkUrl, "");
+        const dbApkUrl = normalizeDirectApkUrl(data.apkUrl, "");
         const dbNotes = String(data.releaseNotes || data.message || data.updateMessage || "").trim();
         if (dbVerName) versionName = dbVerName.slice(0, 24);
         if (Number.isFinite(dbVerCode) && dbVerCode >= 1) versionCode = Math.floor(dbVerCode);
@@ -111,6 +153,37 @@ async function resolveAppDownloadMetadata(db) {
     apkUrl,
     releaseNotes,
   };
+}
+
+function renderApkTemporarilyUnavailableHtml({ versionName = DEFAULT_APP_VERSION_NAME } = {}) {
+  const safeVersion = escapeHtml(versionName || DEFAULT_APP_VERSION_NAME);
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>VidVora APK v${safeVersion} — Preparing Download</title>
+<link rel="icon" type="image/png" href="/vidvora-icon.png" />
+<style>
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #050811; color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 20px; }
+  .box { max-width: 460px; width: 100%; background: rgba(17,25,44,0.92); border: 1px solid rgba(56,189,248,0.28); border-radius: 22px; padding: 28px 24px; text-align: center; box-shadow: 0 24px 54px rgba(0,0,0,0.55); }
+  .logo { width: 64px; height: 64px; border-radius: 16px; margin-bottom: 14px; }
+  h1 { font-size: 20px; margin: 0 0 10px; }
+  p { font-size: 14px; color: #94a3b8; line-height: 1.55; margin: 0 0 20px; }
+  .btn { display: inline-block; padding: 12px 22px; border-radius: 12px; font-weight: 700; font-size: 14px; text-decoration: none; color: #03101d; background: linear-gradient(135deg, #22d3ee, #38bdf8, #a78bfa); }
+  .sub { display: block; margin-top: 14px; font-size: 13px; color: #94a3b8; text-decoration: underline; }
+</style>
+</head>
+<body>
+  <div class="box">
+    <img src="/vidvora-icon.png" alt="VidVora" class="logo" />
+    <h1>VidVora v${safeVersion} APK Update In Progress</h1>
+    <p>Latest APK file abhi CDN server par upload / sync ho rahi hai. Kripya thodi der baad dubara try karein.</p>
+    <a class="btn" href="/download-apk">Try Download Again</a>
+    <a class="sub" href="/download">&larr; Back to VidVora Download Page</a>
+  </div>
+</body>
+</html>`;
 }
 
 function renderApkDownloadWebsiteHtml({
@@ -1139,8 +1212,11 @@ module.exports = {
   DEFAULT_APP_VERSION_NAME,
   DEFAULT_APP_VERSION_CODE,
   sanitizeHttpUrl,
+  normalizeDirectApkUrl,
+  resolveGitHubReleaseApkUrl,
   resolveLocalReleaseApkPath,
   isRemoteApkReachable,
   resolveAppDownloadMetadata,
   renderApkDownloadWebsiteHtml,
+  renderApkTemporarilyUnavailableHtml,
 };

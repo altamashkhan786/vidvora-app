@@ -5,11 +5,32 @@ const {
   DEFAULT_APP_VERSION_NAME,
   DEFAULT_APP_VERSION_CODE,
   sanitizeHttpUrl,
+  normalizeDirectApkUrl,
+  resolveGitHubReleaseApkUrl,
   resolveLocalReleaseApkPath,
   isRemoteApkReachable,
   resolveAppDownloadMetadata,
   renderApkDownloadWebsiteHtml,
+  renderApkTemporarilyUnavailableHtml,
 } = require("./downloadSite");
+
+test("normalizeDirectApkUrl converts Google Drive and Dropbox share links to direct download URLs", () => {
+  assert.equal(
+    normalizeDirectApkUrl("https://drive.google.com/file/d/1AbCdEfGhIjKlMnOp/view?usp=sharing"),
+    "https://drive.usercontent.google.com/download?id=1AbCdEfGhIjKlMnOp&export=download&confirm=t"
+  );
+  assert.equal(
+    normalizeDirectApkUrl("https://www.dropbox.com/s/abc123/vidvora.apk?dl=0"),
+    "https://www.dropbox.com/s/abc123/vidvora.apk?dl=1"
+  );
+  assert.equal(
+    resolveGitHubReleaseApkUrl({ RENDER_GIT_REPO_URL: "https://github.com/teamaltamash/vidvora.git" }),
+    "https://github.com/teamaltamash/vidvora/releases/latest/download/VidVora.apk"
+  );
+  const fallbackHtml = renderApkTemporarilyUnavailableHtml({ versionName: "1.8" });
+  assert.match(fallbackHtml, /VidVora v1\.8/);
+  assert.match(fallbackHtml, /href="\/download-apk"/);
+});
 
 test("sanitizeHttpUrl accepts http/https and rejects unsafe protocols", () => {
   assert.equal(
