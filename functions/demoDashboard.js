@@ -1,0 +1,1641 @@
+function renderDemoDashboardHtml({ baseUrl = "https://vidvora-share-bot.onrender.com" } = {}) {
+  const safeBase = String(baseUrl || "https://vidvora-share-bot.onrender.com").replace(/\/+$/, "");
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VidVora — Interactive Creator &amp; Admin Demo Dashboard</title>
+  <style>
+    :root {
+      --bg: #070b16;
+      --bg-panel: #0e1628;
+      --card: #131e36;
+      --card-2: #182542;
+      --border: #243456;
+      --cyan: #00e5ff;
+      --cyan-soft: rgba(0, 229, 255, 0.14);
+      --gold: #ffc107;
+      --gold-soft: rgba(255, 193, 7, 0.14);
+      --green: #22c55e;
+      --green-soft: rgba(34, 197, 94, 0.14);
+      --red: #ef4444;
+      --red-soft: rgba(239, 68, 68, 0.14);
+      --purple: #a855f7;
+      --purple-soft: rgba(168, 85, 247, 0.14);
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --radius: 14px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+      background: radial-gradient(circle at top right, rgba(0, 229, 255, 0.08), transparent 40%),
+                  radial-gradient(circle at bottom left, rgba(255, 193, 7, 0.06), transparent 40%),
+                  var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      line-height: 1.45;
+    }
+    button, input, select, textarea { font-family: inherit; }
+
+    /* Top Studio Bar */
+    .studio-bar {
+      position: sticky;
+      top: 0;
+      z-index: 90;
+      background: rgba(9, 14, 28, 0.94);
+      backdrop-filter: blur(14px);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .studio-bar.hidden { display: none; }
+    .studio-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 800;
+      font-size: 16px;
+      letter-spacing: 0.2px;
+    }
+    .brand-logo {
+      width: 34px;
+      height: 34px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, #00e5ff, #2563eb);
+      display: grid;
+      place-items: center;
+      color: #04101d;
+      font-weight: 900;
+      font-size: 16px;
+      box-shadow: 0 0 18px rgba(0, 229, 255, 0.35);
+    }
+    .demo-pill {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 9px;
+      border-radius: 999px;
+      background: var(--gold-soft);
+      color: var(--gold);
+      border: 1px solid rgba(255, 193, 7, 0.35);
+    }
+    .seg-group {
+      display: inline-flex;
+      background: #0a1020;
+      border: 1px solid var(--border);
+      border-radius: 11px;
+      padding: 3px;
+      gap: 4px;
+    }
+    .seg-btn {
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      padding: 7px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .seg-btn:hover { color: var(--text); }
+    .seg-btn.active {
+      background: linear-gradient(135deg, #00e5ff, #0ea5e9);
+      color: #04101d;
+      box-shadow: 0 4px 14px rgba(0, 229, 255, 0.28);
+    }
+    .seg-btn.active-admin {
+      background: linear-gradient(135deg, #ffc107, #f59e0b);
+      color: #1c1200;
+      box-shadow: 0 4px 14px rgba(255, 193, 7, 0.28);
+    }
+    .seg-btn.active-tg {
+      background: linear-gradient(135deg, #38bdf8, #2563eb);
+      color: #ffffff;
+    }
+
+    /* Quick Sim Strip */
+    .sim-strip {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 7px;
+      padding-top: 8px;
+      border-top: 1px dashed rgba(148, 163, 184, 0.18);
+    }
+    .sim-label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.7px;
+      color: var(--cyan);
+      font-weight: 800;
+      margin-right: 4px;
+    }
+    .btn {
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--text);
+      padding: 7px 12px;
+      border-radius: 9px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: transform 0.1s ease, background 0.15s ease, border-color 0.15s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .btn:hover { background: var(--card-2); border-color: #385185; }
+    .btn:active { transform: scale(0.97); }
+    .btn-cyan { background: linear-gradient(135deg, #00e5ff, #0284c7); color: #031320; border: 0; }
+    .btn-cyan:hover { filter: brightness(1.08); }
+    .btn-gold { background: linear-gradient(135deg, #ffc107, #f59e0b); color: #1b1100; border: 0; }
+    .btn-gold:hover { filter: brightness(1.08); }
+    .btn-green { background: linear-gradient(135deg, #22c55e, #16a34a); color: #031c0b; border: 0; }
+    .btn-green:hover { filter: brightness(1.08); }
+    .btn-purple { background: var(--purple-soft); color: #d8b4fe; border-color: rgba(168, 85, 247, 0.4); }
+    .btn-red { background: var(--red-soft); color: #fca5a5; border-color: rgba(239, 68, 68, 0.4); }
+    .btn-ghost { background: transparent; color: var(--muted); }
+    .btn-sm { padding: 5px 10px; font-size: 11px; border-radius: 7px; }
+    .btn-lg { padding: 11px 18px; font-size: 14px; border-radius: 11px; }
+
+    .floating-show-bar {
+      position: fixed;
+      top: 12px;
+      right: 14px;
+      z-index: 95;
+      display: none;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    }
+    .floating-show-bar.visible { display: inline-flex; }
+
+    /* Workspace Container */
+    .stage {
+      padding: 20px;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+    }
+    .app-shell {
+      width: 100%;
+      max-width: 1180px;
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      overflow: hidden;
+      box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55);
+      transition: max-width 0.25s ease, border-radius 0.25s ease;
+    }
+    .app-shell.phone-mode {
+      max-width: 430px;
+      border-radius: 36px;
+      border: 8px solid #1e293b;
+      box-shadow: 0 30px 90px rgba(0, 0, 0, 0.75), 0 0 0 2px #334155;
+    }
+    .phone-notch {
+      display: none;
+      background: #060a14;
+      padding: 8px 18px 6px;
+      font-size: 11px;
+      color: #cbd5e1;
+      font-weight: 700;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .app-shell.phone-mode .phone-notch { display: flex; }
+
+    /* App Top Header */
+    .app-header {
+      padding: 16px 20px;
+      background: linear-gradient(180deg, #101a31, #0e1628);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .app-title-block h1 { font-size: 19px; font-weight: 800; }
+    .app-title-block p { font-size: 12px; color: var(--cyan); font-weight: 600; margin-top: 2px; }
+    .role-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 10px;
+      font-size: 12px;
+      font-weight: 700;
+      background: var(--cyan-soft);
+      color: var(--cyan);
+      border: 1px solid rgba(0, 229, 255, 0.3);
+    }
+    .role-badge.admin {
+      background: var(--gold-soft);
+      color: var(--gold);
+      border-color: rgba(255, 193, 7, 0.35);
+    }
+
+    /* Sub Tabs */
+    .tabs {
+      display: flex;
+      gap: 8px;
+      padding: 12px 18px;
+      overflow-x: auto;
+      border-bottom: 1px solid var(--border);
+      background: #0b1222;
+    }
+    .tab-btn {
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--muted);
+      padding: 8px 14px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .tab-btn.active {
+      background: linear-gradient(135deg, #00e5ff, #0ea5e9);
+      color: #031320;
+      border-color: transparent;
+    }
+    .tab-btn.active-gold {
+      background: linear-gradient(135deg, #ffc107, #f59e0b);
+      color: #1c1200;
+      border-color: transparent;
+    }
+    .badge-count {
+      background: rgba(0, 0, 0, 0.25);
+      padding: 1px 7px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 800;
+    }
+
+    /* Main Content Area */
+    .content { padding: 18px; display: flex; flex-direction: column; gap: 16px; }
+    .grid { display: grid; gap: 12px; }
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .app-shell.phone-mode .grid-4,
+    .app-shell.phone-mode .grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    @media (max-width: 760px) {
+      .grid-4, .grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 15px;
+    }
+    .card-glow-cyan { border-color: rgba(0, 229, 255, 0.35); background: linear-gradient(180deg, rgba(0, 229, 255, 0.08), var(--card)); }
+    .card-glow-gold { border-color: rgba(255, 193, 7, 0.38); background: linear-gradient(180deg, rgba(255, 193, 7, 0.08), var(--card)); }
+    .card-glow-green { border-color: rgba(34, 197, 94, 0.38); background: linear-gradient(180deg, rgba(34, 197, 94, 0.08), var(--card)); }
+    .card-glow-purple { border-color: rgba(168, 85, 247, 0.38); background: linear-gradient(180deg, rgba(168, 85, 247, 0.08), var(--card)); }
+
+    .kpi-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: var(--muted); }
+    .kpi-val { font-size: 24px; font-weight: 900; margin-top: 4px; letter-spacing: -0.3px; }
+    .kpi-sub { font-size: 11px; color: var(--muted); margin-top: 3px; }
+    .text-cyan { color: var(--cyan); }
+    .text-gold { color: var(--gold); }
+    .text-green { color: var(--green); }
+    .text-red { color: var(--red); }
+    .text-purple { color: #d8b4fe; }
+    .text-muted { color: var(--muted); }
+
+    .section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+    .section-title { font-size: 15px; font-weight: 800; display: flex; align-items: center; gap: 7px; }
+
+    /* Bar chart */
+    .chart-bars {
+      display: grid;
+      grid-template-columns: repeat(7, 1fr);
+      gap: 8px;
+      align-items: end;
+      height: 120px;
+      padding-top: 14px;
+    }
+    .bar-col { display: flex; flex-direction: column; align-items: center; gap: 6px; height: 100%; justify-content: flex-end; }
+    .bar-fill {
+      width: 100%;
+      max-width: 42px;
+      border-radius: 7px 7px 3px 3px;
+      background: linear-gradient(180deg, var(--cyan), #2563eb);
+      transition: height 0.35s ease;
+      min-height: 8px;
+    }
+    .bar-day { font-size: 11px; color: var(--muted); font-weight: 600; }
+    .bar-amt { font-size: 10px; color: var(--cyan); font-weight: 700; }
+
+    /* List Items */
+    .list { display: flex; flex-direction: column; gap: 10px; }
+    .item-row {
+      background: #0d1629;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .item-main { display: flex; flex-direction: column; gap: 3px; min-width: 180px; flex: 1; }
+    .item-title { font-weight: 800; font-size: 14px; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+    .item-meta { font-size: 12px; color: var(--muted); }
+    .item-actions { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 9px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 800;
+    }
+    .pill-green { background: var(--green-soft); color: var(--green); border: 1px solid rgba(34, 197, 94, 0.35); }
+    .pill-gold { background: var(--gold-soft); color: var(--gold); border: 1px solid rgba(255, 193, 7, 0.35); }
+    .pill-red { background: var(--red-soft); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.35); }
+    .pill-cyan { background: var(--cyan-soft); color: var(--cyan); border: 1px solid rgba(0, 229, 255, 0.35); }
+    .pill-purple { background: var(--purple-soft); color: #d8b4fe; border: 1px solid rgba(168, 85, 247, 0.35); }
+
+    .progress-track {
+      width: 100%;
+      height: 9px;
+      background: #091020;
+      border-radius: 999px;
+      overflow: hidden;
+      margin-top: 8px;
+    }
+    .progress-fill { height: 100%; background: linear-gradient(90deg, #22c55e, #00e5ff); border-radius: 999px; }
+
+    /* Inputs & Modals */
+    .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 11px; }
+    .field label { font-size: 12px; font-weight: 700; color: #cbd5e1; }
+    .input {
+      width: 100%;
+      background: #080f1e;
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 10px 12px;
+      border-radius: 10px;
+      font-size: 13px;
+      outline: none;
+    }
+    .input:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(0, 229, 255, 0.14); }
+
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(3, 6, 15, 0.78);
+      backdrop-filter: blur(6px);
+      display: none;
+      place-items: center;
+      z-index: 200;
+      padding: 16px;
+    }
+    .modal-backdrop.open { display: grid; }
+    .modal-card {
+      width: 100%;
+      max-width: 460px;
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 20px;
+      box-shadow: 0 25px 80px rgba(0, 0, 0, 0.7);
+    }
+    .modal-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 14px;
+    }
+    .modal-head h3 { font-size: 17px; font-weight: 800; }
+
+    /* Telegram Bot Simulator */
+    .tg-chat {
+      background: #0b1422;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .tg-top {
+      background: #17212b;
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid #243242;
+    }
+    .tg-messages {
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      max-height: 430px;
+      overflow-y: auto;
+      background: radial-gradient(circle at center, rgba(56, 189, 248, 0.05), transparent 65%);
+    }
+    .tg-bubble {
+      max-width: 86%;
+      padding: 11px 14px;
+      border-radius: 14px;
+      font-size: 13px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .tg-bot { background: #182533; align-self: flex-start; border-bottom-left-radius: 4px; border: 1px solid #24374d; }
+    .tg-user { background: #2b5278; align-self: flex-end; border-bottom-right-radius: 4px; }
+    .tg-inline-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin-top: 8px; }
+    .tg-inline-btn {
+      background: rgba(56, 189, 248, 0.14);
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      color: #e0f2fe;
+      padding: 7px 10px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .tg-inline-btn:hover { background: rgba(56, 189, 248, 0.25); }
+    .tg-keyboard {
+      background: #17212b;
+      padding: 10px;
+      border-top: 1px solid #243242;
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 7px;
+    }
+    .tg-key-btn {
+      background: #243242;
+      color: #f8fafc;
+      border: 1px solid #32465c;
+      padding: 10px;
+      border-radius: 9px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .tg-key-btn:hover { background: #2e4054; }
+
+    /* Toast */
+    .toast-wrap {
+      position: fixed;
+      bottom: 18px;
+      right: 18px;
+      z-index: 300;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .toast {
+      background: #0f1b33;
+      border: 1px solid var(--cyan);
+      color: var(--text);
+      padding: 11px 15px;
+      border-radius: 12px;
+      font-size: 13px;
+      font-weight: 700;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
+      max-width: 360px;
+      animation: slideIn 0.2s ease;
+    }
+    @keyframes slideIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .banner-announce {
+      background: linear-gradient(90deg, rgba(0, 229, 255, 0.14), rgba(168, 85, 247, 0.14));
+      border: 1px solid rgba(0, 229, 255, 0.35);
+      border-radius: 12px;
+      padding: 10px 14px;
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .code-box {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      background: #080f1e;
+      border: 1px dashed rgba(0, 229, 255, 0.45);
+      color: var(--cyan);
+      padding: 9px 12px;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 800;
+      letter-spacing: 0.8px;
+    }
+  </style>
+</head>
+<body>
+  <button id="showStudioBtn" class="btn btn-gold floating-show-bar" onclick="toggleStudioBar(true)">🎛️ Show Demo Controls</button>
+
+  <header id="studioBar" class="studio-bar">
+    <div class="studio-row">
+      <div class="brand">
+        <div class="brand-logo">V</div>
+        <div>
+          <span>VidVora</span>
+          <span class="demo-pill">DEMO STUDIO • SAFE SANDBOX</span>
+        </div>
+      </div>
+
+      <div class="seg-group">
+        <button id="modeCreatorBtn" class="seg-btn active" onclick="setMode('creator')">🎬 Creator Panel</button>
+        <button id="modeAdminBtn" class="seg-btn" onclick="setMode('admin')">🛡️ Admin Panel</button>
+        <button id="modeTgBtn" class="seg-btn" onclick="setMode('telegram')">🤖 Telegram Bot</button>
+      </div>
+
+      <div style="display:flex; gap:7px; flex-wrap:wrap;">
+        <button id="layoutToggleBtn" class="btn" onclick="togglePhoneMode()">📱 Phone Frame View</button>
+        <button class="btn btn-red" onclick="resetDemoState()">🔄 Reset Demo</button>
+        <button class="btn btn-ghost" onclick="toggleStudioBar(false)">🙈 Hide Bar (Record)</button>
+      </div>
+    </div>
+
+    <div class="sim-strip">
+      <span class="sim-label">⚡ Live Demo Controls (Add Views / Earning):</span>
+      <button class="btn btn-cyan" onclick="addDemoViews(1000)">+1,000 Views (+₹30)</button>
+      <button class="btn btn-cyan" onclick="addDemoViews(10000)">+10,000 Views (+₹300)</button>
+      <button class="btn btn-gold" onclick="addDemoEarning(500)">+₹500 Earning</button>
+      <button class="btn btn-gold" onclick="addDemoEarning(1000)">+₹1,000 Earning</button>
+      <button class="btn btn-purple" onclick="simulateReferredViews(5000)">🤝 Ref Creator +5K Views (+7% Bonus)</button>
+      <button class="btn" onclick="openCustomCreditModal()">⚙️ Custom Add (Views / ₹)</button>
+      <button class="btn btn-green" onclick="openWithdrawModal()">💸 Quick Demo Withdrawal</button>
+    </div>
+  </header>
+
+  <main class="stage">
+    <div id="appShell" class="app-shell">
+      <div class="phone-notch">
+        <span>9:41</span>
+        <span>VidVora v1.9</span>
+        <span>5G 🔋 100%</span>
+      </div>
+      <div id="appRoot"></div>
+    </div>
+  </main>
+
+  <!-- Modal Backdrop -->
+  <div id="modalBackdrop" class="modal-backdrop" onclick="if(event.target===this) closeModal()">
+    <div id="modalCard" class="modal-card"></div>
+  </div>
+
+  <div id="toastWrap" class="toast-wrap"></div>
+
+  <script>
+    const SHARE_BASE = ${JSON.stringify(safeBase + "/share?link=")};
+    const STORAGE_KEY = "vidvora_demo_studio_v1";
+    const CPM_PER_1000 = 30; // ₹30 per 1,000 views
+    const REFERRAL_RATE = 0.07; // 7% Admin-funded bonus
+
+    function makeInitialState() {
+      return {
+        mode: "creator",
+        creatorTab: "wallet",
+        adminTab: "payouts",
+        phoneMode: false,
+        inactivityDays: 14,
+        refFilter: "all",
+        announcement: "🎉 New! Refer & Earn 7% Live — Har referred creator ki views/earning par Admin ke taraf se 7% extra bonus!",
+        creator: {
+          memberId: "creator_rohan",
+          name: "Rohan Sharma (Demo Creator)",
+          email: "rohan.creator@gmail.com",
+          referralCode: "VV-ROHAN07",
+          views: 18500,
+          ownEarning: 555,
+          referralEarning: 84,
+          withdrawnTotal: 400,
+          upiId: "rohan@ybl",
+          dailyBars: [
+            { day: "Mon", views: 1800, amt: 54 },
+            { day: "Tue", views: 2400, amt: 72 },
+            { day: "Wed", views: 3100, amt: 93 },
+            { day: "Thu", views: 2700, amt: 81 },
+            { day: "Fri", views: 3600, amt: 108 },
+            { day: "Sat", views: 2900, amt: 87 },
+            { day: "Today", views: 2000, amt: 60 },
+          ],
+        },
+        videos: [
+          {
+            id: "vid_1",
+            title: "South Action Blockbuster HD (1.4 GB)",
+            code: "GM-ACTN2026",
+            sizeLabel: "1.4 GB • MP4",
+            views: 9200,
+            earning: 276,
+            createdAt: "Today, 11:20 AM",
+          },
+          {
+            id: "vid_2",
+            title: "Trending Viral Episode 12 (2.1 GB MKV)",
+            code: "GM-EP12HD99",
+            sizeLabel: "2.1 GB • MKV",
+            views: 6400,
+            earning: 192,
+            createdAt: "Yesterday",
+          },
+          {
+            id: "vid_3",
+            title: "Comedy Full Show 1080p (850 MB)",
+            code: "GM-SHOW8841",
+            sizeLabel: "850 MB • MP4",
+            views: 2900,
+            earning: 87,
+            createdAt: "2 days ago",
+          },
+        ],
+        referrals: [
+          {
+            id: "ref_1",
+            name: "Amit Verma",
+            email: "amit.v@gmail.com",
+            status: "SUCCESSFUL",
+            views: 25000,
+            ownEarning: 750,
+            bonusToReferrer: 52.5,
+            joinedAt: "2 days ago",
+          },
+          {
+            id: "ref_2",
+            name: "Priya Singh",
+            email: "priya.s@gmail.com",
+            status: "SUCCESSFUL",
+            views: 15000,
+            ownEarning: 450,
+            bonusToReferrer: 31.5,
+            joinedAt: "Yesterday",
+          },
+          {
+            id: "ref_3",
+            name: "Vikash Kumar",
+            email: "vikash.k@gmail.com",
+            status: "PENDING",
+            views: 0,
+            ownEarning: 0,
+            bonusToReferrer: 0,
+            joinedAt: "10 mins ago",
+          },
+        ],
+        payouts: [
+          {
+            id: "PAY-9021",
+            creatorName: "Rohan Sharma (Demo Creator)",
+            upiId: "rohan@ybl",
+            amount: 400,
+            status: "PAID",
+            utr: "UTR429108472615",
+            createdAt: "Yesterday, 6:15 PM",
+            paidAt: "Yesterday, 6:42 PM",
+          },
+        ],
+        installs: {
+          downloaded: 1284,
+          installed: 1218,
+          uninstalled: 66,
+          new24h: 174,
+          active24h: 492,
+          devices: [
+            { name: "Samsung Galaxy S24 Ultra", android: "Android 15", ver: "v1.9", sessions: 14, lastSeen: "2 mins ago", active: true },
+            { name: "OPPO CPH2625", android: "Android 16", ver: "v1.9", sessions: 6, lastSeen: "11 mins ago", active: true },
+            { name: "Redmi Note 13 Pro", android: "Android 14", ver: "v1.8", sessions: 22, lastSeen: "35 mins ago", active: true },
+            { name: "Vivo V30 5G", android: "Android 14", ver: "v1.7", sessions: 9, lastSeen: "2 hours ago", active: true },
+            { name: "Realme Narzo 70", android: "Android 14", ver: "v1.6", sessions: 3, lastSeen: "18 days ago", active: false },
+          ],
+        },
+        events: [
+          { id: "ev_1", title: "🔥 50,000 Views Milestone Bonus", reward: "₹2,000 Extra Cash", desc: "Is mahine 50K real views complete karne par direct wallet bonus!" },
+          { id: "ev_2", title: "🤝 Top Referrer Challenge", reward: "7% Lifetime Bonus + ₹1,000 Gift", desc: "5 active creators ko refer karo aur extra bonus pao." },
+        ],
+        supportMessages: [
+          { sender: "USER", text: "Sir mera withdrawal kitni der me UPI me aata hai?", time: "10:15 AM" },
+          { sender: "ADMIN", text: "Request submit karne ke 5–30 minutes ke andar UPI me UTR number ke saath aa jata hai!", time: "10:17 AM" },
+        ],
+        telegram: {
+          customHeader: "",
+          customFooter: "",
+          pendingAction: "",
+          messages: [
+            {
+              from: "bot",
+              text: "🎬 VidVora Creator Auto-Upload Bot\\n\\n1️⃣ Apna VidVora Creator / Admin account link karein (Password seedha bhejein)\\n2️⃣ Neeche diye gaye buttons se apna Header / Footer (apna channel link ya text) kabhi bhi edit karein, aur seedha video bhej kar apna link banayein! 👇",
+            },
+          ],
+        },
+      };
+    }
+
+    let state = loadState();
+
+    function loadState() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (raw) return JSON.parse(raw);
+      } catch (_) {}
+      return makeInitialState();
+    }
+    function saveState() {
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (_) {}
+    }
+
+    function fmtInr(n) {
+      const val = Math.max(0, Number(n) || 0);
+      const rounded = Math.round(val * 100) / 100;
+      return "₹" + rounded.toLocaleString("en-IN", { minimumFractionDigits: rounded % 1 === 0 ? 0 : 2, maximumFractionDigits: 2 });
+    }
+    function fmtNum(n) {
+      return Math.max(0, Math.floor(Number(n) || 0)).toLocaleString("en-IN");
+    }
+    function esc(str) {
+      return String(str == null ? "" : str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    function getCreatorSummary() {
+      const own = Number(state.creator.ownEarning) || 0;
+      const ref = Number(state.creator.referralEarning) || 0;
+      const total = Math.round((own + ref) * 100) / 100;
+      const pendingAmt = state.payouts
+        .filter((p) => p.status === "PENDING")
+        .reduce((acc, p) => acc + (Number(p.amount) || 0), 0);
+      const paidAmt = state.payouts
+        .filter((p) => p.status === "PAID")
+        .reduce((acc, p) => acc + (Number(p.amount) || 0), 0);
+      const available = Math.max(0, Math.round((total - paidAmt - pendingAmt) * 100) / 100);
+      return { own, ref, total, pendingAmt, paidAmt, available };
+    }
+
+    function showToast(msg) {
+      const wrap = document.getElementById("toastWrap");
+      const el = document.createElement("div");
+      el.className = "toast";
+      el.textContent = msg;
+      wrap.appendChild(el);
+      setTimeout(() => { el.style.opacity = "0"; el.style.transition = "opacity 0.25s"; }, 3100);
+      setTimeout(() => el.remove(), 3400);
+    }
+
+    function toggleStudioBar(show) {
+      const bar = document.getElementById("studioBar");
+      const btn = document.getElementById("showStudioBtn");
+      bar.classList.toggle("hidden", !show);
+      btn.classList.toggle("visible", !show);
+    }
+
+    function togglePhoneMode() {
+      state.phoneMode = !state.phoneMode;
+      saveState();
+      render();
+    }
+
+    function setMode(mode) {
+      state.mode = mode;
+      saveState();
+      render();
+    }
+    function setCreatorTab(tab) {
+      state.creatorTab = tab;
+      saveState();
+      render();
+    }
+    function setAdminTab(tab) {
+      state.adminTab = tab;
+      saveState();
+      render();
+    }
+    function setRefFilter(f) {
+      state.refFilter = f;
+      saveState();
+      render();
+    }
+    function setInactivityDays(d) {
+      state.inactivityDays = d;
+      saveState();
+      render();
+    }
+
+    function resetDemoState() {
+      state = makeInitialState();
+      saveState();
+      showToast("🔄 Demo fresh reset ho gaya!");
+      render();
+    }
+
+    // ==================== LIVE DEMO SIMULATOR ACTIONS ====================
+    function addDemoViews(viewsCount, videoIndex = 0) {
+      const v = Math.max(1, Math.floor(Number(viewsCount) || 0));
+      const earned = Math.round((v / 1000) * CPM_PER_1000 * 100) / 100;
+      state.creator.views += v;
+      state.creator.ownEarning = Math.round((state.creator.ownEarning + earned) * 100) / 100;
+      if (state.videos[videoIndex]) {
+        state.videos[videoIndex].views += v;
+        state.videos[videoIndex].earning = Math.round((state.videos[videoIndex].earning + earned) * 100) / 100;
+      }
+      const todayBar = state.creator.dailyBars[state.creator.dailyBars.length - 1];
+      if (todayBar) {
+        todayBar.views += v;
+        todayBar.amt = Math.round((todayBar.amt + earned) * 100) / 100;
+      }
+      saveState();
+      showToast("👁️ +" + fmtNum(v) + " Views added → +" + fmtInr(earned) + " Creator Wallet me jud gaya!");
+      render();
+    }
+
+    function addDemoEarning(amountInr) {
+      const amt = Math.round((Number(amountInr) || 0) * 100) / 100;
+      if (amt <= 0) return;
+      state.creator.ownEarning = Math.round((state.creator.ownEarning + amt) * 100) / 100;
+      const todayBar = state.creator.dailyBars[state.creator.dailyBars.length - 1];
+      if (todayBar) {
+        todayBar.amt = Math.round((todayBar.amt + amt) * 100) / 100;
+      }
+      saveState();
+      showToast("💰 +" + fmtInr(amt) + " Earning credit ho gayi! Ab Withdrawal dikha sakte hain.");
+      render();
+    }
+
+    function simulateReferredViews(viewsCount, refId = null) {
+      const target = refId
+        ? state.referrals.find((r) => r.id === refId)
+        : state.referrals.find((r) => r.status === "SUCCESSFUL") || state.referrals[0];
+      if (!target) return;
+      if (target.status !== "SUCCESSFUL") {
+        target.status = "SUCCESSFUL";
+      }
+      const v = Math.max(100, Math.floor(Number(viewsCount) || 5000));
+      const refCreatorEarned = Math.round((v / 1000) * CPM_PER_1000 * 100) / 100;
+      const bonus7 = Math.round(refCreatorEarned * REFERRAL_RATE * 100) / 100;
+      target.views += v;
+      target.ownEarning = Math.round((target.ownEarning + refCreatorEarned) * 100) / 100;
+      target.bonusToReferrer = Math.round((target.bonusToReferrer + bonus7) * 100) / 100;
+      state.creator.referralEarning = Math.round((state.creator.referralEarning + bonus7) * 100) / 100;
+      saveState();
+      showToast(
+        "🤝 " + target.name + " ko +" + fmtNum(v) + " views (" + fmtInr(refCreatorEarned) + ") mile — Admin ke taraf se 7% (+" + fmtInr(bonus7) + ") aapke Referral Bonus me add!"
+      );
+      render();
+    }
+
+    function approveReferredCreator(refId) {
+      const r = state.referrals.find((x) => x.id === refId);
+      if (!r) return;
+      r.status = "SUCCESSFUL";
+      saveState();
+      showToast("✅ " + r.name + " ka account Approved → Referrer ko ab Successful status dikhega!");
+      render();
+    }
+
+    function approvePayout(payId) {
+      const p = state.payouts.find((x) => x.id === payId);
+      if (!p || p.status !== "PENDING") return;
+      p.status = "PAID";
+      p.utr = "UTR" + Math.floor(100000000000 + Math.random() * 899999999999);
+      p.paidAt = "Just now";
+      saveState();
+      showToast("✅ Payout " + fmtInr(p.amount) + " PAID! UTR: " + p.utr + " (Creator Panel me status green ho gaya!)");
+      render();
+    }
+
+    function rejectPayout(payId) {
+      const p = state.payouts.find((x) => x.id === payId);
+      if (!p || p.status !== "PENDING") return;
+      p.status = "REJECTED";
+      p.utr = "Refunded to wallet";
+      saveState();
+      showToast("❌ Payout reject kiya — " + fmtInr(p.amount) + " creator ke Available Balance me wapas refund ho gaya!");
+      render();
+    }
+
+    function copyText(txt, label) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(txt).catch(() => {});
+      }
+      showToast("📋 " + label + " copied: " + txt);
+    }
+
+    // ==================== MODALS ====================
+    function openModal(html) {
+      document.getElementById("modalCard").innerHTML = html;
+      document.getElementById("modalBackdrop").classList.add("open");
+    }
+    function closeModal() {
+      document.getElementById("modalBackdrop").classList.remove("open");
+    }
+
+    function openCustomCreditModal() {
+      openModal(
+        '<div class="modal-head"><h3>⚙️ Custom Views / Earning Add Karein</h3><button class="btn btn-sm" onclick="closeModal()">✕</button></div>' +
+        '<div class="field"><label>Add Views (₹30 / 1,000 views auto-calculate)</label><input id="customViewsInp" class="input" type="number" placeholder="e.g. 25000" value="5000" /></div>' +
+        '<div class="field"><label>Ya Direct Bonus Earning Add Karein (₹)</label><input id="customInrInp" class="input" type="number" placeholder="e.g. 1500" value="0" /></div>' +
+        '<div style="display:flex; gap:8px; justify-content:flex-end; margin-top:14px;">' +
+          '<button class="btn" onclick="closeModal()">Cancel</button>' +
+          '<button class="btn btn-cyan" onclick="submitCustomCredit()">✅ Add to Creator Wallet</button>' +
+        '</div>'
+      );
+    }
+    function submitCustomCredit() {
+      const v = Number(document.getElementById("customViewsInp").value || 0);
+      const inr = Number(document.getElementById("customInrInp").value || 0);
+      if (v > 0) addDemoViews(v);
+      if (inr > 0) addDemoEarning(inr);
+      closeModal();
+    }
+
+    function openWithdrawModal() {
+      const s = getCreatorSummary();
+      openModal(
+        '<div class="modal-head"><h3>💸 Request UPI Withdrawal</h3><button class="btn btn-sm" onclick="closeModal()">✕</button></div>' +
+        '<div class="card card-glow-green" style="margin-bottom:12px;">' +
+          '<div class="kpi-label">Available Balance (Own + 7% Referral Bonus)</div>' +
+          '<div class="kpi-val text-green">' + fmtInr(s.available) + '</div>' +
+          '<div class="kpi-sub">Minimum withdrawal: ₹100 • Instant UPI payout</div>' +
+        '</div>' +
+        '<div class="field"><label>UPI ID (PhonePe / GPay / Paytm)</label><input id="wdUpi" class="input" value="' + esc(state.creator.upiId) + '" placeholder="name@ybl" /></div>' +
+        '<div class="field"><label>Withdrawal Amount (₹)</label><input id="wdAmt" class="input" type="number" value="' + Math.min(Math.floor(s.available), 500) + '" min="100" max="' + Math.floor(s.available) + '" /></div>' +
+        '<div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:14px;">' +
+          '<button class="btn btn-sm" onclick="document.getElementById(\\'wdAmt\\').value=100">₹100</button>' +
+          '<button class="btn btn-sm" onclick="document.getElementById(\\'wdAmt\\').value=500">₹500</button>' +
+          '<button class="btn btn-sm" onclick="document.getElementById(\\'wdAmt\\').value=1000">₹1,000</button>' +
+          '<button class="btn btn-sm btn-gold" onclick="document.getElementById(\\'wdAmt\\').value=' + Math.floor(s.available) + '">Max (' + fmtInr(Math.floor(s.available)) + ')</button>' +
+        '</div>' +
+        '<div style="display:flex; gap:8px; justify-content:flex-end;">' +
+          '<button class="btn" onclick="closeModal()">Cancel</button>' +
+          '<button class="btn btn-green" onclick="submitWithdrawal()">🚀 Submit Withdrawal Request</button>' +
+        '</div>'
+      );
+    }
+
+    function submitWithdrawal() {
+      const s = getCreatorSummary();
+      const upi = String(document.getElementById("wdUpi").value || "").trim();
+      const amt = Math.round((Number(document.getElementById("wdAmt").value) || 0) * 100) / 100;
+      if (!upi.includes("@")) { showToast("⚠️ Sahi UPI ID dalein (e.g. rohan@ybl)"); return; }
+      if (amt < 100) { showToast("⚠️ Minimum withdrawal ₹100 hai!"); return; }
+      if (amt > s.available) { showToast("⚠️ Balance kam hai! Upar Demo Controls se pehle Earning add kar lo."); return; }
+      state.creator.upiId = upi;
+      const id = "PAY-" + Math.floor(1000 + Math.random() * 8999);
+      state.payouts.unshift({
+        id,
+        creatorName: state.creator.name,
+        upiId: upi,
+        amount: amt,
+        status: "PENDING",
+        utr: "Waiting Admin Approval",
+        createdAt: "Just now",
+        paidAt: "",
+      });
+      state.creatorTab = "withdrawals";
+      saveState();
+      closeModal();
+      showToast("✅ Withdrawal " + fmtInr(amt) + " submitted! Ab Admin Panel → Payouts me jaakar Approve karein.");
+      render();
+    }
+
+    function openUploadModal() {
+      openModal(
+        '<div class="modal-head"><h3>📤 Upload Video / Generate Share Link</h3><button class="btn btn-sm" onclick="closeModal()">✕</button></div>' +
+        '<div class="field"><label>Video Title</label><input id="upTitle" class="input" placeholder="e.g. New Full Movie 2026 HD" value="New Action Movie 1080p HD" /></div>' +
+        '<div class="field"><label>File Size / Format (Supports up to 4 GB+)</label><input id="upSize" class="input" value="1.8 GB • MP4" /></div>' +
+        '<div style="display:flex; gap:8px; justify-content:flex-end; margin-top:14px;">' +
+          '<button class="btn" onclick="closeModal()">Cancel</button>' +
+          '<button class="btn btn-cyan" onclick="submitDemoUpload()">🚀 Publish &amp; Get Share Link</button>' +
+        '</div>'
+      );
+    }
+    function submitDemoUpload() {
+      const title = String(document.getElementById("upTitle").value || "").trim() || "Creator Video HD";
+      const sizeLabel = String(document.getElementById("upSize").value || "").trim() || "1.2 GB • MP4";
+      const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+      let rnd = "";
+      for (let i = 0; i < 8; i++) rnd += chars[Math.floor(Math.random() * chars.length)];
+      const code = "GM-" + rnd;
+      state.videos.unshift({
+        id: "vid_" + Date.now(),
+        title,
+        code,
+        sizeLabel,
+        views: 0,
+        earning: 0,
+        createdAt: "Just now",
+      });
+      saveState();
+      closeModal();
+      showToast("🎬 Video publish ho gaya! Share code: " + code);
+      render();
+    }
+
+    function openAddCreatorModal() {
+      openModal(
+        '<div class="modal-head"><h3>➕ Add New Creator (Admin)</h3><button class="btn btn-sm" onclick="closeModal()">✕</button></div>' +
+        '<div class="field"><label>Creator Name</label><input id="newCrName" class="input" placeholder="e.g. Rahul Yadav" value="Rahul Yadav" /></div>' +
+        '<div class="field"><label>Email</label><input id="newCrEmail" class="input" placeholder="rahul@gmail.com" value="rahul@gmail.com" /></div>' +
+        '<div class="field"><label>Referral Code (Optional)</label><input id="newCrRef" class="input" value="' + esc(state.creator.referralCode) + '" /></div>' +
+        '<div style="display:flex; gap:8px; justify-content:flex-end; margin-top:14px;">' +
+          '<button class="btn" onclick="closeModal()">Cancel</button>' +
+          '<button class="btn btn-gold" onclick="submitNewCreator()">✅ Create Creator Account</button>' +
+        '</div>'
+      );
+    }
+    function submitNewCreator() {
+      const name = String(document.getElementById("newCrName").value || "").trim() || "New Creator";
+      const email = String(document.getElementById("newCrEmail").value || "").trim() || "creator@gmail.com";
+      state.referrals.unshift({
+        id: "ref_" + Date.now(),
+        name,
+        email,
+        status: "SUCCESSFUL",
+        views: 0,
+        ownEarning: 0,
+        bonusToReferrer: 0,
+        joinedAt: "Just now",
+      });
+      saveState();
+      closeModal();
+      showToast("✅ " + name + " add ho gaya aur Referral list me Successful show ho raha hai!");
+      render();
+    }
+
+    function openPlayerPreview(videoId) {
+      const v = state.videos.find((x) => x.id === videoId);
+      if (!v) return;
+      openModal(
+        '<div class="modal-head"><h3>▶️ VidVora Fast Player Preview</h3><button class="btn btn-sm" onclick="closeModal()">✕</button></div>' +
+        '<div style="background:#000; border-radius:12px; padding:34px 16px; text-align:center; border:1px solid #1e293b; margin-bottom:12px;">' +
+          '<div style="font-size:38px;">🎬</div>' +
+          '<div style="font-weight:800; margin-top:8px;">' + esc(v.title) + '</div>' +
+          '<div style="font-size:12px; color:#00e5ff; margin-top:4px;">HTTP 206 Byte-Range Streaming • Auto HD • 0 Buffer</div>' +
+          '<div class="progress-track" style="margin-top:14px;"><div class="progress-fill" style="width:42%;"></div></div>' +
+          '<div style="display:flex; justify-content:space-between; font-size:11px; color:#94a3b8; margin-top:6px;"><span>14:22</span><span>HQ • 1.0x • Fullscreen</span><span>34:10</span></div>' +
+        '</div>' +
+        '<div style="display:flex; justify-content:space-between; gap:8px;">' +
+          '<button class="btn btn-cyan" onclick="addDemoViews(1000, ' + state.videos.indexOf(v) + '); closeModal();">+1,000 Views Simulate</button>' +
+          '<button class="btn" onclick="closeModal()">Close</button>' +
+        '</div>'
+      );
+    }
+
+    // ==================== TELEGRAM BOT DEMO ====================
+    function buildTgPreviewCaption() {
+      const h = state.telegram.customHeader;
+      const f = state.telegram.customFooter;
+      const lines = [];
+      if (h !== "__NONE__") {
+        lines.push(h || "🎬 VidVora — Watch Video", "");
+      }
+      lines.push("🔗 Watch Full Video:", SHARE_BASE + (state.videos[0]?.code || "GM-DEMO9999"));
+      if (f !== "__NONE__") {
+        lines.push("", f || "वीडियो कैसे देखे / How to play video\\n👇👇👇👇\\nhttps://t.me/VideoKaiseDekhe_ar");
+      }
+      return lines.join("\\n");
+    }
+
+    function tgPressButton(label) {
+      state.telegram.messages.push({ from: "user", text: label });
+      if (label === "✏️ Edit Header") {
+        state.telegram.pendingAction = "header";
+        state.telegram.messages.push({
+          from: "bot",
+          text: "✏️ Apna naya Header text ya channel link neeche input box me bhejein (ya Remove/Default button dabayein):",
+          inline: [
+            { label: "🚫 Remove Header", action: "rm_header" },
+            { label: "♻️ Default Header", action: "def_header" },
+          ],
+        });
+      } else if (label === "✏️ Edit Footer") {
+        state.telegram.pendingAction = "footer";
+        state.telegram.messages.push({
+          from: "bot",
+          text: "✏️ Apna naya Footer text ya channel link neeche bhejein (agar change nahi karenge toh default How to play video laga rahega):",
+          inline: [
+            { label: "🚫 Remove Footer", action: "rm_footer" },
+            { label: "♻️ Default Footer", action: "def_footer" },
+          ],
+        });
+      } else if (label === "⚙️ Header / Footer Settings") {
+        state.telegram.pendingAction = "";
+        const hTxt = state.telegram.customHeader === "__NONE__" ? "Removed" : (state.telegram.customHeader || "Default (🎬 VidVora — Watch Video)");
+        const fTxt = state.telegram.customFooter === "__NONE__" ? "Removed" : (state.telegram.customFooter || "Default (वीडियो कैसे देखे / How to play video)");
+        state.telegram.messages.push({
+          from: "bot",
+          text: "📝 Post Header & Footer Settings\\n\\nHeader: " + hTxt + "\\nFooter: " + fTxt,
+          inline: [
+            { label: "🚫 Remove Footer", action: "rm_footer" },
+            { label: "♻️ Default Footer", action: "def_footer" },
+          ],
+        });
+      } else if (label === "👁️ Preview Post") {
+        state.telegram.pendingAction = "";
+        state.telegram.messages.push({
+          from: "bot",
+          text: "👁️ Live Post Preview:\\n\\n" + buildTgPreviewCaption(),
+        });
+      } else if (label === "📊 My Status") {
+        state.telegram.pendingAction = "";
+        state.telegram.messages.push({
+          from: "bot",
+          text: "✅ Linked Account: " + state.creator.name + "\\n📤 Uploads via Bot: " + state.videos.length + "\\n📝 Header: " + (state.telegram.customHeader ? "Custom" : "Default") + " • Footer: " + (state.telegram.customFooter ? "Custom" : "Default"),
+        });
+      } else if (label === "📤 Send Sample Video") {
+        state.telegram.pendingAction = "";
+        state.telegram.messages.push({
+          from: "bot",
+          text: "🎞️ [5-Sec Video Preview Clip]\\n\\n" + buildTgPreviewCaption(),
+        });
+      }
+      saveState();
+      render();
+      const box = document.getElementById("tgMessages");
+      if (box) box.scrollTop = box.scrollHeight;
+    }
+
+    function tgInlineAction(act) {
+      if (act === "rm_header") state.telegram.customHeader = "__NONE__";
+      if (act === "def_header") state.telegram.customHeader = "";
+      if (act === "rm_footer") state.telegram.customFooter = "__NONE__";
+      if (act === "def_footer") state.telegram.customFooter = "";
+      state.telegram.pendingAction = "";
+      state.telegram.messages.push({ from: "bot", text: "✅ Updated! Preview:\\n\\n" + buildTgPreviewCaption() });
+      saveState();
+      render();
+    }
+
+    function tgSendText() {
+      const inp = document.getElementById("tgInput");
+      if (!inp) return;
+      const val = String(inp.value || "").trim();
+      if (!val) return;
+      state.telegram.messages.push({ from: "user", text: val });
+      if (state.telegram.pendingAction === "header") {
+        state.telegram.customHeader = val;
+        state.telegram.pendingAction = "";
+        state.telegram.messages.push({ from: "bot", text: "✅ Header save ho gaya!\\n\\n" + buildTgPreviewCaption() });
+      } else if (state.telegram.pendingAction === "footer") {
+        state.telegram.customFooter = val;
+        state.telegram.pendingAction = "";
+        state.telegram.messages.push({ from: "bot", text: "✅ Footer save ho gaya!\\n\\n" + buildTgPreviewCaption() });
+      } else {
+        state.telegram.messages.push({ from: "bot", text: "📹 Video ya button select karein! Neeche buttons se Header/Footer edit kar sakte hain." });
+      }
+      saveState();
+      render();
+      const box = document.getElementById("tgMessages");
+      if (box) box.scrollTop = box.scrollHeight;
+    }
+
+    function sendSupportMsg(role) {
+      const id = role === "ADMIN" ? "adminSupportInp" : "creatorSupportInp";
+      const inp = document.getElementById(id);
+      if (!inp) return;
+      const txt = String(inp.value || "").trim();
+      if (!txt) return;
+      state.supportMessages.push({ sender: role, text: txt, time: "Just now" });
+      saveState();
+      showToast(role === "ADMIN" ? "💬 Admin reply sent to Creator!" : "💬 Message sent to Admin Support!");
+      render();
+    }
+
+    function updateBroadcast() {
+      const inp = document.getElementById("adminBroadcastInp");
+      if (!inp) return;
+      const txt = String(inp.value || "").trim();
+      if (!txt) return;
+      state.announcement = txt;
+      saveState();
+      showToast("📢 Announcement live ho gaya! Creator Panel me turant dikhega.");
+      render();
+    }
+
+    // ==================== RENDERERS ====================
+    function renderCreatorPanel() {
+      const s = getCreatorSummary();
+      const pendingPayoutsCount = state.payouts.filter((p) => p.status === "PENDING").length;
+
+      let html =
+        '<div class="app-header">' +
+          '<div class="app-title-block">' +
+            '<h1>🎬 Creator Studio</h1>' +
+            '<p>' + esc(state.creator.name) + ' • Code: ' + esc(state.creator.referralCode) + '</p>' +
+          '</div>' +
+          '<div class="role-badge">💰 Balance: ' + fmtInr(s.available) + '</div>' +
+        '</div>' +
+        '<div class="tabs">' +
+          '<button class="tab-btn ' + (state.creatorTab === "wallet" ? "active" : "") + '" onclick="setCreatorTab(\\'wallet\\')">💰 Wallet &amp; Earnings</button>' +
+          '<button class="tab-btn ' + (state.creatorTab === "videos" ? "active" : "") + '" onclick="setCreatorTab(\\'videos\\')">🎞️ My Videos <span class="badge-count">' + state.videos.length + '</span></button>' +
+          '<button class="tab-btn ' + (state.creatorTab === "refer" ? "active" : "") + '" onclick="setCreatorTab(\\'refer\\')">🤝 Refer &amp; Earn 7% <span class="badge-count">' + state.referrals.length + '</span></button>' +
+          '<button class="tab-btn ' + (state.creatorTab === "withdrawals" ? "active" : "") + '" onclick="setCreatorTab(\\'withdrawals\\')">💸 Withdrawals ' + (pendingPayoutsCount ? '<span class="badge-count">' + pendingPayoutsCount + '</span>' : '') + '</button>' +
+          '<button class="tab-btn ' + (state.creatorTab === "extras" ? "active" : "") + '" onclick="setCreatorTab(\\'extras\\')">🎁 Events &amp; Support</button>' +
+        '</div>' +
+        '<div class="content">';
+
+      if (state.announcement) {
+        html += '<div class="banner-announce"><span>📢 ' + esc(state.announcement) + '</span><span class="pill pill-cyan">LIVE</span></div>';
+      }
+
+      if (state.creatorTab === "wallet") {
+        const maxAmt = Math.max(100, ...state.creator.dailyBars.map((b) => b.amt));
+        html +=
+          '<div class="card card-glow-green" style="display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap;">' +
+            '<div>' +
+              '<div class="kpi-label text-green">Available Balance (Ready for UPI Withdrawal)</div>' +
+              '<div class="kpi-val text-green" style="font-size:32px;">' + fmtInr(s.available) + '</div>' +
+              '<div class="kpi-sub">Total Earning (' + fmtInr(s.total) + ') = Own Views (' + fmtInr(s.own) + ') + 7% Referral Bonus (' + fmtInr(s.ref) + ') • Paid: ' + fmtInr(s.paidAmt) + (s.pendingAmt > 0 ? ' • Pending: ' + fmtInr(s.pendingAmt) : '') + '</div>' +
+            '</div>' +
+            '<div style="display:flex; gap:8px; flex-wrap:wrap;">' +
+              '<button class="btn btn-green btn-lg" onclick="openWithdrawModal()">💸 Withdraw via UPI</button>' +
+              '<button class="btn btn-cyan" onclick="addDemoViews(5000)">⚡ +5K Demo Views</button>' +
+            '</div>' +
+          '</div>' +
+          '<div class="grid grid-4">' +
+            '<div class="card card-glow-cyan"><div class="kpi-label">Total Views</div><div class="kpi-val text-cyan">' + fmtNum(state.creator.views) + '</div><div class="kpi-sub">Rate: ₹' + CPM_PER_1000 + ' / 1,000 views</div></div>' +
+            '<div class="card"><div class="kpi-label">Own Views Earning</div><div class="kpi-val">' + fmtInr(s.own) + '</div><div class="kpi-sub">100% creator share</div></div>' +
+            '<div class="card card-glow-purple"><div class="kpi-label">Referral Bonus (7%)</div><div class="kpi-val text-purple">' + fmtInr(s.ref) + '</div><div class="kpi-sub">Admin-funded • 0% cut</div></div>' +
+            '<div class="card card-glow-gold"><div class="kpi-label">Total Earning</div><div class="kpi-val text-gold">' + fmtInr(s.total) + '</div><div class="kpi-sub">Unified single wallet</div></div>' +
+          '</div>' +
+          '<div class="card">' +
+            '<div class="section-head"><div class="section-title">📈 Last 7 Days Earnings Performance</div><span class="pill pill-cyan">Live Updates</span></div>' +
+            '<div class="chart-bars">' +
+              state.creator.dailyBars.map((b) => {
+                const hPct = Math.max(10, Math.round((b.amt / maxAmt) * 100));
+                return '<div class="bar-col"><div class="bar-amt">' + fmtInr(b.amt) + '</div><div class="bar-fill" style="height:' + hPct + '%;"></div><div class="bar-day">' + esc(b.day) + '</div></div>';
+              }).join("") +
+            '</div>' +
+          '</div>';
+      }
+
+      if (state.creatorTab === "videos") {
+        html +=
+          '<div class="section-head">' +
+            '<div class="section-title">🎞️ Uploaded Videos &amp; Share Links</div>' +
+            '<button class="btn btn-cyan" onclick="openUploadModal()">+ Upload Video / Get Link</button>' +
+          '</div>' +
+          '<div class="list">' +
+            state.videos.map((v, idx) =>
+              '<div class="item-row">' +
+                '<div class="item-main">' +
+                  '<div class="item-title">🎬 ' + esc(v.title) + ' <span class="pill pill-cyan">' + esc(v.code) + '</span></div>' +
+                  '<div class="item-meta">' + esc(v.sizeLabel) + ' • 👁️ <b>' + fmtNum(v.views) + ' views</b> • 💰 <b class="text-green">' + fmtInr(v.earning) + '</b> • ' + esc(v.createdAt) + '</div>' +
+                '</div>' +
+                '<div class="item-actions">' +
+                  '<button class="btn btn-sm" onclick="openPlayerPreview(\\'' + esc(v.id) + '\\')">▶️ Play</button>' +
+                  '<button class="btn btn-sm btn-cyan" onclick="addDemoViews(1000, ' + idx + ')">+1K Views</button>' +
+                  '<button class="btn btn-sm btn-gold" onclick="copyText(\\'' + esc(SHARE_BASE + v.code) + '\\', \\'Share Link\\')">📋 Copy Link</button>' +
+                '</div>' +
+              '</div>'
+            ).join("") +
+          '</div>';
+      }
+
+      if (state.creatorTab === "refer") {
+        const successCount = state.referrals.filter((r) => r.status === "SUCCESSFUL").length;
+        const pendingCount = state.referrals.filter((r) => r.status === "PENDING").length;
+        const filtered = state.referrals.filter((r) => {
+          if (state.refFilter === "successful") return r.status === "SUCCESSFUL";
+          if (state.refFilter === "pending") return r.status === "PENDING";
+          return true;
+        });
+
+        html +=
+          '<div class="card card-glow-purple">' +
+            '<div class="section-head">' +
+              '<div><div class="section-title">🤝 Refer &amp; Earn 7% Lifetime Bonus</div><div class="kpi-sub">Admin ke taraf se 7% extra bonus milta hai — referred creator ki earning ya views se ₹1 bhi nahi katta!</div></div>' +
+              '<span class="pill pill-purple">ADMIN-FUNDED 7%</span>' +
+            '</div>' +
+            '<div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-top:10px;">' +
+              '<div class="code-box">' + esc(state.creator.referralCode) + '</div>' +
+              '<div style="display:flex; gap:8px; flex-wrap:wrap;">' +
+                '<button class="btn btn-cyan" onclick="copyText(\\'' + esc(state.creator.referralCode) + '\\', \\'Referral Code\\')">📋 Copy Code</button>' +
+                '<button class="btn btn-gold" onclick="copyText(\\'Join VidVora Creator using my code ' + esc(state.creator.referralCode) + '\\', \\'Invite Message\\')">📤 Share Invite</button>' +
+              '</div>' +
+            '</div>' +
+          '</div>' +
+          '<div class="grid grid-4">' +
+            '<div class="card"><div class="kpi-label">Total Referred</div><div class="kpi-val">' + state.referrals.length + '</div></div>' +
+            '<div class="card card-glow-green"><div class="kpi-label">Successful</div><div class="kpi-val text-green">' + successCount + '</div></div>' +
+            '<div class="card card-glow-gold"><div class="kpi-label">Pending</div><div class="kpi-val text-gold">' + pendingCount + '</div></div>' +
+            '<div class="card card-glow-purple"><div class="kpi-label">7% Bonus Earned</div><div class="kpi-val text-purple">' + fmtInr(s.ref) + '</div></div>' +
+          '</div>' +
+          '<div style="display:flex; gap:7px; flex-wrap:wrap;">' +
+            '<button class="btn btn-sm ' + (state.refFilter === "all" ? "btn-cyan" : "") + '" onclick="setRefFilter(\\'all\\')">All (' + state.referrals.length + ')</button>' +
+            '<button class="btn btn-sm ' + (state.refFilter === "successful" ? "btn-green" : "") + '" onclick="setRefFilter(\\'successful\\')">Successful (' + successCount + ')</button>' +
+            '<button class="btn btn-sm ' + (state.refFilter === "pending" ? "btn-gold" : "") + '" onclick="setRefFilter(\\'pending\\')">Pending (' + pendingCount + ')</button>' +
+          '</div>' +
+          '<div class="list">' +
+            filtered.map((r) =>
+              '<div class="item-row">' +
+                '<div class="item-main">' +
+                  '<div class="item-title">👤 ' + esc(r.name) + ' ' + (r.status === "SUCCESSFUL" ? '<span class="pill pill-green">✅ Successful</span>' : '<span class="pill pill-gold">⏳ Pending</span>') + '</div>' +
+                  '<div class="item-meta">Views: <b>' + fmtNum(r.views) + '</b> • Unki Earning: <b>' + fmtInr(r.ownEarning) + '</b> (0% cut) • Aapka 7% Bonus: <b class="text-purple">+' + fmtInr(r.bonusToReferrer) + '</b></div>' +
+                '</div>' +
+                '<div class="item-actions">' +
+                  '<button class="btn btn-sm btn-purple" onclick="simulateReferredViews(5000, \\'' + esc(r.id) + '\\')">⚡ +5K Views (+7% Bonus)</button>' +
+                '</div>' +
+              '</div>'
+            ).join("") +
+          '</div>';
+      }
+
+      if (state.creatorTab === "withdrawals") {
+        html +=
+          '<div class="section-head">' +
+            '<div class="section-title">💸 Withdrawal &amp; Payout History</div>' +
+            '<button class="btn btn-green" onclick="openWithdrawModal()">+ New UPI Withdrawal</button>' +
+          '</div>' +
+          '<div class="list">' +
+            state.payouts.map((p) => {
+              const pillCls = p.status === "PAID" ? "pill-green" : p.status === "REJECTED" ? "pill-red" : "pill-gold";
+              const pillLbl = p.status === "PAID" ? "✅ PAID" : p.status === "REJECTED" ? "❌ REJECTED" : "⏳ PENDING";
+              return '<div class="item-row">' +
+                '<div class="item-main">' +
+                  '<div class="item-title">' + fmtInr(p.amount) + ' → ' + esc(p.upiId) + ' <span class="pill ' + pillCls + '">' + pillLbl + '</span></div>' +
+                  '<div class="item-meta">ID: ' + esc(p.id) + ' • ' + esc(p.createdAt) + ' • UTR: <b>' + esc(p.utr) + '</b></div>' +
+                '</div>' +
+                (p.status === "PENDING" ? '<div class="item-actions"><button class="btn btn-sm btn-gold" onclick="setMode(\\'admin\\'); setAdminTab(\\'payouts\\');">🛡️ Approve in Admin Panel →</button></div>' : '') +
+              '</div>';
+            }).join("") +
+          '</div>';
+      }
+
+      if (state.creatorTab === "extras") {
+        html +=
+          '<div class="section-title">🎁 Active Creator Events &amp; Milestone Gifts</div>' +
+          '<div class="grid grid-2">' +
+            state.events.map((e) =>
+              '<div class="card card-glow-gold">' +
+                '<div class="item-title">' + esc(e.title) + '</div>' +
+                '<div style="margin:6px 0;"><span class="pill pill-gold">🏆 ' + esc(e.reward) + '</span></div>' +
+                '<div class="item-meta">' + esc(e.desc) + '</div>' +
+              '</div>'
+            ).join("") +
+          '</div>' +
+          '<div class="card">' +
+            '<div class="section-title" style="margin-bottom:10px;">💬 Live Admin Support Chat</div>' +
+            '<div class="list" style="margin-bottom:10px;">' +
+              state.supportMessages.map((m) =>
+                '<div class="item-row" style="border-color:' + (m.sender === "ADMIN" ? "rgba(0,229,255,0.35)" : "var(--border)") + ';">' +
+                  '<div class="item-main"><div class="item-title">' + (m.sender === "ADMIN" ? "🛡️ VidVora Support" : "👤 You") + ' <span class="item-meta">' + esc(m.time) + '</span></div><div>' + esc(m.text) + '</div></div>' +
+                '</div>'
+              ).join("") +
+            '</div>' +
+            '<div style="display:flex; gap:8px;">' +
+              '<input id="creatorSupportInp" class="input" placeholder="Apna message likhein..." onkeydown="if(event.key===\\'Enter\\') sendSupportMsg(\\'USER\\')" />' +
+              '<button class="btn btn-cyan" onclick="sendSupportMsg(\\'USER\\')">Send</button>' +
+            '</div>' +
+          '</div>';
+      }
+
+      html += '</div>';
+      return html;
+    }
+
+    function renderAdminPanel() {
+      const pendingPayouts = state.payouts.filter((p) => p.status === "PENDING");
+      const retPct = Math.round((state.installs.installed * 100) / Math.max(1, state.installs.downloaded));
+
+      let html =
+        '<div class="app-header">' +
+          '<div class="app-title-block">' +
+            '<h1>🛡️ Administrator Panel</h1>' +
+            '<p style="color:var(--gold);">Superadmin Full Management Mode</p>' +
+          '</div>' +
+          '<div class="role-badge admin">👑 Role: Superadmin</div>' +
+        '</div>' +
+        '<div class="tabs">' +
+          '<button class="tab-btn ' + (state.adminTab === "payouts" ? "active-gold" : "") + '" onclick="setAdminTab(\\'payouts\\')">💳 Payout Queue <span class="badge-count">' + pendingPayouts.length + '</span></button>' +
+          '<button class="tab-btn ' + (state.adminTab === "creators" ? "active-gold" : "") + '" onclick="setAdminTab(\\'creators\\')">👥 Creators &amp; Credit <span class="badge-count">' + (state.referrals.length + 1) + '</span></button>' +
+          '<button class="tab-btn ' + (state.adminTab === "installs" ? "active-gold" : "") + '" onclick="setAdminTab(\\'installs\\')">📱 Installs <span class="badge-count">' + state.installs.downloaded + '</span></button>' +
+          '<button class="tab-btn ' + (state.adminTab === "broadcast" ? "active-gold" : "") + '" onclick="setAdminTab(\\'broadcast\\')">📢 Broadcast &amp; Support</button>' +
+        '</div>' +
+        '<div class="content">';
+
+      if (state.adminTab === "payouts") {
+        html +=
+          '<div class="section-head">' +
+            '<div class="section-title">💳 Creator UPI Withdrawal Queue</div>' +
+            '<button class="btn btn-cyan btn-sm" onclick="setMode(\\'creator\\'); setCreatorTab(\\'withdrawals\\');">← Switch to Creator Panel</button>' +
+          '</div>' +
+          '<div class="list">' +
+            state.payouts.map((p) => {
+              const isPend = p.status === "PENDING";
+              const pillCls = p.status === "PAID" ? "pill-green" : p.status === "REJECTED" ? "pill-red" : "pill-gold";
+              return '<div class="item-row">' +
+                '<div class="item-main">' +
+                  '<div class="item-title">' + esc(p.creatorName) + ' — <span class="text-gold">' + fmtInr(p.amount) + '</span> <span class="pill ' + pillCls + '">' + esc(p.status) + '</span></div>' +
+                  '<div class="item-meta">UPI: <b>' + esc(p.upiId) + '</b> • ID: ' + esc(p.id) + ' • ' + esc(p.createdAt) + ' • UTR: ' + esc(p.utr) + '</div>' +
+                '</div>' +
+                (isPend
+                  ? '<div class="item-actions">' +
+                      '<button class="btn btn-sm btn-green" onclick="approvePayout(\\'' + esc(p.id) + '\\')">✅ Approve &amp; Mark Paid</button>' +
+                      '<button class="btn btn-sm btn-red" onclick="rejectPayout(\\'' + esc(p.id) + '\\')">❌ Reject &amp; Refund</button>' +
+                    '</div>'
+                  : '') +
+              '</div>';
+            }).join("") +
+          '</div>';
+      }
+
+      if (state.adminTab === "creators") {
+        const s = getCreatorSummary();
+        html +=
+          '<div class="section-head">' +
+            '<div class="section-title">👥 Manage Creators &amp; Direct Views/Earning Credit</div>' +
+            '<button class="btn btn-gold" onclick="openAddCreatorModal()">+ Add New Creator</button>' +
+          '</div>' +
+          '<div class="list">' +
+            '<div class="item-row" style="border-color:rgba(0,229,255,0.4);">' +
+              '<div class="item-main">' +
+                '<div class="item-title">⭐ ' + esc(state.creator.name) + ' <span class="pill pill-cyan">Main Demo Creator</span></div>' +
+                '<div class="item-meta">Views: <b>' + fmtNum(state.creator.views) + '</b> • Own: <b>' + fmtInr(s.own) + '</b> • 7% Ref Bonus: <b class="text-purple">' + fmtInr(s.ref) + '</b> • Available: <b class="text-green">' + fmtInr(s.available) + '</b></div>' +
+              '</div>' +
+              '<div class="item-actions">' +
+                '<button class="btn btn-sm btn-cyan" onclick="addDemoViews(5000)">+5K Views</button>' +
+                '<button class="btn btn-sm btn-gold" onclick="addDemoEarning(500)">+₹500 Credit</button>' +
+              '</div>' +
+            '</div>' +
+            state.referrals.map((r) =>
+              '<div class="item-row">' +
+                '<div class="item-main">' +
+                  '<div class="item-title">👤 ' + esc(r.name) + ' <span class="pill ' + (r.status === "SUCCESSFUL" ? "pill-green" : "pill-gold") + '">' + esc(r.status) + '</span> <span class="pill pill-purple">Referred by Rohan</span></div>' +
+                  '<div class="item-meta">Views: <b>' + fmtNum(r.views) + '</b> • Earning: <b>' + fmtInr(r.ownEarning) + '</b> • Auto 7% Bonus Paid by Admin: <b class="text-purple">' + fmtInr(r.bonusToReferrer) + '</b></div>' +
+                '</div>' +
+                '<div class="item-actions">' +
+                  (r.status === "PENDING" ? '<button class="btn btn-sm btn-green" onclick="approveReferredCreator(\\'' + esc(r.id) + '\\')">✅ Approve Creator</button>' : '') +
+                  '<button class="btn btn-sm btn-purple" onclick="simulateReferredViews(5000, \\'' + esc(r.id) + '\\')">⚡ Add +5K Views (+7% Auto)</button>' +
+                '</div>' +
+              '</div>'
+            ).join("") +
+          '</div>';
+      }
+
+      if (state.adminTab === "installs") {
+        html +=
+          '<div class="grid grid-3">' +
+            '<div class="card card-glow-cyan"><div class="kpi-label">Downloaded (All-Time)</div><div class="kpi-val text-cyan">' + fmtNum(state.installs.downloaded) + '</div><div class="kpi-sub">1 Device = 1 Install</div></div>' +
+            '<div class="card card-glow-green"><div class="kpi-label">Installed (Active)</div><div class="kpi-val text-green">' + fmtNum(state.installs.installed) + '</div><div class="kpi-sub">Real Android devices</div></div>' +
+            '<div class="card"><div class="kpi-label">Uninstalled</div><div class="kpi-val text-red">' + fmtNum(state.installs.uninstalled) + '</div><div class="kpi-sub">Inactive &gt;' + state.inactivityDays + 'd</div></div>' +
+          '</div>' +
+          '<div class="card">' +
+            '<div class="section-head"><div class="section-title">Active Retention Rate</div><div class="text-green" style="font-weight:900; font-size:17px;">' + retPct + '%</div></div>' +
+            '<div class="progress-track"><div class="progress-fill" style="width:' + retPct + '%;"></div></div>' +
+            '<div class="grid grid-2" style="margin-top:12px;">' +
+              '<div class="card card-glow-gold"><div class="kpi-label text-gold">NEW TODAY (24H)</div><div class="kpi-val">' + fmtNum(state.installs.new24h) + '</div></div>' +
+              '<div class="card card-glow-green"><div class="kpi-label text-green">ACTIVE TODAY (24H)</div><div class="kpi-val">' + fmtNum(state.installs.active24h) + '</div></div>' +
+            '</div>' +
+            '<div style="display:flex; gap:8px; margin-top:12px;">' +
+              [7, 14, 30].map((d) => '<button class="btn ' + (state.inactivityDays === d ? "btn-gold" : "") + '" onclick="setInactivityDays(' + d + ')">' + d + ' Days Window</button>').join("") +
+            '</div>' +
+          '</div>' +
+          '<div class="list">' +
+            state.installs.devices.map((d) =>
+              '<div class="item-row">' +
+                '<div class="item-main"><div class="item-title">📱 ' + esc(d.name) + ' <span class="pill ' + (d.active ? "pill-green" : "pill-red") + '">' + (d.active ? "Installed" : "Uninstalled") + '</span></div>' +
+                '<div class="item-meta">' + esc(d.android) + ' • ' + esc(d.ver) + ' • Sessions: ' + d.sessions + ' • Last active: ' + esc(d.lastSeen) + '</div></div>' +
+              '</div>'
+            ).join("") +
+          '</div>';
+      }
+
+      if (state.adminTab === "broadcast") {
+        html +=
+          '<div class="card">' +
+            '<div class="section-title" style="margin-bottom:10px;">📢 Publish Live Creator Announcement</div>' +
+            '<div style="display:flex; gap:8px; flex-wrap:wrap;">' +
+              '<input id="adminBroadcastInp" class="input" style="flex:1; min-width:200px;" value="' + esc(state.announcement) + '" />' +
+              '<button class="btn btn-gold" onclick="updateBroadcast()">📣 Push to All Creators</button>' +
+            '</div>' +
+          '</div>' +
+          '<div class="card">' +
+            '<div class="section-title" style="margin-bottom:10px;">💬 Reply to Creator Support Chat</div>' +
+            '<div class="list" style="margin-bottom:10px;">' +
+              state.supportMessages.map((m) =>
+                '<div class="item-row"><div class="item-main"><div class="item-title">' + (m.sender === "ADMIN" ? "🛡️ You (Admin)" : "👤 " + esc(state.creator.name)) + ' <span class="item-meta">' + esc(m.time) + '</span></div><div>' + esc(m.text) + '</div></div></div>'
+              ).join("") +
+            '</div>' +
+            '<div style="display:flex; gap:8px;">' +
+              '<input id="adminSupportInp" class="input" placeholder="Admin reply likhein..." onkeydown="if(event.key===\\'Enter\\') sendSupportMsg(\\'ADMIN\\')" />' +
+              '<button class="btn btn-gold" onclick="sendSupportMsg(\\'ADMIN\\')">Reply</button>' +
+            '</div>' +
+          '</div>';
+      }
+
+      html += '</div>';
+      return html;
+    }
+
+    function renderTelegramDemo() {
+      const pendingHint =
+        state.telegram.pendingAction === "header"
+          ? "Apna Header text ya channel link type karein..."
+          : state.telegram.pendingAction === "footer"
+            ? "Apna Footer text ya channel link type karein..."
+            : "Message likhein ya neeche permanent buttons dabayein...";
+
+      return (
+        '<div class="app-header">' +
+          '<div class="app-title-block">' +
+            '<h1>🤖 VidVora Telegram Creator Bot</h1>' +
+            '<p>Zero Commands Needed • Bottom Persistent Buttons &amp; Custom Header/Footer</p>' +
+          '</div>' +
+          '<button class="btn btn-cyan" onclick="tgPressButton(\\'📤 Send Sample Video\\')">📤 Send Sample Video</button>' +
+        '</div>' +
+        '<div class="content">' +
+          '<div class="tg-chat">' +
+            '<div class="tg-top">' +
+              '<div><b>VidVoraAllinOnebot</b> <span style="font-size:11px; color:#38bdf8;">bot • online</span></div>' +
+              '<span class="pill pill-cyan">Supports 2 GB – 4 GB+ Videos</span>' +
+            '</div>' +
+            '<div id="tgMessages" class="tg-messages">' +
+              state.telegram.messages.map((m) =>
+                '<div class="tg-bubble ' + (m.from === "user" ? "tg-user" : "tg-bot") + '">' +
+                  esc(m.text) +
+                  (m.inline
+                    ? '<div class="tg-inline-grid">' +
+                        m.inline.map((b) => '<button class="tg-inline-btn" onclick="tgInlineAction(\\'' + b.action + '\\')">' + esc(b.label) + '</button>').join("") +
+                      '</div>'
+                    : '') +
+                '</div>'
+              ).join("") +
+            '</div>' +
+            '<div style="display:flex; gap:8px; padding:10px; background:#111b27; border-top:1px solid #243242;">' +
+              '<input id="tgInput" class="input" placeholder="' + esc(pendingHint) + '" onkeydown="if(event.key===\\'Enter\\') tgSendText()" />' +
+              '<button class="btn btn-cyan" onclick="tgSendText()">Send</button>' +
+            '</div>' +
+            '<div class="tg-keyboard">' +
+              '<button class="tg-key-btn" onclick="tgPressButton(\\'✏️ Edit Header\\')">✏️ Edit Header</button>' +
+              '<button class="tg-key-btn" onclick="tgPressButton(\\'✏️ Edit Footer\\')">✏️ Edit Footer</button>' +
+              '<button class="tg-key-btn" onclick="tgPressButton(\\'⚙️ Header / Footer Settings\\')">⚙️ Header / Footer Settings</button>' +
+              '<button class="tg-key-btn" onclick="tgPressButton(\\'👁️ Preview Post\\')">👁️ Preview Post</button>' +
+              '<button class="tg-key-btn" onclick="tgPressButton(\\'📊 My Status\\')">📊 My Status</button>' +
+              '<button class="tg-key-btn" onclick="tgPressButton(\\'📤 Send Sample Video\\')">📤 Send Sample Video</button>' +
+            '</div>' +
+          '</div>' +
+        '</div>'
+      );
+    }
+
+    function render() {
+      const shell = document.getElementById("appShell");
+      shell.classList.toggle("phone-mode", Boolean(state.phoneMode));
+      document.getElementById("layoutToggleBtn").textContent = state.phoneMode ? "💻 Laptop Wide View" : "📱 Phone Frame View";
+
+      const mCr = document.getElementById("modeCreatorBtn");
+      const mAd = document.getElementById("modeAdminBtn");
+      const mTg = document.getElementById("modeTgBtn");
+      mCr.className = "seg-btn" + (state.mode === "creator" ? " active" : "");
+      mAd.className = "seg-btn" + (state.mode === "admin" ? " active-admin" : "");
+      mTg.className = "seg-btn" + (state.mode === "telegram" ? " active-tg" : "");
+
+      const root = document.getElementById("appRoot");
+      if (state.mode === "admin") {
+        root.innerHTML = renderAdminPanel();
+      } else if (state.mode === "telegram") {
+        root.innerHTML = renderTelegramDemo();
+      } else {
+        root.innerHTML = renderCreatorPanel();
+      }
+    }
+
+    render();
+  </script>
+</body>
+</html>`;
+}
+
+module.exports = {
+  renderDemoDashboardHtml,
+};

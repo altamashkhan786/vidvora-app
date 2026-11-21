@@ -75,6 +75,7 @@ const {
   resolveLocalReleaseApkPath,
   isRemoteApkReachable,
 } = require("./downloadSite");
+const { renderDemoDashboardHtml } = require("./demoDashboard");
 const { DEFAULT_APK_URL } = require("./sharePreview");
 
 const dashboardLoginAttempts = new Map();
@@ -1396,6 +1397,24 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(500, { "Content-Type": "text/plain" });
         res.end("APK download unavailable");
       }
+    }
+    return;
+  }
+
+  if (
+    (req.method === "GET" || req.method === "HEAD") &&
+    (pathname === "/demo" || pathname === "/demo/" || pathname === "/demo-dashboard" || pathname === "/demo-dashboard/")
+  ) {
+    const html = renderDemoDashboardHtml({ baseUrl: resolvePublicHostBaseUrl(req) });
+    res.writeHead(200, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "public, max-age=120",
+      "X-Content-Type-Options": "nosniff",
+    });
+    if (req.method === "HEAD") {
+      res.end();
+    } else {
+      res.end(html);
     }
     return;
   }
