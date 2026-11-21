@@ -20,6 +20,7 @@ const {
   isAllowedTelegramVideoMessage,
   buildShareMessageCaption,
   buildSharePlainFallbackText,
+  CAPTION_BLOCK_NONE,
   parseTelegramFloodWaitSeconds,
   streamTelegramMtprotoWithRange,
   createFiveSecondPreviewAndThumbnail,
@@ -88,10 +89,9 @@ test("token generation, stream HMAC signing, and share caption match VidVora for
   assert.ok(caption.includes("VidVora — Watch Video"));
   assert.ok(caption.includes("Watch Full Video:"));
   assert.ok(caption.includes(`${SHARE_LINK_BASE_URL}${token}`));
-  assert.ok(!caption.includes("वीडियो कैसे देखे"));
-  assert.ok(!caption.includes("How to play video"));
-  assert.ok(!caption.includes("👇👇👇👇"));
-  assert.ok(!caption.includes("VideoKaiseDekhe"));
+  assert.ok(caption.includes("वीडियो कैसे देखे / How to play video"));
+  assert.ok(caption.includes("👇👇👇👇"));
+  assert.ok(caption.includes("https://t.me/VideoKaiseDekhe_ar"));
   assert.ok(!caption.includes("Uploaded to VidVora"));
   assert.ok(!caption.includes("Preview Clip"));
   assert.ok(!caption.includes("Access Code"));
@@ -109,15 +109,28 @@ test("token generation, stream HMAC signing, and share caption match VidVora for
   assert.ok(!customCaption.includes("VidVora — Watch Video"));
   assert.ok(!customCaption.includes("VideoKaiseDekhe"));
 
+  const removedFooterCaption = buildShareMessageCaption({
+    rawToken: token,
+    customHeader: CAPTION_BLOCK_NONE,
+    customFooter: CAPTION_BLOCK_NONE,
+  });
+  assert.ok(!removedFooterCaption.includes("VidVora — Watch Video"));
+  assert.ok(!removedFooterCaption.includes("VideoKaiseDekhe"));
+  assert.ok(!removedFooterCaption.includes("How to play video"));
+  assert.ok(removedFooterCaption.includes(`${SHARE_LINK_BASE_URL}${token}`));
+
   const plainFallback = buildSharePlainFallbackText({
-    title: "My Custom Post",
-    watchUrl: `${SHARE_LINK_BASE_URL}${token}`,
+    rawToken: token,
     customHeader: "🔥 VIP Channel",
     customFooter: "📢 Join https://t.me/MyBackupLink",
   });
   assert.ok(plainFallback.includes("🔥 VIP Channel"));
   assert.ok(plainFallback.includes("📢 Join https://t.me/MyBackupLink"));
   assert.ok(!plainFallback.includes("VideoKaiseDekhe"));
+
+  const defaultPlainFallback = buildSharePlainFallbackText({ rawToken: token });
+  assert.ok(defaultPlainFallback.includes("वीडियो कैसे देखे / How to play video"));
+  assert.ok(defaultPlainFallback.includes("https://t.me/VideoKaiseDekhe_ar"));
 });
 
 test("createFiveSecondPreviewAndThumbnail cuts a real 10s sample video down to <= 5s clip + jpg thumbnail", async () => {
@@ -1878,8 +1891,8 @@ test("handleTelegramUpdate instantly converts forwarded VidVora video post by re
     assert.equal(sendVideoCall.body.video, "FORWARDED_PREVIEW_CLIP_ID");
     assert.equal(sendVideoCall.body.parse_mode, "HTML");
     assert.ok(sendVideoCall.body.caption.includes(res.rawToken));
-    assert.ok(!sendVideoCall.body.caption.includes("VideoKaiseDekhe"));
-    assert.ok(!sendVideoCall.body.caption.includes("How to play video"));
+    assert.ok(sendVideoCall.body.caption.includes("https://t.me/VideoKaiseDekhe_ar"));
+    assert.ok(sendVideoCall.body.caption.includes("How to play video"));
     assert.ok(!sendVideoCall.body.caption.includes("\\_"));
   } finally {
     global.fetch = origFetch;
@@ -3023,13 +3036,13 @@ test("creator Telegram bot allows editing custom Header & Footer via inline butt
     assert.ok(!sendVideoCall.body.caption.includes("VideoKaiseDekhe"));
     assert.ok(!sendVideoCall.body.caption.includes("How to play video"));
 
-    // 6. Clear Header & Footer via inline callback buttons
+    // 6. Reset Header to default via inline callback button, Remove Footer completely via /removefooter, and Reset Footer back to default via /resetfooter
     const r6 = await handleTelegramUpdate({
       update: {
         callback_query: {
           id: "cb_2",
           from: { id: 777111 },
-          data: "caption:clear_header",
+          data: "caption:reset_header",
           message: { message_id: 11, chat: { id: 777111 } },
         },
       },
@@ -3039,11 +3052,12 @@ test("creator Telegram bot allows editing custom Header & Footer via inline butt
       playbackSecret: "sec",
     });
     assert.equal(r6.ok, true);
+    assert.equal(r6.action, "header_reset");
     assert.equal(sessionsStore.get("777111").customCaptionHeader, "");
 
     const r7 = await handleTelegramUpdate({
       update: {
-        message: { message_id: 5, chat: { id: 777111 }, from: { id: 777111 }, text: "/clearfooter" },
+        message: { message_id: 5, chat: { id: 777111 }, from: { id: 777111 }, text: "/removefooter" },
       },
       db: mockDb,
       storage: null,
@@ -3051,6 +3065,42 @@ test("creator Telegram bot allows editing custom Header & Footer via inline butt
       playbackSecret: "sec",
     });
     assert.equal(r7.ok, true);
+    assert.equal(r7.action, "footer_removed");
+    assert.equal(sessionsStore.get("777111").customCaptionFooter, CAPTION_BLOCK_NONE);
+
+    // Converting a link with footer removed must NOT include default VideoKaiseDekhe_ar!
+    const r8 = await handleTelegramUpdate({
+      update: {
+        message: {
+          message_id: 6,
+          chat: { id: 777111 },
+          from: { id: 777111 },
+          text: `https://vidvora-share-bot.onrender.com/share?link=${sourceCode}`,
+        },
+      },
+      db: mockDb,
+      storage: null,
+      functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+      playbackSecret: "sec",
+    });
+    assert.equal(r8.ok, true);
+    const sendVideoCalls = apiCalls.filter((c) => c.method === "sendVideo");
+    const removedFooterPost = sendVideoCalls[sendVideoCalls.length - 1];
+    assert.ok(!removedFooterPost.body.caption.includes("VideoKaiseDekhe"));
+    assert.ok(removedFooterPost.body.caption.includes("VidVora — Watch Video"));
+
+    // Resetting footer restores default How to play video + VideoKaiseDekhe_ar link
+    const r9 = await handleTelegramUpdate({
+      update: {
+        message: { message_id: 7, chat: { id: 777111 }, from: { id: 777111 }, text: "/resetfooter" },
+      },
+      db: mockDb,
+      storage: null,
+      functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+      playbackSecret: "sec",
+    });
+    assert.equal(r9.ok, true);
+    assert.equal(r9.action, "footer_reset");
     assert.equal(sessionsStore.get("777111").customCaptionFooter, "");
   } finally {
     global.fetch = origFetch;

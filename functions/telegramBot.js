@@ -475,8 +475,24 @@ function escapeHtml(str) {
 const MAX_CUSTOM_HEADER_LENGTH = 300;
 const MAX_CUSTOM_FOOTER_LENGTH = 400;
 const MAX_CUSTOM_CAPTION_LINES = 8;
+const CAPTION_BLOCK_NONE = "__NONE__";
+const DEFAULT_SHARE_FOOTER_HTML = [
+  "<b>वीडियो कैसे देखे / How to play video</b>",
+  "👇👇👇👇",
+  "https://t.me/VideoKaiseDekhe_ar",
+].join("\n");
+const DEFAULT_SHARE_FOOTER_PLAIN = [
+  "वीडियो कैसे देखे / How to play video",
+  "👇👇👇👇",
+  "https://t.me/VideoKaiseDekhe_ar",
+].join("\n");
+
+function isCaptionBlockDisabled(raw) {
+  return String(raw || "").trim() === CAPTION_BLOCK_NONE;
+}
 
 function sanitizeCustomCaptionBlock(raw, maxLength = MAX_CUSTOM_FOOTER_LENGTH) {
+  if (isCaptionBlockDisabled(raw)) return CAPTION_BLOCK_NONE;
   const normalized = String(raw || "")
     .replace(/\r\n?/g, "\n")
     .split("\n")
@@ -496,16 +512,17 @@ function buildShareMessageCaption({
 }) {
   const effectiveBase = shareLinkBaseUrl || SHARE_LINK_BASE_URL;
   const watchUrl = `${effectiveBase}${rawToken}`;
-  const cleanHeader = sanitizeCustomCaptionBlock(customHeader, MAX_CUSTOM_HEADER_LENGTH);
-  const cleanFooter = sanitizeCustomCaptionBlock(customFooter, MAX_CUSTOM_FOOTER_LENGTH);
-  const lines = [
-    cleanHeader ? escapeHtml(cleanHeader) : "🎬 <b>VidVora — Watch Video</b>",
-    "",
-    "🔗 <b>Watch Full Video:</b>",
-    escapeHtml(watchUrl),
-  ];
-  if (cleanFooter) {
-    lines.push("", escapeHtml(cleanFooter));
+  const headerDisabled = isCaptionBlockDisabled(customHeader);
+  const footerDisabled = isCaptionBlockDisabled(customFooter);
+  const cleanHeader = headerDisabled ? "" : sanitizeCustomCaptionBlock(customHeader, MAX_CUSTOM_HEADER_LENGTH);
+  const cleanFooter = footerDisabled ? "" : sanitizeCustomCaptionBlock(customFooter, MAX_CUSTOM_FOOTER_LENGTH);
+  const lines = [];
+  if (!headerDisabled) {
+    lines.push(cleanHeader ? escapeHtml(cleanHeader) : "🎬 <b>VidVora — Watch Video</b>", "");
+  }
+  lines.push("🔗 <b>Watch Full Video:</b>", escapeHtml(watchUrl));
+  if (!footerDisabled) {
+    lines.push("", cleanFooter ? escapeHtml(cleanFooter) : DEFAULT_SHARE_FOOTER_HTML);
   }
   return lines.join("\n");
 }
@@ -518,16 +535,17 @@ function buildSharePlainFallbackText({
 }) {
   const effectiveBase = shareLinkBaseUrl || SHARE_LINK_BASE_URL;
   const watchUrl = `${effectiveBase}${rawToken}`;
-  const cleanHeader = sanitizeCustomCaptionBlock(customHeader, MAX_CUSTOM_HEADER_LENGTH);
-  const cleanFooter = sanitizeCustomCaptionBlock(customFooter, MAX_CUSTOM_FOOTER_LENGTH);
-  const lines = [
-    cleanHeader || "🎬 VidVora — Watch Video",
-    "",
-    "🔗 Watch Full Video:",
-    watchUrl,
-  ];
-  if (cleanFooter) {
-    lines.push("", cleanFooter);
+  const headerDisabled = isCaptionBlockDisabled(customHeader);
+  const footerDisabled = isCaptionBlockDisabled(customFooter);
+  const cleanHeader = headerDisabled ? "" : sanitizeCustomCaptionBlock(customHeader, MAX_CUSTOM_HEADER_LENGTH);
+  const cleanFooter = footerDisabled ? "" : sanitizeCustomCaptionBlock(customFooter, MAX_CUSTOM_FOOTER_LENGTH);
+  const lines = [];
+  if (!headerDisabled) {
+    lines.push(cleanHeader || "🎬 VidVora — Watch Video", "");
+  }
+  lines.push("🔗 Watch Full Video:", watchUrl);
+  if (!footerDisabled) {
+    lines.push("", cleanFooter || DEFAULT_SHARE_FOOTER_PLAIN);
   }
   return lines.join("\n");
 }
@@ -540,8 +558,12 @@ function buildCaptionSettingsKeyboard() {
         { text: "✏️ Edit Footer", callback_data: "caption:edit_footer" },
       ],
       [
-        { text: "🗑 Reset Header", callback_data: "caption:clear_header" },
-        { text: "🗑 Clear Footer", callback_data: "caption:clear_footer" },
+        { text: "🚫 Remove Header", callback_data: "caption:remove_header" },
+        { text: "🚫 Remove Footer", callback_data: "caption:remove_footer" },
+      ],
+      [
+        { text: "♻️ Default Header", callback_data: "caption:reset_header" },
+        { text: "♻️ Default Footer", callback_data: "caption:reset_footer" },
       ],
       [{ text: "👁️ Preview Post", callback_data: "caption:preview" }],
     ],
@@ -549,18 +571,36 @@ function buildCaptionSettingsKeyboard() {
 }
 
 function buildCaptionSettingsHtml(session) {
-  const header = sanitizeCustomCaptionBlock(session?.customCaptionHeader || "", MAX_CUSTOM_HEADER_LENGTH);
-  const footer = sanitizeCustomCaptionBlock(session?.customCaptionFooter || "", MAX_CUSTOM_FOOTER_LENGTH);
+  const rawHeader = session?.customCaptionHeader || "";
+  const rawFooter = session?.customCaptionFooter || "";
+  const headerDisabled = isCaptionBlockDisabled(rawHeader);
+  const footerDisabled = isCaptionBlockDisabled(rawFooter);
+  const header = headerDisabled ? "" : sanitizeCustomCaptionBlock(rawHeader, MAX_CUSTOM_HEADER_LENGTH);
+  const footer = footerDisabled ? "" : sanitizeCustomCaptionBlock(rawFooter, MAX_CUSTOM_FOOTER_LENGTH);
+
+  const headerDisplay = headerDisabled
+    ? "<i>Removed (Hidden)</i>"
+    : header
+      ? escapeHtml(header)
+      : "<i>Default (🎬 VidVora — Watch Video)</i>";
+  const footerDisplay = footerDisabled
+    ? "<i>Removed (Hidden)</i>"
+    : footer
+      ? escapeHtml(footer)
+      : "<i>Default (वीडियो कैसे देखे / How to play video + https://t.me/VideoKaiseDekhe_ar)</i>";
+
   return [
     "📝 <b>Post Header &amp; Footer Settings</b>",
     "",
-    `<b>Header:</b>\n${header ? escapeHtml(header) : "<i>Default (🎬 VidVora — Watch Video)</i>"}`,
+    `<b>Header:</b>\n${headerDisplay}`,
     "",
-    `<b>Footer:</b>\n${footer ? escapeHtml(footer) : "<i>None (Empty)</i>"}`,
+    `<b>Footer:</b>\n${footerDisplay}`,
     "",
-    "Neeche button dabakar apna Header ya Footer (apna channel link, promo text, emojis) khud edit kar sakte hain, ya direct bhejein:",
-    "• <code>/header Apna Header Text</code>",
-    "• <code>/footer Apna Footer ya Link</code>",
+    "Agar aap kuch change nahi karenge toh default Header aur <b>How to play video</b> link laga rahega. Apna custom Header/Footer ya channel link lagane ke liye neeche button dabayein ya bhejein:",
+    "• <code>/header Apna Header Text ya Link</code>",
+    "• <code>/footer Apna Footer ya Channel Link</code>",
+    "• <code>/removefooter</code> (Default footer hatane ke liye)",
+    "• <code>/resetfooter</code> (Default footer wapas lane ke liye)",
   ].join("\n");
 }
 
@@ -1847,7 +1887,20 @@ async function handleTelegramUpdate({
       return { ok: true, action: "prompt_footer" };
     }
 
-    if (cbData === "caption:clear_header") {
+    if (cbData === "caption:remove_header") {
+      const updated = await persistCreatorCaptionPrefs(s, {
+        customCaptionHeader: CAPTION_BLOCK_NONE,
+        pendingInputAction: "",
+      });
+      await replyText(`✅ Header remove (hide) kar diya gaya hai.\n\n${buildCaptionSettingsHtml(updated)}`, {
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+        reply_markup: buildCaptionSettingsKeyboard(),
+      });
+      return { ok: true, action: "header_removed" };
+    }
+
+    if (cbData === "caption:reset_header" || cbData === "caption:clear_header") {
       const updated = await persistCreatorCaptionPrefs(s, {
         customCaptionHeader: "",
         pendingInputAction: "",
@@ -1857,20 +1910,36 @@ async function handleTelegramUpdate({
         disable_web_page_preview: true,
         reply_markup: buildCaptionSettingsKeyboard(),
       });
-      return { ok: true, action: "header_cleared" };
+      return { ok: true, action: "header_reset" };
     }
 
-    if (cbData === "caption:clear_footer") {
+    if (cbData === "caption:remove_footer" || cbData === "caption:clear_footer") {
       const updated = await persistCreatorCaptionPrefs(s, {
-        customCaptionFooter: "",
+        customCaptionFooter: CAPTION_BLOCK_NONE,
         pendingInputAction: "",
       });
-      await replyText(`✅ Footer remove kar diya gaya hai.\n\n${buildCaptionSettingsHtml(updated)}`, {
+      await replyText(`✅ Footer remove (hide) kar diya gaya hai.\n\n${buildCaptionSettingsHtml(updated)}`, {
         parse_mode: "HTML",
         disable_web_page_preview: true,
         reply_markup: buildCaptionSettingsKeyboard(),
       });
-      return { ok: true, action: "footer_cleared" };
+      return { ok: true, action: "footer_removed" };
+    }
+
+    if (cbData === "caption:reset_footer") {
+      const updated = await persistCreatorCaptionPrefs(s, {
+        customCaptionFooter: "",
+        pendingInputAction: "",
+      });
+      await replyText(
+        `✅ Footer default (How to play video + channel link) par reset ho gaya.\n\n${buildCaptionSettingsHtml(updated)}`,
+        {
+          parse_mode: "HTML",
+          disable_web_page_preview: true,
+          reply_markup: buildCaptionSettingsKeyboard(),
+        }
+      );
+      return { ok: true, action: "footer_reset" };
     }
 
     if (cbData === "caption:preview") {
@@ -1958,13 +2027,18 @@ async function handleTelegramUpdate({
     const rawHeader = textBody.replace(/^\/(?:set)?header(?:@\w+)?/i, "").trim();
     if (!rawHeader) {
       await persistCreatorCaptionPrefs(s, { pendingInputAction: "set_header" });
+      const curHdr = isCaptionBlockDisabled(s.customCaptionHeader)
+        ? "<i>Removed (Hidden)</i>"
+        : s.customCaptionHeader
+          ? escapeHtml(s.customCaptionHeader)
+          : "<i>Default (🎬 VidVora — Watch Video)</i>";
       await replyText(
         [
           "✏️ <b>Apna naya Header text/link bhejein:</b>",
           "",
-          `Current Header: ${s.customCaptionHeader ? escapeHtml(s.customCaptionHeader) : "<i>Default (🎬 VidVora — Watch Video)</i>"}`,
+          `Current Header: ${curHdr}`,
           "",
-          "<i>Direct bhejne ke liye apna text reply karein, ya /clearheader se reset karein, ya /cancel se band karein.</i>",
+          "<i>Apna text/link reply karein, /removeheader se hatayein, /resetheader se default karein, ya /cancel se band karein.</i>",
         ].join("\n"),
         { parse_mode: "HTML", disable_web_page_preview: true, reply_markup: buildCaptionSettingsKeyboard() }
       );
@@ -1992,13 +2066,18 @@ async function handleTelegramUpdate({
     const rawFooter = textBody.replace(/^\/(?:set)?footer(?:@\w+)?/i, "").trim();
     if (!rawFooter) {
       await persistCreatorCaptionPrefs(s, { pendingInputAction: "set_footer" });
+      const curFtr = isCaptionBlockDisabled(s.customCaptionFooter)
+        ? "<i>Removed (Hidden)</i>"
+        : s.customCaptionFooter
+          ? escapeHtml(s.customCaptionFooter)
+          : "<i>Default (वीडियो कैसे देखे / How to play video + https://t.me/VideoKaiseDekhe_ar)</i>";
       await replyText(
         [
-          "✏️ <b>Apna naya Footer text ya link bhejein:</b>",
+          "✏️ <b>Apna naya Footer text ya channel link bhejein:</b>",
           "",
-          `Current Footer: ${s.customCaptionFooter ? escapeHtml(s.customCaptionFooter) : "<i>None (Empty)</i>"}`,
+          `Current Footer: ${curFtr}`,
           "",
-          "<i>Apna text/link seedha bhej dein, ya /clearfooter se hatayein, ya /cancel se band karein.</i>",
+          "<i>Apna text/link seedha bhej dein, /removefooter se default footer hatayein, /resetfooter se wapas default karein, ya /cancel se band karein.</i>",
         ].join("\n"),
         { parse_mode: "HTML", disable_web_page_preview: true, reply_markup: buildCaptionSettingsKeyboard() }
       );
@@ -2017,7 +2096,25 @@ async function handleTelegramUpdate({
     return { ok: true, action: "footer_updated", customCaptionFooter: cleanFooter };
   }
 
-  if (/^\/(?:clear|reset|remove)header(?:@\w+)?(?:\s|$)/i.test(textBody)) {
+  if (/^\/(?:remove|hide)header(?:@\w+)?(?:\s|$)/i.test(textBody)) {
+    const s = await loadCurrentBotSession();
+    if (!s) {
+      await replyText("🔐 Pehle apna VidVora Password bhej kar account link karein.");
+      return { ok: true, action: "auth_required" };
+    }
+    const updated = await persistCreatorCaptionPrefs(s, {
+      customCaptionHeader: CAPTION_BLOCK_NONE,
+      pendingInputAction: "",
+    });
+    await replyText(`✅ Header remove (hide) kar diya gaya hai.\n\n${buildCaptionSettingsHtml(updated)}`, {
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      reply_markup: buildCaptionSettingsKeyboard(),
+    });
+    return { ok: true, action: "header_removed" };
+  }
+
+  if (/^\/(?:clear|reset|default)header(?:@\w+)?(?:\s|$)/i.test(textBody)) {
     const s = await loadCurrentBotSession();
     if (!s) {
       await replyText("🔐 Pehle apna VidVora Password bhej kar account link karein.");
@@ -2032,10 +2129,28 @@ async function handleTelegramUpdate({
       disable_web_page_preview: true,
       reply_markup: buildCaptionSettingsKeyboard(),
     });
-    return { ok: true, action: "header_cleared" };
+    return { ok: true, action: "header_reset" };
   }
 
-  if (/^\/(?:clear|reset|remove)footer(?:@\w+)?(?:\s|$)/i.test(textBody)) {
+  if (/^\/(?:clear|remove|hide)footer(?:@\w+)?(?:\s|$)/i.test(textBody)) {
+    const s = await loadCurrentBotSession();
+    if (!s) {
+      await replyText("🔐 Pehle apna VidVora Password bhej kar account link karein.");
+      return { ok: true, action: "auth_required" };
+    }
+    const updated = await persistCreatorCaptionPrefs(s, {
+      customCaptionFooter: CAPTION_BLOCK_NONE,
+      pendingInputAction: "",
+    });
+    await replyText(`✅ Footer remove (hide) kar diya gaya hai.\n\n${buildCaptionSettingsHtml(updated)}`, {
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      reply_markup: buildCaptionSettingsKeyboard(),
+    });
+    return { ok: true, action: "footer_removed" };
+  }
+
+  if (/^\/(?:reset|default)footer(?:@\w+)?(?:\s|$)/i.test(textBody)) {
     const s = await loadCurrentBotSession();
     if (!s) {
       await replyText("🔐 Pehle apna VidVora Password bhej kar account link karein.");
@@ -2045,12 +2160,15 @@ async function handleTelegramUpdate({
       customCaptionFooter: "",
       pendingInputAction: "",
     });
-    await replyText(`✅ Footer remove kar diya gaya hai.\n\n${buildCaptionSettingsHtml(updated)}`, {
-      parse_mode: "HTML",
-      disable_web_page_preview: true,
-      reply_markup: buildCaptionSettingsKeyboard(),
-    });
-    return { ok: true, action: "footer_cleared" };
+    await replyText(
+      `✅ Footer default (How to play video + channel link) par reset ho gaya.\n\n${buildCaptionSettingsHtml(updated)}`,
+      {
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+        reply_markup: buildCaptionSettingsKeyboard(),
+      }
+    );
+    return { ok: true, action: "footer_reset" };
   }
 
   if (/^\/logout(?:@\w+)?/i.test(textBody)) {
@@ -2074,14 +2192,22 @@ async function handleTelegramUpdate({
     const chLabel = chId
       ? `${escapeMarkdown(s.autoPostChannelTitle || chId)}${s.autoPostChannelUsername ? ` (@${escapeMarkdown(s.autoPostChannelUsername)})` : ""}`
       : "OFF _(Sirf isi bot chat me reply aayega)_";
-    const hasCustomHeader = Boolean(sanitizeCustomCaptionBlock(s.customCaptionHeader || "", MAX_CUSTOM_HEADER_LENGTH));
-    const hasCustomFooter = Boolean(sanitizeCustomCaptionBlock(s.customCaptionFooter || "", MAX_CUSTOM_FOOTER_LENGTH));
+    const headerStatus = isCaptionBlockDisabled(s.customCaptionHeader)
+      ? "Removed"
+      : sanitizeCustomCaptionBlock(s.customCaptionHeader || "", MAX_CUSTOM_HEADER_LENGTH)
+        ? "Custom Set"
+        : "Default";
+    const footerStatus = isCaptionBlockDisabled(s.customCaptionFooter)
+      ? "Removed"
+      : sanitizeCustomCaptionBlock(s.customCaptionFooter || "", MAX_CUSTOM_FOOTER_LENGTH)
+        ? "Custom Set"
+        : "Default";
     await replyText(
       [
         `✅ Linked Account: *${escapeMarkdown(s.memberName || "Creator")}*`,
         `📤 Uploads via Bot: *${s.uploadCount || 0}*`,
         `📢 Auto-Post Channel: *${chLabel}*`,
-        `📝 Header: *${hasCustomHeader ? "Custom Set" : "Default"}* • Footer: *${hasCustomFooter ? "Custom Set" : "None"}*`,
+        `📝 Header: *${headerStatus}* • Footer: *${footerStatus}*`,
         "",
         chId
           ? "Band karne ke liye `/clearchannel` bhejein, ya Header/Footer edit karne ke liye neeche button dabayein:"
@@ -3966,6 +4092,7 @@ module.exports = {
   isAllowedTelegramVideoMessage,
   buildShareMessageCaption,
   buildSharePlainFallbackText,
+  CAPTION_BLOCK_NONE,
   sanitizeCustomCaptionBlock,
   buildCaptionSettingsKeyboard,
   parseTelegramFloodWaitSeconds,
