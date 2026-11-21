@@ -1655,6 +1655,8 @@ const server = http.createServer(async (req, res) => {
   }
 
   if ((req.method === "GET" || req.method === "HEAD") && pathname === "/streamPublicVideo") {
+    if (typeof req.setTimeout === "function") req.setTimeout(0);
+    if (typeof res.setTimeout === "function") res.setTimeout(0);
     try {
       const legacyShareCode = String(urlObj.searchParams.get("vv") || "").trim();
       if (req.method === "GET" && legacyShareCode && db && db.isPostgresAdapter === true) {
@@ -1944,6 +1946,11 @@ async function autoRegisterTelegramWebhook() {
     console.warn("Telegram webhook auto-register skipped:", err.message);
   }
 }
+
+server.requestTimeout = 0;
+server.timeout = 0;
+server.headersTimeout = 60_000;
+server.keepAliveTimeout = 65_000;
 
 server.listen(PORT, () => {
   console.log(`VidVora server listening on port ${PORT} (databaseBackend=${activeDbBackend})`);

@@ -3321,6 +3321,178 @@ test("MTProto session persistence saves StringSession on first login and reuses 
   }
 });
 
+test("multi-GB (3.8 GB) videos handle BigInteger doc.size, high-offset Range seek, idle socket reconnect, and MKV/TS document uploads cleanly", async () => {
+  const { toSafeByteLength, inferVideoMimeType, isAllowedTelegramVideoMessage } = require("./telegramBot");
+
+  // 1. GramJS BigInteger object (> 2 GB / 3.8 GB) must NEVER become NaN
+  const fakeBigInt38Gb = { toJSNumber: () => 3_800_000_000, toString: () => "3800000000" };
+  assert.equal(toSafeByteLength(fakeBigInt38Gb), 3_800_000_000);
+  assert.equal(toSafeByteLength(4_294_967_296n), 4_294_967_296);
+  assert.equal(toSafeByteLength("6442450944"), 6_442_450_944);
+
+  // 2. MKV / TS / MOV / AVI documents sent with generic application/octet-stream are accepted & typed properly
+  assert.equal(
+    isAllowedTelegramVideoMessage({
+      document: { file_id: "doc_mkv", file_name: "Movie_4K_3.8GB.mkv", mime_type: "application/octet-stream" },
+    }),
+    true
+  );
+  assert.equal(
+    isAllowedTelegramVideoMessage({
+      document: { file_id: "doc_ts", file_name: "Live_2GB.ts", mime_type: "application/octet-stream" },
+    }),
+    true
+  );
+  assert.equal(inferVideoMimeType("Movie_4K_3.8GB.mkv", "application/octet-stream"), "video/x-matroska");
+  assert.equal(inferVideoMimeType("Clip.webm", ""), "video/webm");
+
+  // 3. Seeking to byte 3,500,000,000 in a 3.8 GB file + recovering from an idle socket disconnect before headers
+  let reconnectCount = 0;
+  let iterAttempts = 0;
+  let capturedOffset = null;
+  const appConfigStore = new Map([
+    [
+      "telegramMtprotoSession",
+      { sessionString: "SAVED_MULTI_GB_SESSION" },
+    ],
+  ]);
+  const videosBackfill = new Map();
+  const mockDb = {
+    collection: (name) => ({
+      doc: (id) => ({
+        get: async () =>
+          name === "appConfig"
+            ? { exists: appConfigStore.has(id), id, data: () => appConfigStore.get(id) }
+            : { exists: false },
+        set: async (data) => {
+          if (name === "videos") videosBackfill.set(id, data);
+          if (name === "appConfig") appConfigStore.set(id, data);
+        },
+      }),
+    }),
+  };
+
+  class FakeSession {
+    constructor(v = "") {
+      this._v = v;
+    }
+    save() {
+      return this._v;
+    }
+  }
+  class FakeClient {
+    constructor(session) {
+      this.session = session;
+    }
+    setLogLevel() {}
+    async connect() {
+      reconnectCount += 1;
+    }
+    async checkAuthorization() {
+      return true;
+    }
+    async getMessages() {
+      return [
+        {
+          id: 99,
+          media: {
+            document: {
+              id: 500n,
+              accessHash: 600n,
+              fileReference: Buffer.from([9, 8]),
+              size: fakeBigInt38Gb,
+            },
+          },
+        },
+      ];
+    }
+    iterDownload(opts) {
+      capturedOffset = opts.offset;
+      iterAttempts += 1;
+      const attempt = iterAttempts;
+      return {
+        async *[Symbol.asyncIterator]() {
+          if (attempt === 1) {
+            throw new Error("Connection closed: Not connected");
+          }
+          // Aligned offset = floor(3500000000 / 524288) * 524288 = 3499622400 -> skipBytes = 377600
+          const buf = Buffer.alloc(524288, 0x41);
+          Buffer.from("VIDVORA_38GB_OK!").copy(buf, 377600);
+          yield buf;
+        },
+      };
+    }
+  }
+
+  const prevEnv = {
+    botToken: process.env.TELEGRAM_BOT_TOKEN,
+    apiId: process.env.TELEGRAM_API_ID,
+    apiHash: process.env.TELEGRAM_API_HASH,
+  };
+  process.env.TELEGRAM_BOT_TOKEN = "777:MULTI_GB_TEST";
+  process.env.TELEGRAM_API_ID = "123456";
+  process.env.TELEGRAM_API_HASH = "abcdef1234567890abcdef1234567890";
+
+  const chunks = [];
+  const mockRes = {
+    status: 0,
+    headers: {},
+    headersSent: false,
+    writableEnded: false,
+    writeHead(code, headers) {
+      this.status = code;
+      this.headers = headers || {};
+      this.headersSent = true;
+    },
+    write(chunk) {
+      chunks.push(Buffer.from(chunk));
+      return true;
+    },
+    end(chunk) {
+      if (chunk) chunks.push(Buffer.from(chunk));
+      this.writableEnded = true;
+    },
+  };
+
+  try {
+    await streamTelegramMtprotoWithRange({
+      videoData: {
+        videoId: "vid_38gb",
+        title: "Movie_4K_3.8GB.mkv",
+        tgChatId: "12345",
+        tgMessageId: 99,
+        tgFileSize: 0,
+        tgMimeType: "application/octet-stream",
+      },
+      method: "GET",
+      rangeHeader: "bytes=3500000000-3500000015",
+      res: mockRes,
+      db: mockDb,
+      telegramLibOverride: {
+        TelegramClient: FakeClient,
+        StringSession: FakeSession,
+        Api: { InputDocumentFileLocation: class {} },
+        bigInt: (v) => BigInt(v),
+      },
+    });
+    assert.equal(mockRes.status, 206);
+    assert.equal(mockRes.headers["Content-Range"], "bytes 3500000000-3500000015/3800000000");
+    assert.equal(mockRes.headers["Content-Type"], "video/x-matroska");
+    assert.equal(Buffer.concat(chunks).toString("utf8"), "VIDVORA_38GB_OK!");
+    assert.equal(iterAttempts, 2, "Must auto-reconnect and retry after idle socket disconnect!");
+    assert.equal(reconnectCount, 2);
+    assert.equal(capturedOffset, 3499622400n);
+    assert.equal(videosBackfill.get("vid_38gb")?.tgFileSize, 3_800_000_000);
+  } finally {
+    if (prevEnv.botToken === undefined) delete process.env.TELEGRAM_BOT_TOKEN;
+    else process.env.TELEGRAM_BOT_TOKEN = prevEnv.botToken;
+    if (prevEnv.apiId === undefined) delete process.env.TELEGRAM_API_ID;
+    else process.env.TELEGRAM_API_ID = prevEnv.apiId;
+    if (prevEnv.apiHash === undefined) delete process.env.TELEGRAM_API_HASH;
+    else process.env.TELEGRAM_API_HASH = prevEnv.apiHash;
+  }
+});
+
 
 
 

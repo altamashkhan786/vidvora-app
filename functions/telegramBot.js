@@ -436,13 +436,58 @@ async function resolveVidVoraSourceVideo(db, rawCode) {
   }
 }
 
+const ALLOWED_VIDEO_EXT_RE = /\.(mp4|mkv|mov|webm|m4v|3gp|avi|ts|flv|wmv|mpeg|mpg|ogv)$/i;
+
+function toSafeByteLength(value) {
+  if (value === null || value === undefined) return 0;
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+  }
+  if (typeof value === "bigint") {
+    const num = Number(value);
+    return Number.isFinite(num) && num > 0 ? num : 0;
+  }
+  if (typeof value === "object") {
+    if (typeof value.toJSNumber === "function") {
+      try {
+        const num = value.toJSNumber();
+        if (Number.isFinite(num) && num > 0) return Math.floor(num);
+      } catch (_) {}
+    }
+    if (typeof value.toString === "function") {
+      const parsed = Number(value.toString());
+      if (Number.isFinite(parsed) && parsed > 0) return Math.floor(parsed);
+    }
+    return 0;
+  }
+  const parsed = Number(String(value).trim());
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
+}
+
+function inferVideoMimeType(fileName, rawMime) {
+  const cleanMime = String(rawMime || "").trim().toLowerCase();
+  if (cleanMime.startsWith("video/")) return cleanMime;
+  const lowerName = String(fileName || "").trim().toLowerCase();
+  if (lowerName.endsWith(".mkv")) return "video/x-matroska";
+  if (lowerName.endsWith(".webm")) return "video/webm";
+  if (lowerName.endsWith(".mov")) return "video/quicktime";
+  if (lowerName.endsWith(".avi")) return "video/x-msvideo";
+  if (lowerName.endsWith(".3gp")) return "video/3gpp";
+  if (lowerName.endsWith(".ts")) return "video/mp2t";
+  if (lowerName.endsWith(".flv")) return "video/x-flv";
+  if (lowerName.endsWith(".wmv")) return "video/x-ms-wmv";
+  if (lowerName.endsWith(".ogv")) return "video/ogg";
+  if (lowerName.endsWith(".mpeg") || lowerName.endsWith(".mpg")) return "video/mpeg";
+  return "video/mp4";
+}
+
 function getTelegramVideoMediaObject(message) {
   if (!message) return null;
   if (message.video && message.video.file_id) return message.video;
   if (message.document && message.document.file_id) {
     const mime = String(message.document.mime_type || "").toLowerCase();
     const fileName = String(message.document.file_name || "").toLowerCase();
-    if (mime.startsWith("video/") || /\.(mp4|mkv|mov|webm|m4v|3gp|avi)$/i.test(fileName)) {
+    if (mime.startsWith("video/") || ALLOWED_VIDEO_EXT_RE.test(fileName)) {
       return message.document;
     }
   }
@@ -450,7 +495,7 @@ function getTelegramVideoMediaObject(message) {
     const mime = String(message.animation.mime_type || "").toLowerCase();
     const fileName = String(message.animation.file_name || "").toLowerCase();
     const duration = Number(message.animation.duration || 0);
-    if (mime.startsWith("video/") || /\.(mp4|mkv|mov|webm|m4v|3gp|avi)$/i.test(fileName) || duration > 0) {
+    if (mime.startsWith("video/") || ALLOWED_VIDEO_EXT_RE.test(fileName) || duration > 0) {
       return message.animation;
     }
   }
@@ -1459,7 +1504,7 @@ async function resolveMtprotoMediaDescriptor({
     if (decoded) {
       return {
         dcId: decoded.dcId,
-        fileSize: Number(tgFileSize || 0),
+        fileSize: toSafeByteLength(tgFileSize),
         location: new Api.InputDocumentFileLocation({
           id: bigInt(decoded.id),
           accessHash: bigInt(decoded.accessHash),
@@ -1478,7 +1523,7 @@ async function resolveMtprotoMediaDescriptor({
     if (doc) {
       return {
         dcId: doc.dcId,
-        fileSize: Number(doc.size || tgFileSize || 0),
+        fileSize: toSafeByteLength(doc.size) || toSafeByteLength(tgFileSize),
         location: new Api.InputDocumentFileLocation({
           id: doc.id,
           accessHash: doc.accessHash,
@@ -2714,8 +2759,8 @@ async function handleTelegramUpdate({
       const parsedMeta = parseTitleAndDescription(message.caption, fallbackName);
       title = parsedMeta.title;
       description = parsedMeta.description;
-      const reportedFileSize = Number(mediaObj.file_size || 0) || 0;
-      const mimeType = String(mediaObj.mime_type || "video/mp4");
+      const reportedFileSize = toSafeByteLength(mediaObj.file_size);
+      const mimeType = inferVideoMimeType(mediaObj.file_name, mediaObj.mime_type);
       const hasMtproto = Boolean(apiId && apiHash);
       const localVideoPath = path.join(tmpDir, `${videoId}.mp4`);
 
@@ -2933,13 +2978,21 @@ async function handleTelegramUpdate({
       description = parsedMeta.description;
       finalStoragePath = directUrlMsg.url;
 
-      const { clipExists, thumbExists } = await createFiveSecondPreviewAndThumbnail({
-        inputPathOrUrl: finalStoragePath,
-        outputClipPath: clipPath,
-        outputThumbPath: thumbPath,
-        durationSeconds: 0,
-        previewSeconds: DEFAULT_PREVIEW_SECONDS,
-      });
+      let clipExists = false;
+      let thumbExists = false;
+      try {
+        const generated = await createFiveSecondPreviewAndThumbnail({
+          inputPathOrUrl: finalStoragePath,
+          outputClipPath: clipPath,
+          outputThumbPath: thumbPath,
+          durationSeconds: 0,
+          previewSeconds: DEFAULT_PREVIEW_SECONDS,
+        });
+        clipExists = Boolean(generated?.clipExists);
+        thumbExists = Boolean(generated?.thumbExists);
+      } catch (directPreviewErr) {
+        console.warn("Direct URL preview generation skipped, publishing link directly:", directPreviewErr?.message || directPreviewErr);
+      }
 
       let storageThumbUploaded = false;
       try {
@@ -3740,11 +3793,9 @@ async function streamTelegramMtprotoWithRange({
     throw err;
   }
 
-  const { client, libs } = await getMtprotoClient({ apiId, apiHash, botToken, db, telegramLibOverride });
+  let { client, libs } = await getMtprotoClient({ apiId, apiHash, botToken, db, telegramLibOverride });
   const isHead = String(method || "GET").toUpperCase() === "HEAD";
-  const contentType = String(videoData.tgMimeType || "video/mp4").startsWith("video/")
-    ? String(videoData.tgMimeType)
-    : "video/mp4";
+  const contentType = inferVideoMimeType(videoData.title, videoData.tgMimeType);
 
   let descriptor = await resolveMtprotoMediaDescriptor({
     client,
@@ -3752,7 +3803,7 @@ async function streamTelegramMtprotoWithRange({
     tgFileId: videoData.tgFileId,
     tgChatId: videoData.tgChatId || null,
     tgMessageId: videoData.tgMessageId || null,
-    tgFileSize: Number(videoData.tgFileSize || 0) || 0,
+    tgFileSize: toSafeByteLength(videoData.tgFileSize),
     forceRefresh: false,
   });
 
@@ -3768,11 +3819,22 @@ async function streamTelegramMtprotoWithRange({
     });
   }
 
-  const fileSize = Number(descriptor.fileSize || videoData.tgFileSize || 0);
+  const fileSize = toSafeByteLength(descriptor.fileSize) || toSafeByteLength(videoData.tgFileSize);
   if (!Number.isFinite(fileSize) || fileSize <= 0) {
     const err = new Error("Unable to determine Telegram video byte size for streaming.");
     err.statusCode = 502;
     throw err;
+  }
+
+  // Backfill missing tgFileSize in DB asynchronously so future plays skip getMessages lookup
+  if (!toSafeByteLength(videoData.tgFileSize) && videoData.videoId && db && typeof db.collection === "function") {
+    try {
+      const col = db.collection("videos");
+      const ref = typeof col.doc === "function" ? col.doc(String(videoData.videoId)) : null;
+      if (ref && typeof ref.set === "function") {
+        ref.set({ tgFileSize: fileSize }, { merge: true }).catch(() => {});
+      }
+    } catch (_) {}
   }
 
   let start = 0;
@@ -3815,9 +3877,9 @@ async function streamTelegramMtprotoWithRange({
     return;
   }
 
-  const startIteration = async (desc) => {
+  const startIteration = async (activeClient, desc) => {
     const alignedStart = Math.floor(start / MTPROTO_CHUNK_SIZE) * MTPROTO_CHUNK_SIZE;
-    const rawIterable = client.iterDownload({
+    const rawIterable = activeClient.iterDownload({
       file: desc.location,
       dcId: desc.dcId,
       offset: libs.bigInt(alignedStart),
@@ -3838,9 +3900,11 @@ async function streamTelegramMtprotoWithRange({
 
   let iterState;
   try {
-    iterState = await startIteration(descriptor);
+    iterState = await startIteration(client, descriptor);
   } catch (err) {
     const msg = String(err?.errorMessage || err?.message || "");
+    const isDisconnectErr =
+      /not connected|disconnected|connection closed|timeout|socket|econnreset|broken pipe/i.test(msg);
     if (msg.includes("FILE_REFERENCE") && videoData.tgChatId && videoData.tgMessageId) {
       descriptor = await resolveMtprotoMediaDescriptor({
         client,
@@ -3851,7 +3915,10 @@ async function streamTelegramMtprotoWithRange({
         tgFileSize: fileSize,
         forceRefresh: true,
       });
-      iterState = await startIteration(descriptor);
+      iterState = await startIteration(client, descriptor);
+    } else if (isDisconnectErr && typeof client.connect === "function") {
+      await client.connect();
+      iterState = await startIteration(client, descriptor);
     } else {
       throw err;
     }
@@ -4144,6 +4211,8 @@ module.exports = {
   isUnsupportedThirdPartyHostUrl,
   resolveVidVoraSourceVideo,
   isAllowedTelegramVideoMessage,
+  toSafeByteLength,
+  inferVideoMimeType,
   buildShareMessageCaption,
   buildSharePlainFallbackText,
   CAPTION_BLOCK_NONE,
