@@ -3216,8 +3216,13 @@ test("MTProto session persistence saves StringSession on first login and reuses 
         },
       ];
     }
-    async *iterDownload() {
-      yield Buffer.from("0123456789abcdef");
+    iterDownload() {
+      // Simulate real GramJS DirectDownloadIter: implements [Symbol.asyncIterator]() ONLY (no direct .next())
+      return {
+        async *[Symbol.asyncIterator]() {
+          yield Buffer.from("0123456789abcdef");
+        },
+      };
     }
   }
 

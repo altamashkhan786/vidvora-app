@@ -3817,14 +3817,21 @@ async function streamTelegramMtprotoWithRange({
 
   const startIteration = async (desc) => {
     const alignedStart = Math.floor(start / MTPROTO_CHUNK_SIZE) * MTPROTO_CHUNK_SIZE;
-    const chunksNeeded = Math.ceil((end - alignedStart + 1) / MTPROTO_CHUNK_SIZE) + 1;
-    const iter = client.iterDownload({
+    const rawIterable = client.iterDownload({
       file: desc.location,
       dcId: desc.dcId,
       offset: libs.bigInt(alignedStart),
       requestSize: MTPROTO_CHUNK_SIZE,
-      limit: chunksNeeded,
     });
+    const iter =
+      rawIterable && typeof rawIterable.next === "function"
+        ? rawIterable
+        : rawIterable && typeof rawIterable[Symbol.asyncIterator] === "function"
+          ? rawIterable[Symbol.asyncIterator]()
+          : null;
+    if (!iter || typeof iter.next !== "function") {
+      throw new Error("Telegram MTProto stream iterator is unavailable.");
+    }
     const first = await iter.next();
     return { iter, first, alignedStart };
   };
