@@ -550,6 +550,16 @@ function buildSharePlainFallbackText({
   return lines.join("\n");
 }
 
+const CREATOR_BOT_REPLY_KEYBOARD = {
+  keyboard: [
+    [{ text: "✏️ Edit Header" }, { text: "✏️ Edit Footer" }],
+    [{ text: "⚙️ Header / Footer Settings" }, { text: "👁️ Preview Post" }],
+    [{ text: "📊 My Status" }, { text: "🔓 Logout" }],
+  ],
+  resize_keyboard: true,
+  is_persistent: true,
+};
+
 function buildCaptionSettingsKeyboard() {
   return {
     inline_keyboard: [
@@ -566,6 +576,25 @@ function buildCaptionSettingsKeyboard() {
         { text: "♻️ Default Footer", callback_data: "caption:reset_footer" },
       ],
       [{ text: "👁️ Preview Post", callback_data: "caption:preview" }],
+    ],
+  };
+}
+
+function buildEditPromptCancelKeyboard(type) {
+  const isHeader = type === "header";
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: isHeader ? "🚫 Remove Header" : "🚫 Remove Footer",
+          callback_data: isHeader ? "caption:remove_header" : "caption:remove_footer",
+        },
+        {
+          text: isHeader ? "♻️ Default Header" : "♻️ Default Footer",
+          callback_data: isHeader ? "caption:reset_header" : "caption:reset_footer",
+        },
+      ],
+      [{ text: "❌ Cancel", callback_data: "caption:cancel" }],
     ],
   };
 }
@@ -596,11 +625,7 @@ function buildCaptionSettingsHtml(session) {
     "",
     `<b>Footer:</b>\n${footerDisplay}`,
     "",
-    "Agar aap kuch change nahi karenge toh default Header aur <b>How to play video</b> link laga rahega. Apna custom Header/Footer ya channel link lagane ke liye neeche button dabayein ya bhejein:",
-    "• <code>/header Apna Header Text ya Link</code>",
-    "• <code>/footer Apna Footer ya Channel Link</code>",
-    "• <code>/removefooter</code> (Default footer hatane ke liye)",
-    "• <code>/resetfooter</code> (Default footer wapas lane ke liye)",
+    "Agar aap kuch change nahi karenge toh default Header aur <b>How to play video</b> link laga rahega. Apna custom Header/Footer ya channel link set/remove karne ke liye neeche buttons use karein 👇",
   ].join("\n");
 }
 
@@ -1865,10 +1890,9 @@ async function handleTelegramUpdate({
         [
           "✏️ <b>Apna naya Header bhejein</b>",
           "",
-          "Jo bhi text, emoji ya link aap yahan bhejenge woh har video post ke <b>upar (Header)</b> me lag jayega.",
-          "<i>Cancel karne ke liye /cancel bhejein.</i>",
+          "Jo bhi text, emoji ya channel link aap yahan bhejenge woh har video post ke <b>upar (Header)</b> me lag jayega.",
         ].join("\n"),
-        { parse_mode: "HTML" }
+        { parse_mode: "HTML", reply_markup: buildEditPromptCancelKeyboard("header") }
       );
       return { ok: true, action: "prompt_header" };
     }
@@ -1880,11 +1904,18 @@ async function handleTelegramUpdate({
           "✏️ <b>Apna naya Footer bhejein</b>",
           "",
           "Jo bhi text, channel link ya promo message aap yahan bhejenge woh har video post ke <b>neeche (Footer)</b> me lag jayega.",
-          "<i>Cancel karne ke liye /cancel bhejein.</i>",
         ].join("\n"),
-        { parse_mode: "HTML" }
+        { parse_mode: "HTML", reply_markup: buildEditPromptCancelKeyboard("footer") }
       );
       return { ok: true, action: "prompt_footer" };
+    }
+
+    if (cbData === "caption:cancel") {
+      await persistCreatorCaptionPrefs(s, { pendingInputAction: "" });
+      await replyText("✅ Edit cancel kar diya gaya hai.", {
+        reply_markup: CREATOR_BOT_REPLY_KEYBOARD,
+      });
+      return { ok: true, action: "cancelled" };
     }
 
     if (cbData === "caption:remove_header") {
@@ -1962,49 +1993,72 @@ async function handleTelegramUpdate({
 
   const textBody = String(message.text || "").trim();
 
-  // 1. Commands
+  // 1. Commands & Bottom Menu Buttons (zero commands needed for creators!)
   if (/^\/start(?:@\w+)?/i.test(textBody) || /^\/help(?:@\w+)?/i.test(textBody)) {
     await replyText(
       [
-        "🎬 *VidVora Creator Auto-Upload & Channel Auto-Post Bot*",
+        "🎬 *VidVora Creator Auto-Upload Bot*",
         "",
         "1️⃣ Apna VidVora Creator / Admin account link karein:",
         "_(Bas apna Password seedha yahan bhej dein)_",
         "",
         "2️⃣ *Custom Header & Footer Set Karein:*",
-        "• `/caption` — Button se Header / Footer edit karein (apna channel link ya text lagayein)",
-        "• `/header Apna Header` • `/footer Apna Footer ya Link`",
-        "",
-        "3️⃣ *Auto-Channel Post Set Karein (Optional):*",
-        "• Bot ko apne Telegram Channel me *Admin (Post Messages)* banayein.",
-        "• Phir bhejein: `/setchannel @YourChannelUsername`",
-        "_(Private channel ke liye channel ka koi bhi text message yahan forward karein)_",
-        "",
-        "4️⃣ *Video Bhejein → Direct Channel Post:*",
-        "Ab aap 1 ya 10–50 *video files* / *VidVora links* yahan bhejein — bot khud link + preview banakar post kar dega!",
-        "",
-        "Commands: `/caption` • `/header` • `/footer` • `/setchannel` • `/channel` • `/clearchannel` • `/status` • `/logout`",
+        "Neeche diye gaye buttons se apna Header / Footer (apna channel link ya text) kabhi bhi edit karein, aur seedha koi bhi video ya VidVora link bhej kar apna link banayein! 👇",
       ].join("\n"),
-      { parse_mode: "Markdown" }
+      { parse_mode: "Markdown", reply_markup: CREATOR_BOT_REPLY_KEYBOARD }
     );
     return { ok: true, action: "help" };
   }
 
-  if (/^\/cancel(?:@\w+)?(?:\s|$)/i.test(textBody)) {
+  if (/^\/cancel(?:@\w+)?(?:\s|$)/i.test(textBody) || textBody === "❌ Cancel") {
     const s = await loadCurrentBotSession();
     if (s && s.pendingInputAction) {
       await persistCreatorCaptionPrefs(s, { pendingInputAction: "" });
-      await replyText("✅ Edit cancel kar diya gaya hai.");
+      await replyText("✅ Edit cancel kar diya gaya hai.", {
+        reply_markup: CREATOR_BOT_REPLY_KEYBOARD,
+      });
     } else {
-      await replyText("ℹ️ Koi active edit mode nahi chal raha hai.");
+      await replyText("ℹ️ Koi active edit mode nahi chal raha hai.", {
+        reply_markup: CREATOR_BOT_REPLY_KEYBOARD,
+      });
     }
     return { ok: true, action: "cancelled" };
   }
 
-  if (/^\/(?:caption|editcaption|settings)(?:@\w+)?(?:\s|$)/i.test(textBody)) {
+  if (textBody === "👁️ Preview Post") {
     const s = await loadCurrentBotSession();
     if (!s) {
-      await replyText("🔐 Pehle apna VidVora Password bhej kar account link karein.");
+      await replyText("🔐 Pehle apna VidVora Password bhej kar account link karein.", {
+        reply_markup: CREATOR_BOT_REPLY_KEYBOARD,
+      });
+      return { ok: true, action: "auth_required" };
+    }
+    if (s.pendingInputAction) {
+      await persistCreatorCaptionPrefs(s, { pendingInputAction: "" });
+    }
+    const sampleCaption = buildShareMessageCaption({
+      rawToken: "GM-SAMPLE99",
+      shareLinkBaseUrl: shareLinkBaseUrl || SHARE_LINK_BASE_URL,
+      customHeader: s.customCaptionHeader || "",
+      customFooter: s.customCaptionFooter || "",
+    });
+    await replyText(`👁️ <b>Live Post Preview:</b>\n\n${sampleCaption}`, {
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      reply_markup: buildCaptionSettingsKeyboard(),
+    });
+    return { ok: true, action: "caption_preview" };
+  }
+
+  if (
+    /^\/(?:caption|editcaption|settings)(?:@\w+)?(?:\s|$)/i.test(textBody) ||
+    textBody === "⚙️ Header / Footer Settings"
+  ) {
+    const s = await loadCurrentBotSession();
+    if (!s) {
+      await replyText("🔐 Pehle apna VidVora Password bhej kar account link karein.", {
+        reply_markup: CREATOR_BOT_REPLY_KEYBOARD,
+      });
       return { ok: true, action: "auth_required" };
     }
     if (s.pendingInputAction) {
@@ -2018,13 +2072,16 @@ async function handleTelegramUpdate({
     return { ok: true, action: "caption_settings" };
   }
 
-  if (/^\/(?:set)?header(?:@\w+)?(?:\s|$)/i.test(textBody)) {
+  if (/^\/(?:set)?header(?:@\w+)?(?:\s|$)/i.test(textBody) || textBody === "✏️ Edit Header") {
     const s = await loadCurrentBotSession();
     if (!s) {
-      await replyText("🔐 Pehle apna VidVora Password bhej kar account link karein.");
+      await replyText("🔐 Pehle apna VidVora Password bhej kar account link karein.", {
+        reply_markup: CREATOR_BOT_REPLY_KEYBOARD,
+      });
       return { ok: true, action: "auth_required" };
     }
-    const rawHeader = textBody.replace(/^\/(?:set)?header(?:@\w+)?/i, "").trim();
+    const rawHeader =
+      textBody === "✏️ Edit Header" ? "" : textBody.replace(/^\/(?:set)?header(?:@\w+)?/i, "").trim();
     if (!rawHeader) {
       await persistCreatorCaptionPrefs(s, { pendingInputAction: "set_header" });
       const curHdr = isCaptionBlockDisabled(s.customCaptionHeader)
@@ -2034,13 +2091,13 @@ async function handleTelegramUpdate({
           : "<i>Default (🎬 VidVora — Watch Video)</i>";
       await replyText(
         [
-          "✏️ <b>Apna naya Header text/link bhejein:</b>",
+          "✏️ <b>Apna naya Header text ya channel link bhejein:</b>",
           "",
           `Current Header: ${curHdr}`,
           "",
-          "<i>Apna text/link reply karein, /removeheader se hatayein, /resetheader se default karein, ya /cancel se band karein.</i>",
+          "<i>Bas apna text / link yahan bhej dein, ya neeche button se Remove / Default / Cancel karein 👇</i>",
         ].join("\n"),
-        { parse_mode: "HTML", disable_web_page_preview: true, reply_markup: buildCaptionSettingsKeyboard() }
+        { parse_mode: "HTML", disable_web_page_preview: true, reply_markup: buildEditPromptCancelKeyboard("header") }
       );
       return { ok: true, action: "prompt_header" };
     }
@@ -2057,13 +2114,16 @@ async function handleTelegramUpdate({
     return { ok: true, action: "header_updated", customCaptionHeader: cleanHeader };
   }
 
-  if (/^\/(?:set)?footer(?:@\w+)?(?:\s|$)/i.test(textBody)) {
+  if (/^\/(?:set)?footer(?:@\w+)?(?:\s|$)/i.test(textBody) || textBody === "✏️ Edit Footer") {
     const s = await loadCurrentBotSession();
     if (!s) {
-      await replyText("🔐 Pehle apna VidVora Password bhej kar account link karein.");
+      await replyText("🔐 Pehle apna VidVora Password bhej kar account link karein.", {
+        reply_markup: CREATOR_BOT_REPLY_KEYBOARD,
+      });
       return { ok: true, action: "auth_required" };
     }
-    const rawFooter = textBody.replace(/^\/(?:set)?footer(?:@\w+)?/i, "").trim();
+    const rawFooter =
+      textBody === "✏️ Edit Footer" ? "" : textBody.replace(/^\/(?:set)?footer(?:@\w+)?/i, "").trim();
     if (!rawFooter) {
       await persistCreatorCaptionPrefs(s, { pendingInputAction: "set_footer" });
       const curFtr = isCaptionBlockDisabled(s.customCaptionFooter)
@@ -2077,9 +2137,9 @@ async function handleTelegramUpdate({
           "",
           `Current Footer: ${curFtr}`,
           "",
-          "<i>Apna text/link seedha bhej dein, /removefooter se default footer hatayein, /resetfooter se wapas default karein, ya /cancel se band karein.</i>",
+          "<i>Bas apna text / link yahan bhej dein, ya neeche button se Remove / Default / Cancel karein 👇</i>",
         ].join("\n"),
-        { parse_mode: "HTML", disable_web_page_preview: true, reply_markup: buildCaptionSettingsKeyboard() }
+        { parse_mode: "HTML", disable_web_page_preview: true, reply_markup: buildEditPromptCancelKeyboard("footer") }
       );
       return { ok: true, action: "prompt_footer" };
     }
@@ -2171,27 +2231,32 @@ async function handleTelegramUpdate({
     return { ok: true, action: "footer_reset" };
   }
 
-  if (/^\/logout(?:@\w+)?/i.test(textBody)) {
+  if (/^\/logout(?:@\w+)?/i.test(textBody) || textBody === "🔓 Logout") {
     deleteCachedBotSession(db, telegramUserId);
     await db.collection("telegramBotSessions").doc(telegramUserId).delete().catch(() => {});
-    await replyText("🔓 Unlinked your VidVora account from this bot. Send `/login PASSWORD` anytime to reconnect.", {
+    await replyText("🔓 Aapka VidVora account unlink ho gaya hai. Dobara link karne ke liye apna Password seedha bhej dein.", {
       parse_mode: "Markdown",
+      reply_markup: CREATOR_BOT_REPLY_KEYBOARD,
     });
     return { ok: true, action: "logout" };
   }
 
-  if (/^\/status(?:@\w+)?/i.test(textBody) || /^\/channel(?:@\w+)?(?:\s|$)/i.test(textBody)) {
+  if (
+    /^\/status(?:@\w+)?/i.test(textBody) ||
+    /^\/channel(?:@\w+)?(?:\s|$)/i.test(textBody) ||
+    textBody === "📊 My Status"
+  ) {
     const s = await loadCurrentBotSession();
     if (!s) {
-      await replyText("❌ Not linked yet. Send your Creator/Admin Password or `/login YOUR_PASSWORD` first.", {
+      await replyText("❌ Abhi account link nahi hai. Apna *Creator / Admin Password* seedha yahan bhej dein.", {
         parse_mode: "Markdown",
+        reply_markup: CREATOR_BOT_REPLY_KEYBOARD,
       });
       return { ok: true, action: "status_unlinked" };
     }
-    const chId = String(s.autoPostChannelId || "").trim();
-    const chLabel = chId
-      ? `${escapeMarkdown(s.autoPostChannelTitle || chId)}${s.autoPostChannelUsername ? ` (@${escapeMarkdown(s.autoPostChannelUsername)})` : ""}`
-      : "OFF _(Sirf isi bot chat me reply aayega)_";
+    if (s.pendingInputAction) {
+      await persistCreatorCaptionPrefs(s, { pendingInputAction: "" });
+    }
     const headerStatus = isCaptionBlockDisabled(s.customCaptionHeader)
       ? "Removed"
       : sanitizeCustomCaptionBlock(s.customCaptionHeader || "", MAX_CUSTOM_HEADER_LENGTH)
@@ -2206,14 +2271,11 @@ async function handleTelegramUpdate({
       [
         `✅ Linked Account: *${escapeMarkdown(s.memberName || "Creator")}*`,
         `📤 Uploads via Bot: *${s.uploadCount || 0}*`,
-        `📢 Auto-Post Channel: *${chLabel}*`,
         `📝 Header: *${headerStatus}* • Footer: *${footerStatus}*`,
         "",
-        chId
-          ? "Band karne ke liye `/clearchannel` bhejein, ya Header/Footer edit karne ke liye neeche button dabayein:"
-          : "Auto-Post ke liye `/setchannel @YourChannel` bhejein, ya Header/Footer edit karne ke liye neeche button dabayein:",
+        "Header / Footer edit karne ke liye neeche buttons use karein 👇",
       ].join("\n"),
-      { parse_mode: "Markdown", reply_markup: buildCaptionSettingsKeyboard() }
+      { parse_mode: "Markdown", reply_markup: CREATOR_BOT_REPLY_KEYBOARD }
     );
     return { ok: true, action: "status" };
   }
@@ -2371,8 +2433,8 @@ async function handleTelegramUpdate({
       });
     }
     await replyText(
-      `✅ Welcome *${escapeMarkdown(creator.name)}*!\n\nYour VidVora account is now linked. Send any video (caption = Title) and I will upload it & send back your *5-sec preview clip + watch link*.\n\nApne post ka Header / Footer edit karne ke liye `/caption` ya neeche buttons use karein:`,
-      { parse_mode: "Markdown", reply_markup: buildCaptionSettingsKeyboard() }
+      `✅ Welcome *${escapeMarkdown(creator.name)}*!\n\nAapka VidVora account link ho gaya hai. Seedha koi bhi *Video* ya *VidVora Share Link* bhejein, ya neeche diye gaye buttons se apna *Header / Footer* edit karein 👇`,
+      { parse_mode: "Markdown", reply_markup: CREATOR_BOT_REPLY_KEYBOARD }
     );
     return { ok: true, action: "login_success" };
   }
@@ -2461,8 +2523,8 @@ async function handleTelegramUpdate({
           });
         }
         await replyText(
-          `✅ Welcome *${escapeMarkdown(directCreator.name)}*!\n\nYour VidVora account is now linked. Send any *Video* or paste any *VidVora Share Link* to convert into your own link!\n\nApne post ka Header / Footer edit karne ke liye `/caption` ya neeche buttons use karein:`,
-          { parse_mode: "Markdown", reply_markup: buildCaptionSettingsKeyboard() }
+          `✅ Welcome *${escapeMarkdown(directCreator.name)}*!\n\nAapka VidVora account link ho gaya hai. Seedha koi bhi *Video* ya *VidVora Share Link* bhejein, ya neeche diye gaye buttons se apna *Header / Footer* edit karein 👇`,
+          { parse_mode: "Markdown", reply_markup: CREATOR_BOT_REPLY_KEYBOARD }
         );
         return { ok: true, action: "login_success" };
       }
@@ -2471,29 +2533,14 @@ async function handleTelegramUpdate({
     const existingSessionObj = await loadCurrentBotSession();
     const hasExistingSession = Boolean(existingSessionObj);
     if (hasExistingSession) {
-      const forwardedChannel = extractForwardedChannelInfo(message);
-      if (forwardedChannel) {
-        const chCmd = `/setchannel ${forwardedChannel.username ? `@${forwardedChannel.username}` : forwardedChannel.id}`;
-        await replyText(
-          [
-            `📢 *Channel Detect Ho Gaya:* ${escapeMarkdown(forwardedChannel.title)}`,
-            `🆔 Channel ID: \`${forwardedChannel.id}\``,
-            "",
-            "Is channel par auto-post chalu karne ke liye (bot ko channel me Admin bana kar) yeh command copy karke bhejein:",
-            `\`${chCmd}\``,
-          ].join("\n"),
-          { parse_mode: "Markdown" }
-        );
-        return { ok: true, action: "channel_detected", channelId: forwardedChannel.id };
-      }
       await replyText(
-        "📹 Send/Batch-Forward *Video files*, a direct `.mp4` link, or any *VidVora Share Link* to convert into your own link.\n_(Channel auto-post set karne ke liye `/setchannel @YourChannel` bhejein.)_",
-        { parse_mode: "Markdown" }
+        "📹 Seedha koi bhi *Video file*, direct `.mp4` link, ya *VidVora Share Link* bhejein — ya neeche diye gaye buttons se Header / Footer edit karein 👇",
+        { parse_mode: "Markdown", reply_markup: CREATOR_BOT_REPLY_KEYBOARD }
       );
     } else {
       await replyText(
-        "🔐 Invalid Password (ya unsupported message).\n\nApna sahi *Creator / Admin Password* directly bhejein, ya `/login YOUR_PASSWORD` likhein.",
-        { parse_mode: "Markdown" }
+        "🔐 Invalid Password (ya unsupported message).\n\nApna sahi *Creator / Admin Password* seedha yahan bhej dein.",
+        { parse_mode: "Markdown", reply_markup: CREATOR_BOT_REPLY_KEYBOARD }
       );
     }
     return { ok: true, action: "unsupported_message" };

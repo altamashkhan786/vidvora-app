@@ -2940,9 +2940,32 @@ test("creator Telegram bot allows editing custom Header & Footer via inline butt
   };
 
   try {
-    // 1. /caption opens interactive settings menu with inline buttons
+    // 0. /start returns clean welcome without Channel Auto-Post or 3rd/4th steps and shows bottom persistent keyboard options
+    const r0 = await handleTelegramUpdate({
+      update: { message: { message_id: 0, chat: { id: 777111 }, from: { id: 777111 }, text: "/start" } },
+      db: mockDb,
+      storage: null,
+      functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+      playbackSecret: "sec",
+    });
+    assert.equal(r0.ok, true);
+    assert.equal(r0.action, "help");
+    const startCall = apiCalls.find((c) => c.method === "sendMessage");
+    assert.ok(!startCall.body.text.includes("Channel Auto-Post"));
+    assert.ok(!startCall.body.text.includes("3️⃣"));
+    assert.ok(!startCall.body.text.includes("4️⃣"));
+    assert.ok(!startCall.body.text.includes("/setchannel"));
+    assert.ok(!startCall.body.text.includes("Commands:"));
+    assert.equal(startCall.body.reply_markup?.is_persistent, true);
+    assert.ok(startCall.body.reply_markup?.keyboard?.flat().some((b) => b.text === "✏️ Edit Header"));
+    assert.ok(startCall.body.reply_markup?.keyboard?.flat().some((b) => b.text === "✏️ Edit Footer"));
+    assert.ok(startCall.body.reply_markup?.keyboard?.flat().some((b) => b.text === "⚙️ Header / Footer Settings"));
+
+    // 1. Tapping bottom button "⚙️ Header / Footer Settings" opens interactive settings menu with inline buttons (no slash command needed!)
     const r1 = await handleTelegramUpdate({
-      update: { message: { message_id: 1, chat: { id: 777111 }, from: { id: 777111 }, text: "/caption" } },
+      update: {
+        message: { message_id: 1, chat: { id: 777111 }, from: { id: 777111 }, text: "⚙️ Header / Footer Settings" },
+      },
       db: mockDb,
       storage: null,
       functionBaseUrl: "https://vidvora-share-bot.onrender.com",
@@ -2950,9 +2973,23 @@ test("creator Telegram bot allows editing custom Header & Footer via inline butt
     });
     assert.equal(r1.ok, true);
     assert.equal(r1.action, "caption_settings");
-    const menuCall = apiCalls.find((c) => c.method === "sendMessage");
+    const menuCall = apiCalls[apiCalls.length - 1];
     assert.ok(menuCall.body.reply_markup?.inline_keyboard?.flat().some((b) => b.callback_data === "caption:edit_header"));
     assert.ok(menuCall.body.reply_markup?.inline_keyboard?.flat().some((b) => b.callback_data === "caption:edit_footer"));
+
+    // 1b. Tapping bottom button "📊 My Status" works without commands and hides Auto-Post Channel
+    const r1b = await handleTelegramUpdate({
+      update: { message: { message_id: 101, chat: { id: 777111 }, from: { id: 777111 }, text: "📊 My Status" } },
+      db: mockDb,
+      storage: null,
+      functionBaseUrl: "https://vidvora-share-bot.onrender.com",
+      playbackSecret: "sec",
+    });
+    assert.equal(r1b.ok, true);
+    assert.equal(r1b.action, "status");
+    const statusCall = apiCalls[apiCalls.length - 1];
+    assert.ok(!statusCall.body.text.includes("Auto-Post Channel"));
+    assert.equal(statusCall.body.reply_markup?.is_persistent, true);
 
     // 2. Click "Edit Header" inline button -> sets pendingInputAction = "set_header"
     const r2 = await handleTelegramUpdate({
