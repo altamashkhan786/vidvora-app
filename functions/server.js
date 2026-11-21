@@ -69,6 +69,8 @@ const {
 const {
   resolveAppDownloadMetadata,
   renderApkDownloadWebsiteHtml,
+  resolveLocalReleaseApkPath,
+  isRemoteApkReachable,
 } = require("./downloadSite");
 
 const dashboardLoginAttempts = new Map();
@@ -1289,6 +1291,37 @@ const server = http.createServer(async (req, res) => {
   if ((req.method === "GET" || req.method === "HEAD") && (pathname === "/download-apk" || pathname === "/download-apk/")) {
     try {
       const meta = await resolveAppDownloadMetadata(db);
+      const localApk = resolveLocalReleaseApkPath();
+      const remoteOk = localApk ? await isRemoteApkReachable(meta.apkUrl) : true;
+      if (!remoteOk && localApk) {
+        const safeFileVer = String(meta.versionName || "1.8").replace(/[^a-zA-Z0-9._-]/g, "");
+        const fileName = safeFileVer ? `VidVora-v${safeFileVer}.apk` : "VidVora.apk";
+        res.writeHead(200, {
+          "Content-Type": "application/vnd.android.package-archive",
+          "Content-Length": String(localApk.size),
+          "Content-Disposition": `attachment; filename="${fileName}"`,
+          "Cache-Control": "public, max-age=300",
+          "X-Content-Type-Options": "nosniff",
+        });
+        if (req.method === "HEAD") {
+          res.end();
+        } else {
+          const stream = fs.createReadStream(localApk.filePath);
+          stream.on("error", (streamErr) => {
+            console.error("Local APK stream error:", streamErr);
+            if (!res.headersSent) {
+              res.writeHead(500, { "Content-Type": "text/plain" });
+            }
+            res.end();
+          });
+          res.on("close", () => {
+            stream.destroy();
+          });
+          stream.pipe(res);
+        }
+        return;
+      }
+
       res.writeHead(302, {
         Location: meta.apkUrl,
         "Cache-Control": "no-store, max-age=0",

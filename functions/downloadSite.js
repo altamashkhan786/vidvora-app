@@ -1,8 +1,61 @@
+const fs = require("fs");
+const path = require("path");
 const { DEFAULT_APK_URL } = require("./sharePreview");
 
-const DEFAULT_APP_VERSION_NAME = "1.7";
-const DEFAULT_APP_VERSION_CODE = 8;
+const DEFAULT_APP_VERSION_NAME = "1.8";
+const DEFAULT_APP_VERSION_CODE = 9;
 const APP_UPDATE_DOC_ID = "appUpdate";
+const REMOTE_APK_PROBE_TTL_MS = 5 * 60 * 1000;
+const remoteApkProbeCache = new Map();
+
+function resolveLocalReleaseApkPath() {
+  const candidates = [
+    path.join(__dirname, "..", "release", "vidvora.apk"),
+    path.join(__dirname, "..", "release", "VidVora.apk"),
+    path.join(__dirname, "release", "vidvora.apk"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      const stat = fs.statSync(candidate);
+      if (stat.isFile() && stat.size > 100_000) {
+        return { filePath: candidate, size: stat.size };
+      }
+    } catch (_) {
+      // Try next candidate
+    }
+  }
+  return null;
+}
+
+async function isRemoteApkReachable(apkUrl, fetchImpl = typeof fetch === "function" ? fetch : null) {
+  const cleanUrl = sanitizeHttpUrl(apkUrl, "");
+  if (!cleanUrl || !fetchImpl) return false;
+
+  const now = Date.now();
+  const cached = remoteApkProbeCache.get(cleanUrl);
+  if (cached && now - cached.checkedAt < REMOTE_APK_PROBE_TTL_MS) {
+    return cached.ok;
+  }
+
+  let ok = false;
+  try {
+    const resp = await fetchImpl(cleanUrl, {
+      method: "HEAD",
+      redirect: "follow",
+      signal: typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(3500) : undefined,
+    });
+    const contentType = String(resp.headers?.get?.("content-type") || "").toLowerCase();
+    ok = Boolean(resp && resp.ok && !contentType.includes("xml") && !contentType.includes("text/html"));
+  } catch (_) {
+    ok = false;
+  }
+
+  if (remoteApkProbeCache.size > 20) {
+    remoteApkProbeCache.clear();
+  }
+  remoteApkProbeCache.set(cleanUrl, { ok, checkedAt: now });
+  return ok;
+}
 
 function escapeHtml(value) {
   return String(value == null ? "" : value)
@@ -41,7 +94,7 @@ async function resolveAppDownloadMetadata(db) {
         const dbVerName = String(data.latestVersionName || "").trim();
         const dbVerCode = Number(data.latestVersionCode);
         const dbApkUrl = sanitizeHttpUrl(data.apkUrl, "");
-        const dbNotes = String(data.releaseNotes || data.updateMessage || "").trim();
+        const dbNotes = String(data.releaseNotes || data.message || data.updateMessage || "").trim();
         if (dbVerName) versionName = dbVerName.slice(0, 24);
         if (Number.isFinite(dbVerCode) && dbVerCode >= 1) versionCode = Math.floor(dbVerCode);
         if (dbApkUrl) apkUrl = dbApkUrl;
@@ -843,7 +896,7 @@ function renderApkDownloadWebsiteHtml({
         </div>
 
         <div id="downloadStartedBanner" class="download-banner">
-          <strong>Download shuru ho gaya hai!</strong> Download complete hone par notification me <code>vidvora.apk</code> tap karein aur <strong>Install</strong> dabayein. Agar download start nahi hua toh <a href="${escapeHtml(safeDirectApkUrl)}" style="color:#fff;text-decoration:underline;font-weight:700;">yahan direct link tap karein</a>.
+          <strong>Download shuru ho gaya hai!</strong> Download complete hone par notification me <code>vidvora.apk</code> tap karein aur <strong>Install</strong> dabayein. Agar download start nahi hua toh <a href="/download-apk" style="color:#fff;text-decoration:underline;font-weight:700;">yahan dobara tap karein</a>.
         </div>
       </div>
 
@@ -1086,6 +1139,8 @@ module.exports = {
   DEFAULT_APP_VERSION_NAME,
   DEFAULT_APP_VERSION_CODE,
   sanitizeHttpUrl,
+  resolveLocalReleaseApkPath,
+  isRemoteApkReachable,
   resolveAppDownloadMetadata,
   renderApkDownloadWebsiteHtml,
 };

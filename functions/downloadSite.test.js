@@ -5,6 +5,8 @@ const {
   DEFAULT_APP_VERSION_NAME,
   DEFAULT_APP_VERSION_CODE,
   sanitizeHttpUrl,
+  resolveLocalReleaseApkPath,
+  isRemoteApkReachable,
   resolveAppDownloadMetadata,
   renderApkDownloadWebsiteHtml,
 } = require("./downloadSite");
@@ -54,7 +56,7 @@ test("resolveAppDownloadMetadata reads appConfig/appUpdate dynamically and guard
               latestVersionName: "2.1",
               latestVersionCode: 12,
               apkUrl: "https://cdn.vidvora.app/releases/vidvora-2.1.apk",
-              releaseNotes: "- Faster HD startup\n- Bug fixes",
+              message: "- Faster HD startup\n- Bug fixes",
             }),
           };
         },
@@ -85,6 +87,27 @@ test("resolveAppDownloadMetadata reads appConfig/appUpdate dynamically and guard
   const safeMeta = await resolveAppDownloadMetadata(mockUnsafeUrlDb);
   assert.equal(safeMeta.versionName, "2.2");
   assert.equal(safeMeta.apkUrl, DEFAULT_APK_URL);
+});
+
+test("resolveLocalReleaseApkPath finds bundled release/vidvora.apk and isRemoteApkReachable detects AccessDenied", async () => {
+  const localApk = resolveLocalReleaseApkPath();
+  assert.ok(localApk, "expected release/vidvora.apk to exist");
+  assert.match(localApk.filePath, /release\/vidvora\.apk$/);
+  assert.ok(localApk.size > 1_000_000);
+
+  const denied = await isRemoteApkReachable("https://denied.example.com/vidvora.apk", async () => ({
+    ok: false,
+    status: 403,
+    headers: new Map([["content-type", "application/xml"]]),
+  }));
+  assert.equal(denied, false);
+
+  const okBinary = await isRemoteApkReachable("https://ok.example.com/vidvora.apk", async () => ({
+    ok: true,
+    status: 200,
+    headers: new Map([["content-type", "application/vnd.android.package-archive"]]),
+  }));
+  assert.equal(okBinary, true);
 });
 
 test("renderApkDownloadWebsiteHtml renders valid HTML, escapes XSS, and compiles inline JS", () => {
